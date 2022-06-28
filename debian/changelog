@@ -1,3 +1,10 @@
+android-platform-tools (29.0.6-19~bpo11+1) bullseye-backports; urgency=medium
+
+  * Team upload.
+  * Rebuild for bullseye-backports.
+
+ -- Roger Shimizu <rosh@debian.org>  Tue, 28 Jun 2022 21:41:58 +0900
+
 android-platform-tools (29.0.6-19) unstable; urgency=medium
 
   * Team upload.
