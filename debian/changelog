@@ -1,3 +1,12 @@
+android-platform-tools (29.0.6-20) unstable; urgency=medium
+
+  * Team upload.
+  * debian/system/core/fastboot.mk:
+    - Add usb-1.0 as lib dependency to linker (Closes: #1012892).
+  * debian/rules: Sync with ubuntu that ignoring error from dh_dwz.
+
+ -- Roger Shimizu <rosh@debian.org>  Fri, 29 Jul 2022 01:01:55 +0900
+
 android-platform-tools (29.0.6-19~bpo11+1) bullseye-backports; urgency=medium
 
   * Team upload.

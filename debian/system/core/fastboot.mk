@@ -56,6 +56,7 @@ LDFLAGS += \
   -lcutils \
   -lpthread \
   -lsparse \
+  -lusb-1.0 \
   -lziparchive \
   -pie \
 

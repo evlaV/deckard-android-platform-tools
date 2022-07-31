@@ -205,3 +205,6 @@ override_dh_gencontrol:
 	dh_gencontrol -pandroid-sdk-libsparse-utils -- -v1:$(DEB_VERSION)
 	dh_gencontrol -pfastboot -- -v1:$(DEB_VERSION)
 	dh_gencontrol -pmkbootimg -- -v1:$(DEB_VERSION)
+
+override_dh_dwz:
+	dh_dwz || true
