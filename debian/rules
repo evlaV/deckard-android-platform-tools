@@ -4,10 +4,10 @@ include /usr/share/dpkg/architecture.mk
 include /usr/share/dpkg/pkg-info.mk
 
 ## Security Hardening
-export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all optimize=-lto
 # https://android.googlesource.com/platform/build/soong/+/refs/tags/platform-tools-29.0.6/cc/config/global.go#121
-export DEB_CFLAGS_MAINT_APPEND = -fPIC
-export DEB_CXXFLAGS_MAINT_APPEND = -fPIC
+export DEB_CFLAGS_MAINT_APPEND = -fPIC -gdwarf-4
+export DEB_CXXFLAGS_MAINT_APPEND = -fPIC -gdwarf-4
 export DEB_LDFLAGS_MAINT_APPEND = -fPIC
 export DEB_CPPFLAGS_MAINT_APPEND = -DNDEBUG -UDEBUG \
   -fmessage-length=0 \
@@ -96,7 +96,7 @@ COMPONENTS = \
 
 # Whatever depends on BoringSSL must be disabled on MIPS
 NON_MIPS_COMPONENTS = s/core/adb s/core/fastboot
-ifneq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el,$(DEB_HOST_ARCH)),)
+ifneq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el ppc64el,$(DEB_HOST_ARCH)),)
   COMPONENTS += $(NON_MIPS_COMPONENTS)
 endif
 
@@ -113,7 +113,7 @@ COMPONENTS_ANY_ARCH = \
   s/core/simg2img \
   s/core/simg2simg \
 
-ifeq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el,$(DEB_HOST_ARCH)),)
+ifeq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el ppc64el,$(DEB_HOST_ARCH)),)
   COMPONENTS := $(filter $(COMPONENTS_ANY_ARCH), $(COMPONENTS))
 endif
 
@@ -169,7 +169,7 @@ override_dh_auto_build-arch: $(COMPONENTS)
 ifeq (,$(findstring nocheck, $(DEB_BUILD_OPTIONS)))
 override_dh_auto_test-arch:
 	debian/out/development/etc1tool development/tools/templates/ic_launcher_ldpi.png --encode && debian/out/development/etc1tool development/tools/templates/ic_launcher_ldpi.pkm --decode
-ifneq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el,$(DEB_HOST_ARCH)),)
+ifneq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el ppc64el,$(DEB_HOST_ARCH)),)
 	LD_LIBRARY_PATH=debian/out/system/core debian/out/system/core/adb version
 	LD_LIBRARY_PATH=debian/out/system/core debian/out/system/core/adb help
 	LD_LIBRARY_PATH=debian/out/system/core debian/out/system/core/adb keygen key.txt && ls -l key.txt* && rm key.txt*
@@ -201,10 +201,8 @@ override_dh_gencontrol:
 	dh_gencontrol -pandroid-libutils-dev -- -v1:$(DEB_VERSION)
 	dh_gencontrol -pandroid-libziparchive -- -v1:$(DEB_VERSION)
 	dh_gencontrol -pandroid-libziparchive-dev -- -v1:$(DEB_VERSION)
+	dh_gencontrol -pandroid-platform-frameworks-native-headers -- -v1:$(DEB_VERSION)
 	dh_gencontrol -pandroid-platform-system-core-headers -- -v1:$(DEB_VERSION)
 	dh_gencontrol -pandroid-sdk-libsparse-utils -- -v1:$(DEB_VERSION)
 	dh_gencontrol -pfastboot -- -v1:$(DEB_VERSION)
 	dh_gencontrol -pmkbootimg -- -v1:$(DEB_VERSION)
-
-override_dh_dwz:
-	dh_dwz || true

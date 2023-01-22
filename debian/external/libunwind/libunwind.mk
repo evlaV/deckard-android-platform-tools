@@ -69,6 +69,7 @@ mips_INCLUDES = -Iexternal/libunwind/include/tdep-mips
 mips64_INCLUDES = $(mips_INCLUDES)
 x86_INCLUDES = -Iexternal/libunwind/include/tdep-x86
 x86_64_INCLUDES = -Iexternal/libunwind/include/tdep-x86_64
+ppc64_INCLUDES = -Iexternal/libunwind/include/tdep-ppc64
 
 SOURCES = \
   src/mi/init.c \

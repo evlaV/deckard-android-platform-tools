@@ -1,3 +1,28 @@
+android-platform-tools (29.0.6-23) unstable; urgency=medium
+
+  * Fix CVE-2022-20128 and CVE-2022-3168
+  * debian/source/lintian-overrides: Fix lintian.
+  * Apply multi-arch hints
+  * Sync with experimental to support adb and fastboot on ppc64el.
+
+ -- Roger Shimizu <rosh@debian.org>  Fri, 20 Jan 2023 00:36:41 -0800
+
+android-platform-tools (29.0.6-22) unstable; urgency=medium
+
+  * Team upload.
+  * Add patch to fix FTBFS (Closes: #1027653)
+
+ -- Jochen Sprickerhof <jspricke@debian.org>  Wed, 11 Jan 2023 09:19:44 +0100
+
+android-platform-tools (29.0.6-21) unstable; urgency=medium
+
+  * Team upload.
+  * debian/{control,rules}: Sync with debian/exp branch.
+  * debian/rules: Export gdwarf-4 instead of ignoring dwz
+    (Closes: #1016468, #1015355).
+
+ -- Roger Shimizu <rosh@debian.org>  Wed, 03 Aug 2022 00:23:27 +0900
+
 android-platform-tools (29.0.6-20~bpo11+1) bullseye-backports; urgency=medium
 
   * Team upload.

@@ -21,3 +21,6 @@ endif
 ifeq ($(DEB_HOST_ARCH), mips64el)
   CPU = mips64
 endif
+ifeq ($(DEB_HOST_ARCH), ppc64el)
+  CPU = ppc64
+endif
