@@ -50,10 +50,10 @@ LDFLAGS += \
   -L/usr/lib/$(DEB_HOST_MULTIARCH)/android \
   -Ldebian/out/system/core \
   -Wl,-rpath=/usr/lib/$(DEB_HOST_MULTIARCH)/android \
-  -fuse-ld=gold \
   -lbase \
   -lcrypto \
   -lcutils \
+  -llog \
   -lpthread \
   -lsparse \
   -lusb-1.0 \

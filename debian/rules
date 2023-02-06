@@ -15,11 +15,13 @@ export DEB_CPPFLAGS_MAINT_APPEND = -DNDEBUG -UDEBUG \
   -fno-strict-aliasing \
   -no-canonical-prefixes \
 
+ifneq (, $(shell which lld))
+  export DEB_LDFLAGS_MAINT_APPEND += -fuse-ld=lld -Wl,--build-id=sha1
+endif
+
 ## For get-orig-source
 export DEB_SOURCE
 export DEB_VERSION_UPSTREAM
-
-export DEB_HOST_MULTIARCH
 
 ## system/core
 export DEB_HOST_MULTIARCH
@@ -52,9 +54,13 @@ s/core/lib%.so: debian/system/core/lib%.mk
 	dh_auto_build --buildsystem=makefile -- --file=$<
 
 debian/manpages/system/core/%.1: debian/manpages/system/core/%.1.md
+ifneq (, $(shell which pandoc))
 	pandoc --standalone --from=markdown-smart --to=man --output=$@ $<
+else
+	ronn -r $<
+endif
 
-s/core/libbacktrace.so: debian/system/core/libbacktrace.mk s/core/libbase.so e/libunwind/libunwind.a
+s/core/libbacktrace.so: debian/system/core/libbacktrace.mk s/core/libbase.so
 	dh_auto_build --buildsystem=makefile -- --file=$<
 
 s/core/libbase.so: debian/system/core/libbase.mk s/core/liblog.so
@@ -96,7 +102,7 @@ COMPONENTS = \
 
 # Whatever depends on BoringSSL must be disabled on MIPS
 NON_MIPS_COMPONENTS = s/core/adb s/core/fastboot
-ifneq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el ppc64el,$(DEB_HOST_ARCH)),)
+ifneq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el ppc64el riscv64,$(DEB_HOST_ARCH)),)
   COMPONENTS += $(NON_MIPS_COMPONENTS)
 endif
 
@@ -113,14 +119,18 @@ COMPONENTS_ANY_ARCH = \
   s/core/simg2img \
   s/core/simg2simg \
 
-ifeq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el ppc64el,$(DEB_HOST_ARCH)),)
+ifeq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el ppc64el riscv64,$(DEB_HOST_ARCH)),)
   COMPONENTS := $(filter $(COMPONENTS_ANY_ARCH), $(COMPONENTS))
 endif
 
 ## development
 
 debian/manpages/development/%.1: debian/manpages/development/%.1.md
+ifneq (, $(shell which pandoc))
 	pandoc --standalone --from=markdown-smart --to=man --output=$@ $<
+else
+	ronn -r $<
+endif
 
 development/etc1tool: debian/development/etc1tool.mk debian/manpages/development/etc1tool.1 f/native/libETC1.a
 	dh_auto_build --buildsystem=makefile -- --file=$<
@@ -133,17 +143,6 @@ f/native/libETC1.a: debian/frameworks/native/libETC1.mk
 	dh_auto_build --buildsystem=makefile -- --file=$<
 
 COMPONENTS += f/native/libETC1.a
-
-## external/libunwind
-
-e/libunwind/libunwind.a: debian/external/libunwind/libunwind.mk
-	dh_auto_build --buildsystem=makefile -- --file=$<
-
-ifneq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el,$(DEB_HOST_ARCH)),)
-COMPONENTS += \
-  e/libunwind/libunwind.a \
-
-endif
 
 ## system/extras
 
@@ -169,7 +168,7 @@ override_dh_auto_build-arch: $(COMPONENTS)
 ifeq (,$(findstring nocheck, $(DEB_BUILD_OPTIONS)))
 override_dh_auto_test-arch:
 	debian/out/development/etc1tool development/tools/templates/ic_launcher_ldpi.png --encode && debian/out/development/etc1tool development/tools/templates/ic_launcher_ldpi.pkm --decode
-ifneq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el ppc64el,$(DEB_HOST_ARCH)),)
+ifneq ($(filter amd64 i386 armel armhf arm64 mipsel mips64el ppc64el riscv64,$(DEB_HOST_ARCH)),)
 	LD_LIBRARY_PATH=debian/out/system/core debian/out/system/core/adb version
 	LD_LIBRARY_PATH=debian/out/system/core debian/out/system/core/adb help
 	LD_LIBRARY_PATH=debian/out/system/core debian/out/system/core/adb keygen key.txt && ls -l key.txt* && rm key.txt*
@@ -182,7 +181,7 @@ override_dh_auto_install:
 	echo ignore upstream build system install procedure
 
 override_dh_auto_configure-arch:
-	rm -rf external/boringssl external/selinux development/[a-s]* development/v* development/testrunner art
+	rm -rf external/boringssl external/libunwind external/selinux development/[a-s]* development/v* development/testrunner art
 
 override_dh_gencontrol:
 	dh_gencontrol

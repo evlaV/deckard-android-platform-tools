@@ -1,3 +1,33 @@
+android-platform-tools (29.0.6-26) unstable; urgency=medium
+
+  * Team upload.
+  * debian/control: Another try to fix pandoc/ronn.
+
+ -- Roger Shimizu <rosh@debian.org>  Mon, 30 Jan 2023 23:58:29 -0800
+
+android-platform-tools (29.0.6-25) unstable; urgency=medium
+
+  * Team upload.
+  * debian/control: Fix lld on B-D.
+  * debian/control: Separate pandoc and ronn on B-D.
+  * debian/control: Fix ftbfs on powerpc due to clang.
+  * debian/libbacktrace.mk: Add RegsRiscv64.cpp into build.
+  * debian/lintian-overrides: Add
+    package-has-unnecessary-activation-of-ldconfig-trigger.
+
+ -- Roger Shimizu <rosh@debian.org>  Thu, 26 Jan 2023 21:43:52 -0800
+
+android-platform-tools (29.0.6-24) unstable; urgency=medium
+
+  * Team upload.
+  * Remove external/libunwind dependency which is actually not used.
+  * Enable riscv64 adb/fastboot.
+  * debian/patches: Update riscv64 patch to fix FTBFS issue.
+  * Use lld when possible except riscv64.
+  * Use ronn to make manpages when pandoc is not available.
+
+ -- Roger Shimizu <rosh@debian.org>  Wed, 25 Jan 2023 23:29:05 -0800
+
 android-platform-tools (29.0.6-23~bpo11+1) bullseye-backports; urgency=medium
 
   * Rebuild for bullseye-backports.

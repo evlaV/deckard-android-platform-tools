@@ -36,6 +36,7 @@ libunwindstack_SOURCES := \
   RegsX86_64.cpp \
   RegsMips.cpp \
   RegsMips64.cpp \
+  RegsRiscv64.cpp \
   Unwinder.cpp \
   Symbols.cpp \
 
@@ -86,7 +87,7 @@ ifneq ($(filter armel mipsel,$(DEB_HOST_ARCH)),)
   LDFLAGS += -latomic
 endif
 
-build: $(OBJECTS_CXX) $(OBJECTS_ASSEMBLY) debian/out/external/libunwind/libunwind.a
+build: $(OBJECTS_CXX) $(OBJECTS_ASSEMBLY)
 	mkdir -p debian/out/system/core
 	$(CXX) $^ -o debian/out/system/core/$(NAME).so.0 $(LDFLAGS)
 	ln -sf $(NAME).so.0 debian/out/system/core/$(NAME).so

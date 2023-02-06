@@ -1,7 +1,3 @@
-external/selinux/Fix-header-path.patch
-external/libunwind/user_pt_regs.patch
-external/libunwind/legacy_built-in_sync_functions.patch
-external/libunwind/20150704-CVE-2015-3239_dwarf_i.h.patch
 libnativehelper/add-missing-headers.patch
 system/core/move-log-file-to-proper-dir.patch
 system/core/Added-missing-headers.patch
@@ -18,6 +14,7 @@ system/core/add-missing-headers.patch
 system/core/hard-code-build-number.patch
 system/core/stub-out-fastdeploy.patch
 system/core/fix-standard-namespace-errors.patch
+system/core/Add-riscv64-support.patch
 system/Fix-shebang-of-python-script.patch
 system/Fix-include-path.patch
 system/unwindstack-porting.patch

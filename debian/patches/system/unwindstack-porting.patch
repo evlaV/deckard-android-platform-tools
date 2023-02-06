@@ -2,8 +2,8 @@ Description: unwindstack porting
 Forwarded: not-needed
 --- a/system/core/libunwindstack/include/unwindstack/RegsGetLocal.h
 +++ b/system/core/libunwindstack/include/unwindstack/RegsGetLocal.h
-@@ -81,7 +81,7 @@ inline __attribute__((__always_inline__)) void AsmGetRegs(void* reg_data) {
-       : "x12", "x13", "memory");
+@@ -124,7 +124,7 @@ inline __attribute__((__always_inline__)) void AsmGetRegs(void* reg_data) {
+       : "t1", "memory");
  }
  
 -#elif defined(__i386__) || defined(__x86_64__) || defined(__mips__)
