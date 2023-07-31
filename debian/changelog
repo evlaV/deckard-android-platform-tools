@@ -1,3 +1,10 @@
+android-platform-tools (33.0.3-2~bpo11+1) bullseye-backports-sloppy; urgency=medium
+
+  * Rebuild for bullseye-backports-sloppy.
+  * debian/patches: Add patches to fix ftbfs for old compiler.
+
+ -- Roger Shimizu <rosh@debian.org>  Sun, 30 Jul 2023 23:43:26 -0700
+
 android-platform-tools (33.0.3-2~bpo12+1) bookworm-backports; urgency=medium
 
   * Rebuild for bullseye-backports.
