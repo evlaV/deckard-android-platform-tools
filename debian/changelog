@@ -1,3 +1,11 @@
+android-platform-tools (33.0.3-2~bpo12+1) bookworm-backports; urgency=medium
+
+  * Rebuild for bullseye-backports.
+  * debian/include:
+    - Remove local chrono header, which was for gcc-13.
+
+ -- Roger Shimizu <rosh@debian.org>  Sun, 30 Jul 2023 22:18:16 -0700
+
 android-platform-tools (33.0.3-2) unstable; urgency=medium
 
   * Upload to unstable.
