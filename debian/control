@@ -12,6 +12,7 @@ Build-Depends-Arch:
  android-libboringssl-dev (>= 12) [amd64 i386 armel armhf arm64 mipsel mips64el ppc64el riscv64],
  clang [amd64 i386 armel armhf arm64 mipsel mips64el ppc64el s390x ppc64 sparc64 riscv64],
  libbrotli-dev [amd64 i386 armel armhf arm64 mipsel mips64el ppc64el riscv64],
+ libfmt-dev (<< 9) [amd64 i386 armel armhf arm64 mipsel mips64el ppc64el riscv64],
  libgtest-dev,
  liblz4-dev [amd64 i386 armel armhf arm64 mipsel mips64el ppc64el riscv64],
  libpng-dev,

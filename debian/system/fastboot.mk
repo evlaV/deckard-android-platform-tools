@@ -32,7 +32,6 @@ CPPFLAGS += \
   -D_FILE_OFFSET_BITS=64 \
   -DPLATFORM_TOOLS_VERSION='"$(PLATFORM_TOOLS_VERSION)"' \
   -Iexternal/avb \
-  -Iexternal/fmtlib/include \
   -Ipackages/modules/adb \
   -Isystem/core/demangle/include \
   -Isystem/core/diagnose_usb/include \
@@ -57,6 +56,7 @@ LDFLAGS += \
   -lbase \
   -lcrypto \
   -lcutils \
+  -lfmt \
   -llog \
   -lpthread \
   -lprotobuf \

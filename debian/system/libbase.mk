@@ -20,12 +20,9 @@ SOURCES = \
   \
   errors_unix.cpp
 
-SOURCES_fmtlib = \
-  src/format.cc \
-
 SOURCES := \
   $(foreach source, $(SOURCES), system/libbase/$(source)) \
-  $(foreach source, $(SOURCES_fmtlib), external/fmtlib/$(source))
+
 SOURCES_CC = $(filter %.cc,$(SOURCES))
 OBJECTS_CC = $(SOURCES_CC:.cc=.o)
 SOURCES_CPP = $(filter %.cpp,$(SOURCES))
@@ -34,7 +31,6 @@ OBJECTS_CPP = $(SOURCES_CPP:.cpp=.o)
 CXXFLAGS += -std=gnu++2a
 CPPFLAGS += \
   -D_FILE_OFFSET_BITS=64 \
-  -Iexternal/fmtlib/include \
   -Isystem/core/include \
   -Isystem/libbase/include \
   -Isystem/logging/liblog/include \
