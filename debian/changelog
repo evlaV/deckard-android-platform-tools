@@ -1,3 +1,9 @@
+android-platform-tools (33.0.3-2~bpo11+2) bullseye-backports-sloppy; urgency=medium
+
+  * Use system's libfmt-dev instead of local copy under external folder.
+
+ -- Roger Shimizu <rosh@debian.org>  Tue, 05 Sep 2023 00:08:49 -0700
+
 android-platform-tools (33.0.3-2~bpo11+1) bullseye-backports-sloppy; urgency=medium
 
   * Rebuild for bullseye-backports-sloppy.
