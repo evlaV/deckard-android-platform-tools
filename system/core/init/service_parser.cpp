@@ -25,6 +25,7 @@
 
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
+#include <android-base/properties.h>
 #include <android-base/strings.h>
 #include <hidl-util/FQName.h>
 #include <processgroup/processgroup.h>
@@ -148,6 +149,11 @@ Result<void> ServiceParser::ParseEnterNamespace(std::vector<std::string>&& args)
     // present. Therefore, they also require mount namespaces.
     service_->namespaces_.flags |= CLONE_NEWNS;
     service_->namespaces_.namespaces_to_enter.emplace_back(CLONE_NEWNET, std::move(args[2]));
+    return {};
+}
+
+Result<void> ServiceParser::ParseGentleKill(std::vector<std::string>&& args) {
+    service_->flags_ |= SVC_GENTLE_KILL;
     return {};
 }
 
@@ -364,8 +370,8 @@ Result<void> ServiceParser::ParseRebootOnFailure(std::vector<std::string>&& args
 
 Result<void> ServiceParser::ParseRestartPeriod(std::vector<std::string>&& args) {
     int period;
-    if (!ParseInt(args[1], &period, 5)) {
-        return Error() << "restart_period value must be an integer >= 5";
+    if (!ParseInt(args[1], &period, 0)) {
+        return Error() << "restart_period value must be an integer >= 0";
     }
     service_->restart_period_ = std::chrono::seconds(period);
     return {};
@@ -434,11 +440,14 @@ Result<void> ServiceParser::ParseSocket(std::vector<std::string>&& args) {
                        << "' instead.";
     }
 
-    if (types.size() > 1) {
-        if (types.size() == 2 && types[1] == "passcred") {
+    for (size_t i = 1; i < types.size(); i++) {
+        if (types[i] == "passcred") {
             socket.passcred = true;
+        } else if (types[i] == "listen") {
+            socket.listen = true;
         } else {
-            return Error() << "Only 'passcred' may be used to modify the socket type";
+            return Error() << "Unknown socket type decoration '" << types[i]
+                           << "'. Known values are ['passcred', 'listen']";
         }
     }
 
@@ -526,7 +535,7 @@ Result<void> ServiceParser::ParseUser(std::vector<std::string>&& args) {
     if (!uid.ok()) {
         return Error() << "Unable to find UID for '" << args[1] << "': " << uid.error();
     }
-    service_->proc_attr_.uid = *uid;
+    service_->proc_attr_.parsed_uid = *uid;
     return {};
 }
 
@@ -581,6 +590,7 @@ const KeywordMap<ServiceParser::OptionParser>& ServiceParser::GetParserMap() con
         {"disabled",                {0,     0,    &ServiceParser::ParseDisabled}},
         {"enter_namespace",         {2,     2,    &ServiceParser::ParseEnterNamespace}},
         {"file",                    {2,     2,    &ServiceParser::ParseFile}},
+        {"gentle_kill",             {0,     0,    &ServiceParser::ParseGentleKill}},
         {"group",                   {1,     NR_SVC_SUPP_GIDS + 1, &ServiceParser::ParseGroup}},
         {"interface",               {2,     2,    &ServiceParser::ParseInterface}},
         {"ioprio",                  {2,     2,    &ServiceParser::ParseIoprio}},
@@ -666,6 +676,16 @@ Result<void> ServiceParser::ParseLineSection(std::vector<std::string>&& args, in
 Result<void> ServiceParser::EndSection() {
     if (!service_) {
         return {};
+    }
+
+    if (service_->proc_attr_.parsed_uid == std::nullopt) {
+        if (android::base::GetIntProperty("ro.vendor.api_level", 0) > __ANDROID_API_U__) {
+            return Error() << "No user specified for service '" << service_->name()
+                           << "'. Defaults to root.";
+        } else {
+            LOG(WARNING) << "No user specified for service '" << service_->name()
+                         << "'. Defaults to root.";
+        }
     }
 
     if (interface_inheritance_hierarchy_) {

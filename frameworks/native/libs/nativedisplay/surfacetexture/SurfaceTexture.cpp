@@ -26,10 +26,10 @@
 namespace android {
 
 // Macros for including the SurfaceTexture name in log messages
-#define SFT_LOGV(x, ...) ALOGV("[%s] " x, mName.string(), ##__VA_ARGS__)
-#define SFT_LOGD(x, ...) ALOGD("[%s] " x, mName.string(), ##__VA_ARGS__)
-#define SFT_LOGW(x, ...) ALOGW("[%s] " x, mName.string(), ##__VA_ARGS__)
-#define SFT_LOGE(x, ...) ALOGE("[%s] " x, mName.string(), ##__VA_ARGS__)
+#define SFT_LOGV(x, ...) ALOGV("[%s] " x, mName.c_str(), ##__VA_ARGS__)
+#define SFT_LOGD(x, ...) ALOGD("[%s] " x, mName.c_str(), ##__VA_ARGS__)
+#define SFT_LOGW(x, ...) ALOGW("[%s] " x, mName.c_str(), ##__VA_ARGS__)
+#define SFT_LOGE(x, ...) ALOGE("[%s] " x, mName.c_str(), ##__VA_ARGS__)
 
 static const mat4 mtxIdentity;
 
@@ -464,10 +464,12 @@ void SurfaceTexture::dumpLocked(String8& result, const char* prefix) const {
 }
 
 sp<GraphicBuffer> SurfaceTexture::dequeueBuffer(int* outSlotid, android_dataspace* outDataspace,
-                                                float* outTransformMatrix, bool* outQueueEmpty,
+                                                HdrMetadata* outHdrMetadata,
+                                                float* outTransformMatrix, uint32_t* outTransform,
+                                                bool* outQueueEmpty,
                                                 SurfaceTexture_createReleaseFence createFence,
                                                 SurfaceTexture_fenceWait fenceWait,
-                                                void* fencePassThroughHandle) {
+                                                void* fencePassThroughHandle, ARect* currentCrop) {
     Mutex::Autolock _l(mMutex);
     sp<GraphicBuffer> buffer;
 
@@ -481,9 +483,11 @@ sp<GraphicBuffer> SurfaceTexture::dequeueBuffer(int* outSlotid, android_dataspac
         return buffer;
     }
 
-    buffer = mImageConsumer.dequeueBuffer(outSlotid, outDataspace, outQueueEmpty, *this,
-                                          createFence, fenceWait, fencePassThroughHandle);
+    buffer = mImageConsumer.dequeueBuffer(outSlotid, outDataspace, outHdrMetadata, outQueueEmpty,
+                                          *this, createFence, fenceWait, fencePassThroughHandle);
     memcpy(outTransformMatrix, mCurrentTransformMatrix, sizeof(mCurrentTransformMatrix));
+    *outTransform = mCurrentTransform;
+    *currentCrop = mCurrentCrop;
     return buffer;
 }
 

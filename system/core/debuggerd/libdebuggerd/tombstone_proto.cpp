@@ -70,6 +70,9 @@
 
 using android::base::StringPrintf;
 
+// The maximum number of messages to save in the protobuf per file.
+static constexpr size_t kMaxLogMessages = 500;
+
 // Use the demangler from libc++.
 extern "C" char* __cxa_demangle(const char*, char*, size_t*, int* status);
 
@@ -82,6 +85,8 @@ static Architecture get_arch() {
   return Architecture::X86;
 #elif defined(__x86_64__)
   return Architecture::X86_64;
+#elif defined(__riscv) && (__riscv_xlen == 64)
+  return Architecture::RISCV64;
 #else
 #error Unknown architecture!
 #endif
@@ -488,27 +493,48 @@ static void dump_mappings(Tombstone* tombstone, unwindstack::Maps* maps,
   }
 }
 
+// This creates a fake log message that indicates an error occurred when
+// reading the log.
+static void add_error_log_msg(Tombstone* tombstone, const std::string&& error_msg) {
+  LogBuffer buffer;
+  buffer.set_name("ERROR");
+
+  LogMessage* log_msg = buffer.add_logs();
+  log_msg->set_timestamp("00-00 00:00:00.000");
+  log_msg->set_pid(0);
+  log_msg->set_tid(0);
+  log_msg->set_priority(ANDROID_LOG_ERROR);
+  log_msg->set_tag("");
+  log_msg->set_message(error_msg);
+
+  *tombstone->add_log_buffers() = std::move(buffer);
+
+  async_safe_format_log(ANDROID_LOG_ERROR, LOG_TAG, "%s", error_msg.c_str());
+}
+
 static void dump_log_file(Tombstone* tombstone, const char* logger, pid_t pid) {
-  logger_list* logger_list =
-      android_logger_list_open(android_name_to_log_id(logger), ANDROID_LOG_NONBLOCK, 0, pid);
+  logger_list* logger_list = android_logger_list_open(android_name_to_log_id(logger),
+                                                      ANDROID_LOG_NONBLOCK, kMaxLogMessages, pid);
+  if (logger_list == nullptr) {
+    add_error_log_msg(tombstone, android::base::StringPrintf("Cannot open log file %s", logger));
+    return;
+  }
 
   LogBuffer buffer;
-
   while (true) {
     log_msg log_entry;
     ssize_t actual = android_logger_list_read(logger_list, &log_entry);
-
     if (actual < 0) {
       if (actual == -EINTR) {
         // interrupted by signal, retry
         continue;
       }
-      if (actual == -EAGAIN) {
-        // non-blocking EOF; we're done
-        break;
-      } else {
-        break;
+      // Don't consider EAGAIN an error since this is a non-blocking call.
+      if (actual != -EAGAIN) {
+        add_error_log_msg(tombstone, android::base::StringPrintf("reading log %s failed (%s)",
+                                                                 logger, strerror(-actual)));
       }
+      break;
     } else if (actual == 0) {
       break;
     }
@@ -688,7 +714,14 @@ void engrave_tombstone_proto(Tombstone* tombstone, unwindstack::AndroidUnwinder*
 
   // Only dump logs on debuggable devices.
   if (android::base::GetBoolProperty("ro.debuggable", false)) {
-    dump_logcat(&result, main_thread.pid);
+    // Get the thread that corresponds to the main pid of the process.
+    const ThreadInfo& thread = threads.at(main_thread.pid);
+
+    // Do not attempt to dump logs of the logd process because the gathering
+    // of logs can hang until a timeout occurs.
+    if (thread.thread_name != "logd") {
+      dump_logcat(&result, main_thread.pid);
+    }
   }
 
   dump_open_fds(&result, open_files);

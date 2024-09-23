@@ -16,10 +16,8 @@
 
 #define LOG_TAG "KeyLayoutMap"
 
-#include <stdlib.h>
-
 #include <android/keycodes.h>
-#include <ftl/NamedEnum.h>
+#include <ftl/enum.h>
 #include <input/InputEventLabels.h>
 #include <input/KeyLayoutMap.h>
 #include <input/Keyboard.h>
@@ -27,8 +25,10 @@
 #include <utils/Errors.h>
 #include <utils/Timers.h>
 #include <utils/Tokenizer.h>
+#if defined(__ANDROID__)
 #include <vintf/RuntimeInfo.h>
 #include <vintf/VintfObject.h>
+#endif
 
 #include <cstdlib>
 #include <string_view>
@@ -52,30 +52,36 @@ const bool DEBUG_MAPPING =
         __android_log_is_loggable(ANDROID_LOG_DEBUG, LOG_TAG "Mapping", ANDROID_LOG_INFO);
 
 namespace android {
+namespace {
 
-static const char* WHITESPACE = " \t\r";
+constexpr const char* WHITESPACE = " \t\r";
 
-#define SENSOR_ENTRY(type) NamedEnum::string(type), type
-static const std::unordered_map<std::string, InputDeviceSensorType> SENSOR_LIST =
-        {{SENSOR_ENTRY(InputDeviceSensorType::ACCELEROMETER)},
-         {SENSOR_ENTRY(InputDeviceSensorType::MAGNETIC_FIELD)},
-         {SENSOR_ENTRY(InputDeviceSensorType::ORIENTATION)},
-         {SENSOR_ENTRY(InputDeviceSensorType::GYROSCOPE)},
-         {SENSOR_ENTRY(InputDeviceSensorType::LIGHT)},
-         {SENSOR_ENTRY(InputDeviceSensorType::PRESSURE)},
-         {SENSOR_ENTRY(InputDeviceSensorType::TEMPERATURE)},
-         {SENSOR_ENTRY(InputDeviceSensorType::PROXIMITY)},
-         {SENSOR_ENTRY(InputDeviceSensorType::GRAVITY)},
-         {SENSOR_ENTRY(InputDeviceSensorType::LINEAR_ACCELERATION)},
-         {SENSOR_ENTRY(InputDeviceSensorType::ROTATION_VECTOR)},
-         {SENSOR_ENTRY(InputDeviceSensorType::RELATIVE_HUMIDITY)},
-         {SENSOR_ENTRY(InputDeviceSensorType::AMBIENT_TEMPERATURE)},
-         {SENSOR_ENTRY(InputDeviceSensorType::MAGNETIC_FIELD_UNCALIBRATED)},
-         {SENSOR_ENTRY(InputDeviceSensorType::GAME_ROTATION_VECTOR)},
-         {SENSOR_ENTRY(InputDeviceSensorType::GYROSCOPE_UNCALIBRATED)},
-         {SENSOR_ENTRY(InputDeviceSensorType::SIGNIFICANT_MOTION)}};
+template <InputDeviceSensorType S>
+constexpr auto sensorPair() {
+    return std::make_pair(ftl::enum_name<S>(), S);
+}
+
+static const std::unordered_map<std::string_view, InputDeviceSensorType> SENSOR_LIST =
+        {sensorPair<InputDeviceSensorType::ACCELEROMETER>(),
+         sensorPair<InputDeviceSensorType::MAGNETIC_FIELD>(),
+         sensorPair<InputDeviceSensorType::ORIENTATION>(),
+         sensorPair<InputDeviceSensorType::GYROSCOPE>(),
+         sensorPair<InputDeviceSensorType::LIGHT>(),
+         sensorPair<InputDeviceSensorType::PRESSURE>(),
+         sensorPair<InputDeviceSensorType::TEMPERATURE>(),
+         sensorPair<InputDeviceSensorType::PROXIMITY>(),
+         sensorPair<InputDeviceSensorType::GRAVITY>(),
+         sensorPair<InputDeviceSensorType::LINEAR_ACCELERATION>(),
+         sensorPair<InputDeviceSensorType::ROTATION_VECTOR>(),
+         sensorPair<InputDeviceSensorType::RELATIVE_HUMIDITY>(),
+         sensorPair<InputDeviceSensorType::AMBIENT_TEMPERATURE>(),
+         sensorPair<InputDeviceSensorType::MAGNETIC_FIELD_UNCALIBRATED>(),
+         sensorPair<InputDeviceSensorType::GAME_ROTATION_VECTOR>(),
+         sensorPair<InputDeviceSensorType::GYROSCOPE_UNCALIBRATED>(),
+         sensorPair<InputDeviceSensorType::SIGNIFICANT_MOTION>()};
 
 bool kernelConfigsArePresent(const std::set<std::string>& configs) {
+#if defined(__ANDROID__)
     std::shared_ptr<const android::vintf::RuntimeInfo> runtimeInfo =
             android::vintf::VintfObject::GetInstance()->getRuntimeInfo(
                     vintf::RuntimeInfo::FetchFlag::CONFIG_GZ);
@@ -96,15 +102,16 @@ bool kernelConfigsArePresent(const std::set<std::string>& configs) {
         }
     }
     return true;
+#else
+    (void)configs; // Suppress 'unused variable' warning
+    return true;
+#endif
 }
 
-// --- KeyLayoutMap ---
+} // namespace
 
-KeyLayoutMap::KeyLayoutMap() {
-}
-
-KeyLayoutMap::~KeyLayoutMap() {
-}
+KeyLayoutMap::KeyLayoutMap() = default;
+KeyLayoutMap::~KeyLayoutMap() = default;
 
 base::Result<std::shared_ptr<KeyLayoutMap>> KeyLayoutMap::loadContents(const std::string& filename,
                                                                        const char* contents) {
@@ -154,7 +161,7 @@ base::Result<std::shared_ptr<KeyLayoutMap>> KeyLayoutMap::load(Tokenizer* tokeni
 #if DEBUG_PARSER_PERFORMANCE
         nsecs_t elapsedTime = systemTime(SYSTEM_TIME_MONOTONIC) - startTime;
         ALOGD("Parsed key layout map file '%s' %d lines in %0.3fms.",
-              tokenizer->getFilename().string(), tokenizer->getLineNumber(),
+              tokenizer->getFilename().c_str(), tokenizer->getLineNumber(),
               elapsedTime / 1000000.0);
 #endif
         if (!status) {
@@ -193,7 +200,7 @@ base::Result<std::pair<InputDeviceSensorType, int32_t>> KeyLayoutMap::mapSensor(
     }
     const Sensor& sensor = it->second;
     ALOGD_IF(DEBUG_MAPPING, "mapSensor: absCode=%d, sensorType=%s, sensorDataIndex=0x%x.", absCode,
-             NamedEnum::string(sensor.sensorType).c_str(), sensor.sensorDataIndex);
+             ftl::enum_string(sensor.sensorType).c_str(), sensor.sensorDataIndex);
     return std::make_pair(sensor.sensorType, sensor.sensorDataIndex);
 }
 
@@ -221,6 +228,16 @@ std::vector<int32_t> KeyLayoutMap::findScanCodesForKey(int32_t keyCode) const {
         }
     }
     return scanCodes;
+}
+
+std::vector<int32_t> KeyLayoutMap::findUsageCodesForKey(int32_t keyCode) const {
+    std::vector<int32_t> usageCodes;
+    for (const auto& [usageCode, key] : mKeysByUsageCode) {
+        if (keyCode == key.keyCode) {
+            usageCodes.push_back(usageCode);
+        }
+    }
+    return usageCodes;
 }
 
 std::optional<AxisInfo> KeyLayoutMap::mapAxis(int32_t scanCode) const {
@@ -272,8 +289,8 @@ KeyLayoutMap::Parser::~Parser() {
 
 status_t KeyLayoutMap::Parser::parse() {
     while (!mTokenizer->isEof()) {
-        ALOGD_IF(DEBUG_PARSER, "Parsing %s: '%s'.", mTokenizer->getLocation().string(),
-                 mTokenizer->peekRemainderOfLine().string());
+        ALOGD_IF(DEBUG_PARSER, "Parsing %s: '%s'.", mTokenizer->getLocation().c_str(),
+                 mTokenizer->peekRemainderOfLine().c_str());
 
         mTokenizer->skipDelimiters(WHITESPACE);
 
@@ -300,16 +317,15 @@ status_t KeyLayoutMap::Parser::parse() {
                 status_t status = parseRequiredKernelConfig();
                 if (status) return status;
             } else {
-                ALOGE("%s: Expected keyword, got '%s'.", mTokenizer->getLocation().string(),
-                        keywordToken.string());
+                ALOGE("%s: Expected keyword, got '%s'.", mTokenizer->getLocation().c_str(),
+                      keywordToken.c_str());
                 return BAD_VALUE;
             }
 
             mTokenizer->skipDelimiters(WHITESPACE);
             if (!mTokenizer->isEol() && mTokenizer->peekChar() != '#') {
                 ALOGE("%s: Expected end of line or trailing comment, got '%s'.",
-                        mTokenizer->getLocation().string(),
-                        mTokenizer->peekRemainderOfLine().string());
+                      mTokenizer->getLocation().c_str(), mTokenizer->peekRemainderOfLine().c_str());
                 return BAD_VALUE;
             }
         }
@@ -329,26 +345,26 @@ status_t KeyLayoutMap::Parser::parseKey() {
     }
 
     char* end;
-    int32_t code = int32_t(strtol(codeToken.string(), &end, 0));
+    int32_t code = int32_t(strtol(codeToken.c_str(), &end, 0));
     if (*end) {
-        ALOGE("%s: Expected key %s number, got '%s'.", mTokenizer->getLocation().string(),
-                mapUsage ? "usage" : "scan code", codeToken.string());
+        ALOGE("%s: Expected key %s number, got '%s'.", mTokenizer->getLocation().c_str(),
+              mapUsage ? "usage" : "scan code", codeToken.c_str());
         return BAD_VALUE;
     }
     std::unordered_map<int32_t, Key>& map =
             mapUsage ? mMap->mKeysByUsageCode : mMap->mKeysByScanCode;
     if (map.find(code) != map.end()) {
-        ALOGE("%s: Duplicate entry for key %s '%s'.", mTokenizer->getLocation().string(),
-                mapUsage ? "usage" : "scan code", codeToken.string());
+        ALOGE("%s: Duplicate entry for key %s '%s'.", mTokenizer->getLocation().c_str(),
+              mapUsage ? "usage" : "scan code", codeToken.c_str());
         return BAD_VALUE;
     }
 
     mTokenizer->skipDelimiters(WHITESPACE);
     String8 keyCodeToken = mTokenizer->nextToken(WHITESPACE);
-    int32_t keyCode = InputEventLookup::getKeyCodeByLabel(keyCodeToken.string());
+    int32_t keyCode = InputEventLookup::getKeyCodeByLabel(keyCodeToken.c_str());
     if (!keyCode) {
-        ALOGE("%s: Expected key code label, got '%s'.", mTokenizer->getLocation().string(),
-                keyCodeToken.string());
+        ALOGE("%s: Expected key code label, got '%s'.", mTokenizer->getLocation().c_str(),
+              keyCodeToken.c_str());
         return BAD_VALUE;
     }
 
@@ -358,15 +374,15 @@ status_t KeyLayoutMap::Parser::parseKey() {
         if (mTokenizer->isEol() || mTokenizer->peekChar() == '#') break;
 
         String8 flagToken = mTokenizer->nextToken(WHITESPACE);
-        uint32_t flag = InputEventLookup::getKeyFlagByLabel(flagToken.string());
+        uint32_t flag = InputEventLookup::getKeyFlagByLabel(flagToken.c_str());
         if (!flag) {
-            ALOGE("%s: Expected key flag label, got '%s'.", mTokenizer->getLocation().string(),
-                    flagToken.string());
+            ALOGE("%s: Expected key flag label, got '%s'.", mTokenizer->getLocation().c_str(),
+                  flagToken.c_str());
             return BAD_VALUE;
         }
         if (flags & flag) {
-            ALOGE("%s: Duplicate key flag '%s'.", mTokenizer->getLocation().string(),
-                    flagToken.string());
+            ALOGE("%s: Duplicate key flag '%s'.", mTokenizer->getLocation().c_str(),
+                  flagToken.c_str());
             return BAD_VALUE;
         }
         flags |= flag;
@@ -385,15 +401,15 @@ status_t KeyLayoutMap::Parser::parseKey() {
 status_t KeyLayoutMap::Parser::parseAxis() {
     String8 scanCodeToken = mTokenizer->nextToken(WHITESPACE);
     char* end;
-    int32_t scanCode = int32_t(strtol(scanCodeToken.string(), &end, 0));
+    int32_t scanCode = int32_t(strtol(scanCodeToken.c_str(), &end, 0));
     if (*end) {
-        ALOGE("%s: Expected axis scan code number, got '%s'.", mTokenizer->getLocation().string(),
-                scanCodeToken.string());
+        ALOGE("%s: Expected axis scan code number, got '%s'.", mTokenizer->getLocation().c_str(),
+              scanCodeToken.c_str());
         return BAD_VALUE;
     }
     if (mMap->mAxes.find(scanCode) != mMap->mAxes.end()) {
-        ALOGE("%s: Duplicate entry for axis scan code '%s'.", mTokenizer->getLocation().string(),
-                scanCodeToken.string());
+        ALOGE("%s: Duplicate entry for axis scan code '%s'.", mTokenizer->getLocation().c_str(),
+              scanCodeToken.c_str());
         return BAD_VALUE;
     }
 
@@ -406,10 +422,10 @@ status_t KeyLayoutMap::Parser::parseAxis() {
 
         mTokenizer->skipDelimiters(WHITESPACE);
         String8 axisToken = mTokenizer->nextToken(WHITESPACE);
-        axisInfo.axis = InputEventLookup::getAxisByLabel(axisToken.string());
+        axisInfo.axis = InputEventLookup::getAxisByLabel(axisToken.c_str());
         if (axisInfo.axis < 0) {
-            ALOGE("%s: Expected inverted axis label, got '%s'.",
-                    mTokenizer->getLocation().string(), axisToken.string());
+            ALOGE("%s: Expected inverted axis label, got '%s'.", mTokenizer->getLocation().c_str(),
+                  axisToken.c_str());
             return BAD_VALUE;
         }
     } else if (token == "split") {
@@ -417,35 +433,35 @@ status_t KeyLayoutMap::Parser::parseAxis() {
 
         mTokenizer->skipDelimiters(WHITESPACE);
         String8 splitToken = mTokenizer->nextToken(WHITESPACE);
-        axisInfo.splitValue = int32_t(strtol(splitToken.string(), &end, 0));
+        axisInfo.splitValue = int32_t(strtol(splitToken.c_str(), &end, 0));
         if (*end) {
-            ALOGE("%s: Expected split value, got '%s'.",
-                    mTokenizer->getLocation().string(), splitToken.string());
+            ALOGE("%s: Expected split value, got '%s'.", mTokenizer->getLocation().c_str(),
+                  splitToken.c_str());
             return BAD_VALUE;
         }
 
         mTokenizer->skipDelimiters(WHITESPACE);
         String8 lowAxisToken = mTokenizer->nextToken(WHITESPACE);
-        axisInfo.axis = InputEventLookup::getAxisByLabel(lowAxisToken.string());
+        axisInfo.axis = InputEventLookup::getAxisByLabel(lowAxisToken.c_str());
         if (axisInfo.axis < 0) {
-            ALOGE("%s: Expected low axis label, got '%s'.",
-                    mTokenizer->getLocation().string(), lowAxisToken.string());
+            ALOGE("%s: Expected low axis label, got '%s'.", mTokenizer->getLocation().c_str(),
+                  lowAxisToken.c_str());
             return BAD_VALUE;
         }
 
         mTokenizer->skipDelimiters(WHITESPACE);
         String8 highAxisToken = mTokenizer->nextToken(WHITESPACE);
-        axisInfo.highAxis = InputEventLookup::getAxisByLabel(highAxisToken.string());
+        axisInfo.highAxis = InputEventLookup::getAxisByLabel(highAxisToken.c_str());
         if (axisInfo.highAxis < 0) {
-            ALOGE("%s: Expected high axis label, got '%s'.",
-                    mTokenizer->getLocation().string(), highAxisToken.string());
+            ALOGE("%s: Expected high axis label, got '%s'.", mTokenizer->getLocation().c_str(),
+                  highAxisToken.c_str());
             return BAD_VALUE;
         }
     } else {
-        axisInfo.axis = InputEventLookup::getAxisByLabel(token.string());
+        axisInfo.axis = InputEventLookup::getAxisByLabel(token.c_str());
         if (axisInfo.axis < 0) {
             ALOGE("%s: Expected axis label, 'split' or 'invert', got '%s'.",
-                    mTokenizer->getLocation().string(), token.string());
+                  mTokenizer->getLocation().c_str(), token.c_str());
             return BAD_VALUE;
         }
     }
@@ -459,15 +475,15 @@ status_t KeyLayoutMap::Parser::parseAxis() {
         if (keywordToken == "flat") {
             mTokenizer->skipDelimiters(WHITESPACE);
             String8 flatToken = mTokenizer->nextToken(WHITESPACE);
-            axisInfo.flatOverride = int32_t(strtol(flatToken.string(), &end, 0));
+            axisInfo.flatOverride = int32_t(strtol(flatToken.c_str(), &end, 0));
             if (*end) {
-                ALOGE("%s: Expected flat value, got '%s'.",
-                        mTokenizer->getLocation().string(), flatToken.string());
+                ALOGE("%s: Expected flat value, got '%s'.", mTokenizer->getLocation().c_str(),
+                      flatToken.c_str());
                 return BAD_VALUE;
             }
         } else {
-            ALOGE("%s: Expected keyword 'flat', got '%s'.",
-                    mTokenizer->getLocation().string(), keywordToken.string());
+            ALOGE("%s: Expected keyword 'flat', got '%s'.", mTokenizer->getLocation().c_str(),
+                  keywordToken.c_str());
             return BAD_VALUE;
         }
     }
@@ -490,27 +506,27 @@ status_t KeyLayoutMap::Parser::parseLed() {
         codeToken = mTokenizer->nextToken(WHITESPACE);
     }
     char* end;
-    int32_t code = int32_t(strtol(codeToken.string(), &end, 0));
+    int32_t code = int32_t(strtol(codeToken.c_str(), &end, 0));
     if (*end) {
-        ALOGE("%s: Expected led %s number, got '%s'.", mTokenizer->getLocation().string(),
-                mapUsage ? "usage" : "scan code", codeToken.string());
+        ALOGE("%s: Expected led %s number, got '%s'.", mTokenizer->getLocation().c_str(),
+              mapUsage ? "usage" : "scan code", codeToken.c_str());
         return BAD_VALUE;
     }
 
     std::unordered_map<int32_t, Led>& map =
             mapUsage ? mMap->mLedsByUsageCode : mMap->mLedsByScanCode;
     if (map.find(code) != map.end()) {
-        ALOGE("%s: Duplicate entry for led %s '%s'.", mTokenizer->getLocation().string(),
-                mapUsage ? "usage" : "scan code", codeToken.string());
+        ALOGE("%s: Duplicate entry for led %s '%s'.", mTokenizer->getLocation().c_str(),
+              mapUsage ? "usage" : "scan code", codeToken.c_str());
         return BAD_VALUE;
     }
 
     mTokenizer->skipDelimiters(WHITESPACE);
     String8 ledCodeToken = mTokenizer->nextToken(WHITESPACE);
-    int32_t ledCode = InputEventLookup::getLedByLabel(ledCodeToken.string());
+    int32_t ledCode = InputEventLookup::getLedByLabel(ledCodeToken.c_str());
     if (ledCode < 0) {
-        ALOGE("%s: Expected LED code label, got '%s'.", mTokenizer->getLocation().string(),
-                ledCodeToken.string());
+        ALOGE("%s: Expected LED code label, got '%s'.", mTokenizer->getLocation().c_str(),
+              ledCodeToken.c_str());
         return BAD_VALUE;
     }
 
@@ -524,7 +540,7 @@ status_t KeyLayoutMap::Parser::parseLed() {
 }
 
 static std::optional<InputDeviceSensorType> getSensorType(const char* token) {
-    auto it = SENSOR_LIST.find(std::string(token));
+    auto it = SENSOR_LIST.find(token);
     if (it == SENSOR_LIST.end()) {
         return std::nullopt;
     }
@@ -532,7 +548,7 @@ static std::optional<InputDeviceSensorType> getSensorType(const char* token) {
 }
 
 static std::optional<int32_t> getSensorDataIndex(String8 token) {
-    std::string tokenStr(token.string());
+    std::string tokenStr(token.c_str());
     if (tokenStr == "X") {
         return 0;
     } else if (tokenStr == "Y") {
@@ -558,26 +574,26 @@ static std::optional<int32_t> getSensorDataIndex(String8 token) {
 status_t KeyLayoutMap::Parser::parseSensor() {
     String8 codeToken = mTokenizer->nextToken(WHITESPACE);
     char* end;
-    int32_t code = int32_t(strtol(codeToken.string(), &end, 0));
+    int32_t code = int32_t(strtol(codeToken.c_str(), &end, 0));
     if (*end) {
-        ALOGE("%s: Expected sensor %s number, got '%s'.", mTokenizer->getLocation().string(),
-              "abs code", codeToken.string());
+        ALOGE("%s: Expected sensor %s number, got '%s'.", mTokenizer->getLocation().c_str(),
+              "abs code", codeToken.c_str());
         return BAD_VALUE;
     }
 
     std::unordered_map<int32_t, Sensor>& map = mMap->mSensorsByAbsCode;
     if (map.find(code) != map.end()) {
-        ALOGE("%s: Duplicate entry for sensor %s '%s'.", mTokenizer->getLocation().string(),
-              "abs code", codeToken.string());
+        ALOGE("%s: Duplicate entry for sensor %s '%s'.", mTokenizer->getLocation().c_str(),
+              "abs code", codeToken.c_str());
         return BAD_VALUE;
     }
 
     mTokenizer->skipDelimiters(WHITESPACE);
     String8 sensorTypeToken = mTokenizer->nextToken(WHITESPACE);
-    std::optional<InputDeviceSensorType> typeOpt = getSensorType(sensorTypeToken.string());
+    std::optional<InputDeviceSensorType> typeOpt = getSensorType(sensorTypeToken.c_str());
     if (!typeOpt) {
-        ALOGE("%s: Expected sensor code label, got '%s'.", mTokenizer->getLocation().string(),
-              sensorTypeToken.string());
+        ALOGE("%s: Expected sensor code label, got '%s'.", mTokenizer->getLocation().c_str(),
+              sensorTypeToken.c_str());
         return BAD_VALUE;
     }
     InputDeviceSensorType sensorType = typeOpt.value();
@@ -585,14 +601,14 @@ status_t KeyLayoutMap::Parser::parseSensor() {
     String8 sensorDataIndexToken = mTokenizer->nextToken(WHITESPACE);
     std::optional<int32_t> indexOpt = getSensorDataIndex(sensorDataIndexToken);
     if (!indexOpt) {
-        ALOGE("%s: Expected sensor data index label, got '%s'.", mTokenizer->getLocation().string(),
-              sensorDataIndexToken.string());
+        ALOGE("%s: Expected sensor data index label, got '%s'.", mTokenizer->getLocation().c_str(),
+              sensorDataIndexToken.c_str());
         return BAD_VALUE;
     }
     int32_t sensorDataIndex = indexOpt.value();
 
     ALOGD_IF(DEBUG_PARSER, "Parsed sensor: abs code=%d, sensorType=%s, sensorDataIndex=%d.", code,
-             NamedEnum::string(sensorType).c_str(), sensorDataIndex);
+             ftl::enum_string(sensorType).c_str(), sensorDataIndex);
 
     Sensor sensor;
     sensor.sensorType = sensorType;
@@ -607,16 +623,17 @@ status_t KeyLayoutMap::Parser::parseSensor() {
 // requires_kernel_config CONFIG_HID_PLAYSTATION
 status_t KeyLayoutMap::Parser::parseRequiredKernelConfig() {
     String8 codeToken = mTokenizer->nextToken(WHITESPACE);
-    std::string configName = codeToken.string();
+    std::string configName = codeToken.c_str();
 
     const auto result = mMap->mRequiredKernelConfigs.emplace(configName);
     if (!result.second) {
         ALOGE("%s: Duplicate entry for required kernel config %s.",
-              mTokenizer->getLocation().string(), configName.c_str());
+              mTokenizer->getLocation().c_str(), configName.c_str());
         return BAD_VALUE;
     }
 
     ALOGD_IF(DEBUG_PARSER, "Parsed required kernel config: name=%s", configName.c_str());
     return NO_ERROR;
 }
-};
+
+} // namespace android

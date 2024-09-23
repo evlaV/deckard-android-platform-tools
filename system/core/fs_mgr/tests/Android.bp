@@ -38,7 +38,8 @@ cc_test {
     ],
     static_libs: [
         "libfs_mgr",
-        "libfstab",
+        "libgmock",
+        "libgtest",
     ],
     srcs: [
         "file_wait_test.cpp",
@@ -53,8 +54,9 @@ cc_test {
 }
 
 sh_binary_host {
-    name: "adb-remount-test.sh",
+    name: "adb-remount-test",
     src: "adb-remount-test.sh",
+    filename_from_src: true,
     target: {
         darwin: {
             enabled: false,
@@ -68,7 +70,7 @@ sh_binary_host {
 sh_test {
     name: "adb-remount-sh",
     src: "adb-remount-test.sh",
-    filename: "adb-remount-test.sh",
+    filename_from_src: true,
     test_suites: ["general-tests"],
     test_config: "adb-remount-sh.xml",
 }
@@ -108,7 +110,6 @@ cc_test {
     ],
     static_libs: [
         "libfs_mgr",
-        "libfstab",
         "libgmock",
         "libgtest",
     ],

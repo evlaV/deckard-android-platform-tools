@@ -68,6 +68,8 @@ enum AndroidBitmapFormat {
     ANDROID_BITMAP_FORMAT_A_8       = 8,
     /** Each component is stored as a half float. **/
     ANDROID_BITMAP_FORMAT_RGBA_F16  = 9,
+    /** Red: 10 bits, Green: 10 bits, Blue: 10 bits, Alpha: 2 bits. **/
+    ANDROID_BITMAP_FORMAT_RGBA_1010102 = 10,
 };
 
 /** Bitmap alpha format */
@@ -194,7 +196,7 @@ enum AndroidBitmapCompressFormat {
  *
  *  @param userContext Pointer to user-defined data passed to
  *         {@link AndroidBitmap_compress}.
- *  @param data Compressed data of |size| bytes to write.
+ *  @param data Compressed data of `size` bytes to write.
  *  @param size Length in bytes of data to write.
  *  @return Whether the operation succeeded.
  */
@@ -203,7 +205,7 @@ typedef bool (*AndroidBitmap_CompressWriteFunc)(void* userContext,
                                                 size_t size) __INTRODUCED_IN(30);
 
 /**
- *  Compress |pixels| as described by |info|.
+ *  Compress `pixels` as described by `info`.
  *
  *  Available since API level 30.
  *

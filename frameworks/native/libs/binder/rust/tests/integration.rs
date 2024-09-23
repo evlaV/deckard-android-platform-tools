@@ -502,7 +502,7 @@ mod tests {
         let instances = binder::get_declared_instances("android.hardware.light.ILights")
             .expect("Could not get declared instances");
 
-        let expected_defaults = if has_lights { 1 } else { 0 };
+        let expected_defaults = usize::from(has_lights);
         assert_eq!(expected_defaults, instances.iter().filter(|i| i.as_str() == "default").count());
     }
 
@@ -545,6 +545,11 @@ mod tests {
     }
 
     fn get_expected_selinux_context() -> &'static str {
+        // SAFETY: The pointer we pass to `getcon` is valid because it comes from a reference, and
+        // `getcon` doesn't retain it after it returns. If `getcon` succeeds then `out_ptr` will
+        // point to a valid C string, otherwise it will remain null. We check for null, so the
+        // pointer we pass to `CStr::from_ptr` must be a valid pointer to a C string. There is a
+        // memory leak as we don't call `freecon`, but that's fine because this is just a test.
         unsafe {
             let mut out_ptr = ptr::null_mut();
             assert_eq!(selinux_sys::getcon(&mut out_ptr), 0);

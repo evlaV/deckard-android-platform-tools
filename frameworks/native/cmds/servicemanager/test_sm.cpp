@@ -14,22 +14,27 @@
  * limitations under the License.
  */
 
+#include <android-base/properties.h>
+#include <android-base/strings.h>
 #include <android/os/BnServiceCallback.h>
 #include <binder/Binder.h>
-#include <binder/ProcessState.h>
 #include <binder/IServiceManager.h>
+#include <binder/ProcessState.h>
 #include <cutils/android_filesystem_config.h>
-#include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <gtest/gtest.h>
 
 #include "Access.h"
 #include "ServiceManager.h"
 
-using android::sp;
 using android::Access;
 using android::BBinder;
 using android::IBinder;
 using android::ServiceManager;
+using android::sp;
+using android::base::EndsWith;
+using android::base::GetProperty;
+using android::base::StartsWith;
 using android::binder::Status;
 using android::os::BnServiceCallback;
 using android::os::IServiceManager;
@@ -60,7 +65,7 @@ public:
 class MockServiceManager : public ServiceManager {
  public:
     MockServiceManager(std::unique_ptr<Access>&& access) : ServiceManager(std::move(access)) {}
-    MOCK_METHOD1(tryStartService, void(const std::string& name));
+    MOCK_METHOD2(tryStartService, void(const Access::CallingContext&, const std::string& name));
 };
 
 static sp<ServiceManager> getPermissiveServiceManager() {
@@ -73,6 +78,13 @@ static sp<ServiceManager> getPermissiveServiceManager() {
 
     sp<ServiceManager> sm = sp<NiceMock<MockServiceManager>>::make(std::move(access));
     return sm;
+}
+
+// Determines if test device is a cuttlefish phone device
+static bool isCuttlefishPhone() {
+    auto device = GetProperty("ro.product.vendor.device", "");
+    auto product = GetProperty("ro.product.vendor.name", "");
+    return StartsWith(device, "vsoc_") && EndsWith(product, "_phone");
 }
 
 TEST(AddService, HappyHappy) {
@@ -304,6 +316,49 @@ TEST(ListServices, CriticalServices) {
 
     // all there and in the right order
     EXPECT_THAT(out, ElementsAre("sa"));
+}
+
+TEST(Vintf, UpdatableViaApex) {
+    if (!isCuttlefishPhone()) GTEST_SKIP() << "Skipping non-Cuttlefish-phone devices";
+
+    auto sm = getPermissiveServiceManager();
+    std::optional<std::string> updatableViaApex;
+    EXPECT_TRUE(sm->updatableViaApex("android.hardware.camera.provider.ICameraProvider/internal/0",
+                                     &updatableViaApex)
+                        .isOk());
+    EXPECT_EQ(std::make_optional<std::string>("com.google.emulated.camera.provider.hal"),
+              updatableViaApex);
+}
+
+TEST(Vintf, UpdatableViaApex_InvalidNameReturnsNullOpt) {
+    if (!isCuttlefishPhone()) GTEST_SKIP() << "Skipping non-Cuttlefish-phone devices";
+
+    auto sm = getPermissiveServiceManager();
+    std::optional<std::string> updatableViaApex;
+    EXPECT_TRUE(sm->updatableViaApex("android.hardware.camera.provider.ICameraProvider",
+                                     &updatableViaApex)
+                        .isOk()); // missing instance name
+    EXPECT_EQ(std::nullopt, updatableViaApex);
+}
+
+TEST(Vintf, GetUpdatableNames) {
+    if (!isCuttlefishPhone()) GTEST_SKIP() << "Skipping non-Cuttlefish-phone devices";
+
+    auto sm = getPermissiveServiceManager();
+    std::vector<std::string> names;
+    EXPECT_TRUE(sm->getUpdatableNames("com.google.emulated.camera.provider.hal", &names).isOk());
+    EXPECT_EQ(std::vector<
+                      std::string>{"android.hardware.camera.provider.ICameraProvider/internal/0"},
+              names);
+}
+
+TEST(Vintf, GetUpdatableNames_InvalidApexNameReturnsEmpty) {
+    if (!isCuttlefishPhone()) GTEST_SKIP() << "Skipping non-Cuttlefish-phone devices";
+
+    auto sm = getPermissiveServiceManager();
+    std::vector<std::string> names;
+    EXPECT_TRUE(sm->getUpdatableNames("non.existing.apex.name", &names).isOk());
+    EXPECT_EQ(std::vector<std::string>{}, names);
 }
 
 class CallbackHistorian : public BnServiceCallback {

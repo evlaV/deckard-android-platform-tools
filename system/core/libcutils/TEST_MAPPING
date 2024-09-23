@@ -8,5 +8,13 @@
     {
       "name": "libcutils_test"
     }
+  ],
+  "kernel-presubmit": [
+    {
+      "name": "libcutils_test"
+    },
+    {
+      "name": "KernelLibcutilsTest"
+    }
   ]
 }

@@ -111,9 +111,7 @@ private:
 };
 
 int main(int argc, char** argv) {
-#ifdef __ANDROID_RECOVERY__
     android::base::InitLogging(argv, android::base::KernelLogger);
-#endif
 
     if (argc > 2) {
         LOG(FATAL) << "usage: " << argv[0] << " [binder driver]";
@@ -127,13 +125,17 @@ int main(int argc, char** argv) {
     ps->setThreadPoolMaxThreadCount(0);
     ps->setCallRestriction(ProcessState::CallRestriction::FATAL_IF_NOT_ONEWAY);
 
+    IPCThreadState::self()->disableBackgroundScheduling(true);
+
     sp<ServiceManager> manager = sp<ServiceManager>::make(std::make_unique<Access>());
     if (!manager->addService("manager", manager, false /*allowIsolated*/, IServiceManager::DUMP_FLAG_PRIORITY_DEFAULT).isOk()) {
         LOG(ERROR) << "Could not self register servicemanager";
     }
 
     IPCThreadState::self()->setTheContextObject(manager);
-    ps->becomeContextManager();
+    if (!ps->becomeContextManager()) {
+        LOG(FATAL) << "Could not become context manager";
+    }
 
     sp<Looper> looper = Looper::prepare(false /*allowNonCallbacks*/);
 

@@ -29,20 +29,27 @@ Linux, macOS, or Windows.
 
 2. Client response with a single packet no greater than 256 bytes.
    The first four bytes of the response are "OKAY", "FAIL", "DATA",
-   or "INFO".  Additional bytes may contain an (ascii) informative
+   "INFO" or "TEXT".  Additional bytes may contain an (ascii) informative
    message.
 
    a. INFO -> the remaining 252 bytes are an informative message
       (providing progress or diagnostic messages).  They should
-      be displayed and then step #2 repeats
+      be displayed and then step #2 repeats. The print format is:
+      "(bootloader) " + InfoMessagePayload + '\n'
 
-   b. FAIL -> the requested command failed.  The remaining 252 bytes
+   b. TEXT -> the remaining 252 bytes are arbitrary. They should
+      be displayed and then step #2 repeats.
+      It differs from info in that no formatting is applied.
+      The payload is printed as-is with no newline at the end.
+      Payload is expected to be NULL terminated.
+
+   c. FAIL -> the requested command failed.  The remaining 252 bytes
       of the response (if present) provide a textual failure message
       to present to the user.  Stop.
 
-   c. OKAY -> the requested command completed successfully.  Go to #5
+   d. OKAY -> the requested command completed successfully.  Go to #5
 
-   d. DATA -> the requested command is ready for the data phase.
+   e. DATA -> the requested command is ready for the data phase.
       A DATA response packet will be 12 bytes long, in the form of
       DATA00000000 where the 8 digit hexadecimal number represents
       the total data size to transfer.
@@ -54,15 +61,17 @@ Linux, macOS, or Windows.
    in the "DATA" response above.
 
 4. Client responds with a single packet no greater than 256 bytes.
-   The first four bytes of the response are "OKAY", "FAIL", or "INFO".
-   Similar to #2:
+   The first four bytes of the response are "OKAY", "FAIL",
+   "INFO" or "TEXT". Similar to #2:
 
-   a. INFO -> display the remaining 252 bytes and return to #4
+   a. INFO -> display the formatted remaining 252 bytes and return to #4
 
-   b. FAIL -> display the remaining 252 bytes (if present) as a failure
+   b. TEXT -> display the unformatted remaining 252 bytes and return to #4
+
+   c. FAIL -> display the remaining 252 bytes (if present) as a failure
       reason and consider the command failed.  Stop.
 
-   c. OKAY -> success.  Go to #5
+   d. OKAY -> success.  Go to #5
 
 5. Success.  Stop.
 
@@ -156,6 +165,43 @@ The various currently defined commands are:
                        using the new bootloader.
 
 
+## Flashing Logic
+
+Fastboot binary will follow directions listed out fastboot-info.txt
+build artifact for fastboot flashall && fastboot update comamnds.
+This build artifact will live inside of ANDROID_PRODUCT_OUT &&
+target_files_package && updatepackage.
+
+
+The currently defined commands are:
+
+    flash %s           Flash a given partition. Optional arguments include
+                       --slot-other, {filename_path}, --apply-vbmeta
+
+    reboot %s          Reboot to either bootloader or fastbootd
+
+    update-super       Updates the super partition
+
+    if-wipe            Conditionally run some other functionality if
+                       wipe is specified
+
+    erase %s           Erase a given partition (can only be used in conjunction)
+                       with if-wipe -> eg. if-wipe erase cache
+
+Flashing Optimization:
+
+    After generating the list of tasks to execute, Fastboot will try and
+    optimize the flashing of the dynamic partitions by constructing an
+    optimized flash super task. Fastboot will explicitly pattern match the
+    following commands and try and concatenate it into this task. (doing so
+    will allow us to avoid the reboot into userspace fastbootd which takes
+    significant time)
+
+    //Optimizable Block
+    reboot fastboot
+    update-super                        ---> generate optimized flash super task
+    $FOR EACH {dynamic partition}
+        flash {dynamic partition}
 
 ## Client Variables
 

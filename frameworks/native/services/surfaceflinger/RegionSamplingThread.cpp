@@ -30,8 +30,9 @@
 #include <compositionengine/impl/OutputCompositionState.h>
 #include <cutils/properties.h>
 #include <ftl/future.h>
-#include <gui/IRegionSamplingListener.h>
+#include <gui/SpHash.h>
 #include <gui/SyncScreenCaptureListener.h>
+#include <renderengine/impl/ExternalTexture.h>
 #include <ui/DisplayStatInfo.h>
 #include <utils/Trace.h>
 
@@ -46,10 +47,7 @@
 namespace android {
 using namespace std::chrono_literals;
 
-template <typename T>
-struct SpHash {
-    size_t operator()(const sp<T>& p) const { return std::hash<T*>()(p.get()); }
-};
+using gui::SpHash;
 
 constexpr auto lumaSamplingStepTag = "LumaSamplingStep";
 enum class samplingStep {
@@ -150,7 +148,7 @@ void RegionSamplingThread::checkForStaleLuma() {
     if (mSampleRequestTime.has_value()) {
         ATRACE_INT(lumaSamplingStepTag, static_cast<int>(samplingStep::waitForSamplePhase));
         mSampleRequestTime.reset();
-        mFlinger.scheduleRegionSamplingThread();
+        mFlinger.scheduleSample();
     }
 }
 
@@ -205,25 +203,14 @@ float sampleArea(const uint32_t* data, int32_t width, int32_t height, int32_t st
         return 0.0f;
     }
 
-    // (b/133849373) ROT_90 screencap images produced upside down
-    auto area = sample_area;
-    if (orientation & ui::Transform::ROT_90) {
-        area.top = height - area.top;
-        area.bottom = height - area.bottom;
-        std::swap(area.top, area.bottom);
-
-        area.left = width - area.left;
-        area.right = width - area.right;
-        std::swap(area.left, area.right);
-    }
-
-    const uint32_t pixelCount = (area.bottom - area.top) * (area.right - area.left);
+    const uint32_t pixelCount =
+            (sample_area.bottom - sample_area.top) * (sample_area.right - sample_area.left);
     uint32_t accumulatedLuma = 0;
 
     // Calculates luma with approximation of Rec. 709 primaries
-    for (int32_t row = area.top; row < area.bottom; ++row) {
+    for (int32_t row = sample_area.top; row < sample_area.bottom; ++row) {
         const uint32_t* rowBase = data + row * stride;
-        for (int32_t column = area.left; column < area.right; ++column) {
+        for (int32_t column = sample_area.left; column < sample_area.right; ++column) {
             uint32_t pixel = rowBase[column];
             const uint32_t r = pixel & 0xFF;
             const uint32_t g = (pixel >> 8) & 0xFF;
@@ -352,14 +339,21 @@ void RegionSamplingThread::captureSample() {
         LOG_ALWAYS_FATAL_IF(bufferStatus != OK, "captureSample: Buffer failed to allocate: %d",
                             bufferStatus);
         buffer = std::make_shared<
-                renderengine::ExternalTexture>(graphicBuffer, mFlinger.getRenderEngine(),
-                                               renderengine::ExternalTexture::Usage::WRITEABLE);
+                renderengine::impl::ExternalTexture>(graphicBuffer, mFlinger.getRenderEngine(),
+                                                     renderengine::impl::ExternalTexture::Usage::
+                                                             WRITEABLE);
     }
 
-    const sp<SyncScreenCaptureListener> captureListener = new SyncScreenCaptureListener();
-    mFlinger.captureScreenCommon(std::move(renderAreaFuture), traverseLayers, buffer,
-                                 true /* regionSampling */, false /* grayscale */, captureListener);
-    ScreenCaptureResults captureResults = captureListener->waitForResults();
+    constexpr bool kRegionSampling = true;
+    constexpr bool kGrayscale = false;
+
+    if (const auto fenceResult =
+                mFlinger.captureScreenCommon(std::move(renderAreaFuture), traverseLayers, buffer,
+                                             kRegionSampling, kGrayscale, nullptr)
+                        .get();
+        fenceResult.ok()) {
+        fenceResult.value()->waitForever(LOG_TAG);
+    }
 
     std::vector<Descriptor> activeDescriptors;
     for (const auto& descriptor : descriptors) {

@@ -37,9 +37,9 @@ class RpcState;
 class RpcTransport;
 class FdTrigger;
 
-constexpr uint32_t RPC_WIRE_PROTOCOL_VERSION_NEXT = 1;
+constexpr uint32_t RPC_WIRE_PROTOCOL_VERSION_NEXT = 2;
 constexpr uint32_t RPC_WIRE_PROTOCOL_VERSION_EXPERIMENTAL = 0xF0000000;
-constexpr uint32_t RPC_WIRE_PROTOCOL_VERSION = RPC_WIRE_PROTOCOL_VERSION_EXPERIMENTAL;
+constexpr uint32_t RPC_WIRE_PROTOCOL_VERSION = 1;
 
 // Starting with this version:
 //
@@ -51,11 +51,12 @@ constexpr uint32_t RPC_WIRE_PROTOCOL_VERSION_RPC_HEADER_FEATURE_EXPLICIT_PARCEL_
  * This represents a session (group of connections) between a client
  * and a server. Multiple connections are needed for multiple parallel "binder"
  * calls which may also have nested calls.
+ *
+ * Once a binder exists in the session, if all references to all binders are dropped,
+ * the session shuts down.
  */
 class RpcSession final : public virtual RefBase {
 public:
-    static constexpr size_t kDefaultMaxOutgoingThreads = 10;
-
     // Create an RpcSession with default configuration (raw sockets).
     static sp<RpcSession> make();
 
@@ -67,26 +68,30 @@ public:
     /**
      * Set the maximum number of incoming threads allowed to be made (for things like callbacks).
      * By default, this is 0. This must be called before setting up this connection as a client.
-     * Server sessions will inherits this value from RpcServer.
+     * Server sessions will inherits this value from RpcServer. Each thread will serve a
+     * connection to the remote RpcSession.
      *
      * If this is called, 'shutdown' on this session must also be called.
      * Otherwise, a threadpool will leak.
      *
-     * TODO(b/189955605): start these dynamically
+     * TODO(b/189955605): start these lazily - currently all are started
      */
     void setMaxIncomingThreads(size_t threads);
     size_t getMaxIncomingThreads();
 
     /**
-     * Set the maximum number of outgoing threads allowed to be made.
-     * By default, this is |kDefaultMaxOutgoingThreads|. This must be called before setting up this
-     * connection as a client.
+     * Set the maximum number of outgoing connections allowed to be made.
+     * By default, this is |kDefaultMaxOutgoingConnections|. This must be called before setting up
+     * this connection as a client.
      *
-     * This limits the number of outgoing threads on top of the remote peer setting. This RpcSession
-     * will only instantiate |min(maxOutgoingThreads, remoteMaxThreads)| outgoing threads, where
-     * |remoteMaxThreads| can be retrieved from the remote peer via |getRemoteMaxThreads()|.
+     * For an RpcSession client, if you are connecting to a server which starts N threads,
+     * then this must be set to >= N. If you set the maximum number of outgoing connections
+     * to 1, but the server requests 10, then it would be considered an error. If you set a
+     * maximum number of connections to 10, and the server requests 1, then only 1 will be
+     * created. This API is used to limit the amount of resources a server can request you
+     * create.
      */
-    void setMaxOutgoingThreads(size_t threads);
+    void setMaxOutgoingConnections(size_t connections);
     size_t getMaxOutgoingThreads();
 
     /**
@@ -100,6 +105,8 @@ public:
         NONE = 0,
         // Send file descriptors via unix domain socket ancillary data.
         UNIX = 1,
+        // Send file descriptors as Trusty IPC handles.
+        TRUSTY = 2,
     };
 
     /**
@@ -113,6 +120,11 @@ public:
      * process.
      */
     [[nodiscard]] status_t setupUnixDomainClient(const char* path);
+
+    /**
+     * Connects to an RPC server over a nameless Unix domain socket pair.
+     */
+    [[nodiscard]] status_t setupUnixDomainSocketBootstrapClient(base::unique_fd bootstrap);
 
     /**
      * Connects to an RPC server at the CVD & port.
@@ -189,6 +201,11 @@ public:
      */
     [[nodiscard]] status_t sendDecStrong(const BpBinder* binder);
 
+    /**
+     * Whether any requests are currently being processed.
+     */
+    bool hasActiveRequests();
+
     ~RpcSession();
 
     /**
@@ -206,6 +223,8 @@ private:
     friend RpcServerTrusty;
     friend RpcState;
     explicit RpcSession(std::unique_ptr<RpcTransportCtx> ctx);
+
+    static constexpr size_t kDefaultMaxOutgoingConnections = 10;
 
     // internal version of setProtocolVersion that
     // optionally skips the mStartedSetup check
@@ -228,6 +247,7 @@ private:
 
     private:
         RpcConditionVariable mCv;
+        std::atomic<size_t> mShutdownCount = 0;
     };
     friend WaitForShutdownListener;
 
@@ -269,7 +289,7 @@ private:
     [[nodiscard]] status_t setupOneSocketConnection(const RpcSocketAddress& address,
                                                     const std::vector<uint8_t>& sessionId,
                                                     bool incoming);
-    [[nodiscard]] status_t initAndAddConnection(base::unique_fd fd,
+    [[nodiscard]] status_t initAndAddConnection(RpcTransportFd fd,
                                                 const std::vector<uint8_t>& sessionId,
                                                 bool incoming);
     [[nodiscard]] status_t addIncomingConnection(std::unique_ptr<RpcTransport> rpcTransport);
@@ -285,6 +305,11 @@ private:
     void clearConnectionTid(const sp<RpcConnection>& connection);
 
     [[nodiscard]] status_t initShutdownTrigger();
+
+    /**
+     * Checks whether any connection is active (Not polling on fd)
+     */
+    bool hasActiveConnection(const std::vector<sp<RpcConnection>>& connections);
 
     enum class ConnectionUse {
         CLIENT,
@@ -350,17 +375,20 @@ private:
 
     bool mStartedSetup = false;
     size_t mMaxIncomingThreads = 0;
-    size_t mMaxOutgoingThreads = kDefaultMaxOutgoingThreads;
+    size_t mMaxOutgoingConnections = kDefaultMaxOutgoingConnections;
     std::optional<uint32_t> mProtocolVersion;
     FileDescriptorTransportMode mFileDescriptorTransportMode = FileDescriptorTransportMode::NONE;
 
     RpcConditionVariable mAvailableConnectionCv; // for mWaitingThreads
+
+    std::unique_ptr<RpcTransport> mBootstrapTransport;
 
     struct ThreadState {
         size_t mWaitingThreads = 0;
         // hint index into clients, ++ when sending an async transaction
         size_t mOutgoingOffset = 0;
         std::vector<sp<RpcConnection>> mOutgoing;
+        // max size of mIncoming. Once any thread starts down, no more can be started.
         size_t mMaxIncoming = 0;
         std::vector<sp<RpcConnection>> mIncoming;
         std::map<RpcMaybeThread::id, RpcMaybeThread> mThreads;

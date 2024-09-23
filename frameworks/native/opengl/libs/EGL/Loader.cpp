@@ -21,6 +21,7 @@
 
 #include <android-base/properties.h>
 #include <android/dlext.h>
+#include <cutils/properties.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <graphicsenv/GraphicsEnv.h>
@@ -207,7 +208,8 @@ void* Loader::open(egl_connection_t* cnx)
     ATRACE_CALL();
     const nsecs_t openTime = systemTime();
 
-    if (should_unload_system_driver(cnx)) {
+    if (!android::GraphicsEnv::getInstance().angleIsSystemDriver() &&
+        should_unload_system_driver(cnx)) {
         unload_system_driver(cnx);
     }
 
@@ -216,8 +218,13 @@ void* Loader::open(egl_connection_t* cnx)
         return cnx->dso;
     }
 
-    // Firstly, try to load ANGLE driver.
-    driver_t* hnd = attempt_to_load_angle(cnx);
+    // Firstly, try to load ANGLE driver, unless we know that we shouldn't.
+    bool shouldForceLegacyDriver = android::GraphicsEnv::getInstance().shouldForceLegacyDriver();
+    driver_t* hnd = nullptr;
+    if (!shouldForceLegacyDriver) {
+        hnd = attempt_to_load_angle(cnx);
+    }
+
     if (!hnd) {
         // Secondly, try to load from driver apk.
         hnd = attempt_to_load_updated_driver(cnx);
@@ -230,8 +237,9 @@ void* Loader::open(egl_connection_t* cnx)
             LOG_ALWAYS_FATAL("couldn't find an OpenGL ES implementation from %s",
                              android::GraphicsEnv::getInstance().getDriverPath().c_str());
         }
-        // Finally, try to load system driver, start by searching for the library name appended by
-        // the system properties of the GLES userspace driver in both locations.
+        // Finally, try to load system driver.
+        // Start by searching for the library name appended by the system
+        // properties of the GLES userspace driver in both locations.
         // i.e.:
         //      libGLES_${prop}.so, or:
         //      libEGL_${prop}.so, libGLESv1_CM_${prop}.so, libGLESv2_${prop}.so
@@ -258,7 +266,10 @@ void* Loader::open(egl_connection_t* cnx)
         hnd = attempt_to_load_system_driver(cnx, nullptr, true);
     }
 
-    if (!hnd && !failToLoadFromDriverSuffixProperty) {
+    if (!hnd && !failToLoadFromDriverSuffixProperty &&
+        property_get_int32("ro.vendor.api_level", 0) < __ANDROID_API_U__) {
+        // Still can't find the graphics drivers with the exact name. This time try to use wildcard
+        // matching if the device is launched before Android 14.
         hnd = attempt_to_load_system_driver(cnx, nullptr, false);
     }
 

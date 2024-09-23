@@ -59,7 +59,7 @@ using namespace std::literals;
 
 struct usb_handle {
     ~usb_handle() {
-      if (fd != -1) unix_close(fd);
+        if (fd != -1) unix_close(fd);
     }
 
     std::string path;
@@ -71,8 +71,14 @@ struct usb_handle {
     unsigned zero_mask;
     unsigned writeable = 1;
 
+    // The usbdevfs_urb structure ends in a variable length array of
+    // usbdevfs_iso_packet_desc. Since none of the usb calls ever attempt
+    // to fill in those values, ignore this warning.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wgnu-variable-sized-type-not-at-end"
     usbdevfs_urb urb_in;
     usbdevfs_urb urb_out;
+#pragma clang diagnostic pop
 
     bool urb_in_busy = false;
     bool urb_out_busy = false;
@@ -289,6 +295,13 @@ static void find_usb_device(const std::string& base,
                                                  device->iSerialNumber, zero_mask, max_packet_size);
                         break;
                     }
+                } else if (!length) {
+                    // Specific Corsair USB hubs seen in the wild report a zero-length
+                    // descriptor (resulting in an uninitialized descriptor
+                    // type: https://issuetracker.google.com/302212871).
+                    // If we don't give up here, we'll never make progress.
+                    D("interface descriptor has 0 length. type: %d", type);
+                    break;
                 } else {
                     bufptr += length;
                 }

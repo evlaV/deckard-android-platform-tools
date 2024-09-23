@@ -15,7 +15,9 @@
 #pragma once
 
 #include <stdint.h>
-#include <string>
+
+#include <optional>
+#include <string_view>
 
 namespace android {
 namespace snapshot {
@@ -26,8 +28,12 @@ static constexpr uint32_t kCowVersionMinor = 0;
 
 static constexpr uint32_t kCowVersionManifest = 2;
 
-static constexpr size_t BLOCK_SZ = 4096;
-static constexpr size_t BLOCK_SHIFT = (__builtin_ffs(BLOCK_SZ) - 1);
+static constexpr uint32_t kMinCowVersion = 1;
+static constexpr uint32_t kMaxCowVersion = 2;
+
+// Normally, this should be kMaxCowVersion. When a new version is under testing
+// it may be the previous value of kMaxCowVersion.
+static constexpr uint32_t kDefaultCowVersion = 2;
 
 // This header appears as the first sequence of bytes in the COW. All fields
 // in the layout are little-endian encoded. The on-disk layout is:
@@ -43,7 +49,9 @@ static constexpr size_t BLOCK_SHIFT = (__builtin_ffs(BLOCK_SZ) - 1);
 //      |    Footer (fixed)     |
 //      +-----------------------+
 //
-// The operations begin immediately after the header, and the "raw data"
+// After the header is a 2mb scratch space that is used to read ahead data during merge operations
+//
+// The operations begin immediately after the scratch space, and the "raw data"
 // immediately follows the operation which refers to it. While streaming
 // an OTA, we can immediately write the op and data, syncing after each pair,
 // while storing operation metadata in memory. At the end, we compute data and
@@ -53,13 +61,15 @@ static constexpr size_t BLOCK_SHIFT = (__builtin_ffs(BLOCK_SZ) - 1);
 // between writing the last operation/data pair, or the footer itself. In this
 // case, the safest way to proceed is to assume the last operation is faulty.
 
-struct CowHeader {
+struct CowHeaderPrefix {
     uint64_t magic;
     uint16_t major_version;
     uint16_t minor_version;
+    uint16_t header_size;  // size of CowHeader.
+} __attribute__((packed));
 
-    // Size of this struct.
-    uint16_t header_size;
+struct CowHeader {
+    CowHeaderPrefix prefix;
 
     // Size of footer struct
     uint16_t footer_size;
@@ -89,7 +99,7 @@ struct CowFooterOperation {
     // the compression type of that data (see constants below).
     uint8_t compression;
 
-    // Length of Footer Data. Currently 64 for both checksums
+    // Length of Footer Data. Currently 64.
     uint16_t data_length;
 
     // The amount of file space used by Cow operations
@@ -97,14 +107,6 @@ struct CowFooterOperation {
 
     // The number of cow operations in the file
     uint64_t num_ops;
-} __attribute__((packed));
-
-struct CowFooterData {
-    // SHA256 checksums of Footer op
-    uint8_t footer_checksum[32];
-
-    // SHA256 of the operation sequence.
-    uint8_t ops_checksum[32];
 } __attribute__((packed));
 
 // Cow operations are currently fixed-size entries, but this may change if
@@ -143,6 +145,42 @@ struct CowOperation {
     uint64_t source;
 } __attribute__((packed));
 
+// The on disk format of cow (currently ==  CowOperation)
+struct CowOperationV2 {
+    // The operation code (see the constants and structures below).
+    uint8_t type;
+
+    // If this operation reads from the data section of the COW, this contains
+    // the compression type of that data (see constants below).
+    uint8_t compression;
+
+    // If this operation reads from the data section of the COW, this contains
+    // the length.
+    uint16_t data_length;
+
+    // The block of data in the new image that this operation modifies.
+    uint64_t new_block;
+
+    // The value of |source| depends on the operation code.
+    //
+    // For copy operations, this is a block location in the source image.
+    //
+    // For replace operations, this is a byte offset within the COW's data
+    // sections (eg, not landing within the header or metadata). It is an
+    // absolute position within the image.
+    //
+    // For zero operations (replace with all zeroes), this is unused and must
+    // be zero.
+    //
+    // For Label operations, this is the value of the applied label.
+    //
+    // For Cluster operations, this is the length of the following data region
+    //
+    // For Xor operations, this is the byte location in the source image.
+    uint64_t source;
+} __attribute__((packed));
+
+static_assert(sizeof(CowOperationV2) == sizeof(CowOperation));
 static_assert(sizeof(CowOperation) == sizeof(CowFooterOperation));
 
 static constexpr uint8_t kCowCopyOp = 1;
@@ -158,16 +196,28 @@ enum CowCompressionAlgorithm : uint8_t {
     kCowCompressNone = 0,
     kCowCompressGz = 1,
     kCowCompressBrotli = 2,
-    kCowCompressLz4 = 3
+    kCowCompressLz4 = 3,
+    kCowCompressZstd = 4,
+};
+struct CowCompression {
+    CowCompressionAlgorithm algorithm = kCowCompressNone;
+    uint32_t compression_level = 0;
 };
 
 static constexpr uint8_t kCowReadAheadNotStarted = 0;
 static constexpr uint8_t kCowReadAheadInProgress = 1;
 static constexpr uint8_t kCowReadAheadDone = 2;
 
+static inline uint64_t GetCowOpSourceInfoData(const CowOperation* op) {
+    return op->source;
+}
+static inline bool GetCowOpSourceInfoCompression(const CowOperation* op) {
+    return op->compression != kCowCompressNone;
+}
+
 struct CowFooter {
     CowFooterOperation op;
-    CowFooterData data;
+    uint8_t unused[64];
 } __attribute__((packed));
 
 struct ScratchMetadata {
@@ -195,6 +245,9 @@ int64_t GetNextDataOffset(const CowOperation& op, uint32_t cluster_size);
 bool IsMetadataOp(const CowOperation& op);
 // Ops that have dependencies on old blocks, and must take care in their merge order
 bool IsOrderedOp(const CowOperation& op);
+
+// Convert compression name to internal value.
+std::optional<CowCompressionAlgorithm> CompressionAlgorithmFromString(std::string_view name);
 
 }  // namespace snapshot
 }  // namespace android

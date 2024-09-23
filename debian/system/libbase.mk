@@ -1,5 +1,6 @@
 NAME = libbase
 
+# system/libbase/Android.bp
 SOURCES = \
   abi_compatibility.cpp \
   chrono_utils.cpp \
@@ -31,7 +32,6 @@ OBJECTS_CC = $(SOURCES_CC:.cc=.o)
 SOURCES_CPP = $(filter %.cpp,$(SOURCES))
 OBJECTS_CPP = $(SOURCES_CPP:.cpp=.o)
 
-CXXFLAGS += -std=gnu++2a
 CPPFLAGS += \
   -D_FILE_OFFSET_BITS=64 \
   -Iexternal/fmtlib/include \

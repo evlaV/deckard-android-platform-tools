@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include <functional>
 #include <string>
 
 #include <android-base/macros.h>
@@ -141,6 +142,7 @@ void print_packet(const char* label, apacket* p);
 
 void handle_packet(apacket* p, atransport* t);
 
+bool is_one_device_mandatory();
 int launch_server(const std::string& socket_spec, const char* one_device);
 int adb_server_main(int is_daemon, const std::string& socket_spec, const char* one_device,
                     int ack_reply_fd);
@@ -172,14 +174,6 @@ asocket* daemon_service_to_socket(std::string_view name, atransport* transport);
 unique_fd execute_abb_command(std::string_view command);
 #endif
 
-#if !ADB_HOST
-int init_jdwp(void);
-asocket* create_jdwp_service_socket();
-asocket* create_jdwp_tracker_service_socket();
-asocket* create_app_tracker_service_socket();
-unique_fd create_jdwp_connection_fd(int jdwp_pid);
-#endif
-
 bool handle_forward_request(const char* service, atransport* transport, int reply_fd);
 bool handle_forward_request(const char* service,
                             std::function<atransport*(std::string* error)> transport_acquirer,
@@ -205,6 +199,9 @@ void put_apacket(apacket* p);
 #define ADB_CLASS 0xff
 #define ADB_SUBCLASS 0x42
 #define ADB_PROTOCOL 0x1
+
+#define ADB_DBC_CLASS 0xDC
+#define ADB_DBC_SUBCLASS 0x2
 
 void local_init(const std::string& addr);
 bool local_connect(int port);

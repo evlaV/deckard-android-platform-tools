@@ -36,7 +36,6 @@ cc_defaults {
     cppflags: [
         "-fno-exceptions",
         "-fno-rtti",
-        "-std=c++14",
     ],
 
     target: {
@@ -127,6 +126,10 @@ cc_binary_host {
         "src/diff/abi_diff_wrappers.cpp",
         "src/diff/header_abi_diff.cpp",
     ],
+
+    static_libs: [
+        "libjsoncpp",
+    ],
 }
 
 cc_library_host_static {
@@ -160,6 +163,7 @@ cc_library_host_static {
     ],
 
     static_libs: [
+        "libbase",
         "libheader-checker-proto",
         "libjsoncpp",
     ],
@@ -194,9 +198,13 @@ cc_test_host {
     ],
 
     static_libs: [
+        "libbase",
+        "libgmock",
         "libgtest",
         "libgtest_main",
         "libheader-checker",
+        "libjsoncpp",
+        "liblog",
     ],
 
     shared_libs: [

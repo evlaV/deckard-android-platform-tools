@@ -14,10 +14,6 @@
  * limitations under the License.
  */
 
-#if !ADB_HOST
-
-#define TRACE_TAG ADB_WIRELESS
-
 #include "adb_wifi.h"
 
 #include <unistd.h>
@@ -69,7 +65,7 @@ TlsServer::TlsServer(int port) : port_(port) {}
 
 TlsServer::~TlsServer() {
     fdevent* fde = fd_event_;
-    fdevent_run_on_main_thread([fde]() {
+    fdevent_run_on_looper([fde]() {
         if (fde != nullptr) {
             fdevent_destroy(fde);
         }
@@ -104,7 +100,7 @@ bool TlsServer::Start() {
     LOG(INFO) << "adbwifi started on port " << port_;
 
     std::unique_lock<std::mutex> lock(mutex);
-    fdevent_run_on_main_thread([&]() {
+    fdevent_run_on_looper([&]() {
         fd_event_ = fdevent_create(fd.release(), &TlsServer::StaticOnFdEvent, this);
         if (fd_event_ == nullptr) {
             LOG(ERROR) << "Failed to create fd event for TlsServer.";
@@ -194,6 +190,7 @@ static void start_wifi_enabled_observer() {
         while (true) {
             std::string toggled_val = wifi_enabled ? "0" : "1";
             LOG(INFO) << "Waiting for " << kWifiEnabledProp << "=" << toggled_val;
+
             if (WaitForProperty(kWifiEnabledProp, toggled_val)) {
                 wifi_enabled = !wifi_enabled;
                 LOG(INFO) << kWifiEnabledProp << " changed to " << toggled_val;
@@ -225,5 +222,3 @@ void adbd_wifi_secure_connect(atransport* t) {
     t->auth_id = adbd_auth_tls_device_connected(auth_ctx, kAdbTransportTypeWifi, t->auth_key.data(),
                                                 t->auth_key.size());
 }
-
-#endif /* !HOST */

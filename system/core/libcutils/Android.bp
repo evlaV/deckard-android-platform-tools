@@ -162,18 +162,24 @@ cc_library {
         "properties.cpp",
         "record_stream.cpp",
         "strlcpy.c",
-        "threads.cpp",
     ],
 
     target: {
         linux_bionic: {
             enabled: true,
+            static_libs: [
+                "libasync_safe",
+            ],
+        },
+        linux: {
+            srcs: [
+                "canned_fs_config.cpp",
+                "fs_config.cpp",
+            ],
         },
         not_windows: {
             srcs: libcutils_nonwindows_sources + [
                 "ashmem-host.cpp",
-                "canned_fs_config.cpp",
-                "fs_config.cpp",
                 "trace-host.cpp",
             ],
         },
@@ -190,43 +196,21 @@ cc_library {
             ],
         },
         android: {
+            sanitize: {
+                misc_undefined: ["integer"],
+            },
+            static_libs: [
+                "libasync_safe",
+            ],
             srcs: libcutils_nonwindows_sources + [
                 "android_reboot.cpp",
                 "ashmem-dev.cpp",
-                "canned_fs_config.cpp",
-                "fs_config.cpp",
                 "klog.cpp",
                 "partition_utils.cpp",
                 "qtaguid.cpp",
                 "trace-dev.cpp",
                 "uevent.cpp",
             ],
-        },
-
-        android_arm: {
-            sanitize: {
-                misc_undefined: ["integer"],
-            },
-        },
-        android_arm64: {
-            sanitize: {
-                misc_undefined: ["integer"],
-            },
-        },
-
-        android_x86: {
-            // TODO: This is to work around b/29412086.
-            // Remove once __mulodi4 is available and move the "sanitize" block
-            // to the android target.
-            sanitize: {
-                misc_undefined: [],
-            },
-        },
-
-        android_x86_64: {
-            sanitize: {
-                misc_undefined: ["integer"],
-            },
         },
 
         // qtaguid.cpp loads libnetd_client.so with dlopen().  Since
@@ -236,11 +220,19 @@ cc_library {
             exclude_srcs: [
                 "qtaguid.cpp",
             ],
+            header_abi_checker: {
+                enabled: true,
+                ref_dump_dirs: ["abi-dumps"],
+            },
         },
         product: {
             exclude_srcs: [
                 "qtaguid.cpp",
             ],
+            header_abi_checker: {
+                enabled: true,
+                ref_dump_dirs: ["abi-dumps"],
+            },
         },
     },
 
@@ -303,11 +295,14 @@ cc_defaults {
     ],
 }
 
+always_static_test_libraries = [
+    "libjsoncpp",
+]
+
 test_libraries = [
     "libcutils",
     "liblog",
     "libbase",
-    "libjsoncpp",
     "libprocessgroup",
     "libcgrouprc",
 ]
@@ -318,6 +313,7 @@ cc_test {
     defaults: ["libcutils_test_default"],
     host_supported: true,
     shared_libs: test_libraries,
+    static_libs: always_static_test_libraries,
     require_root: true,
 }
 
@@ -327,7 +323,7 @@ cc_defaults {
     static_libs: [
         "libc",
         "libcgrouprc_format",
-    ] + test_libraries,
+    ] + test_libraries + always_static_test_libraries,
     stl: "libc++_static",
     require_root: true,
 

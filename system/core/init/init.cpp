@@ -33,7 +33,10 @@
 #define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
 #include <sys/_system_properties.h>
 
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -48,6 +51,7 @@
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <android-base/thread_annotations.h>
 #include <fs_avb/fs_avb.h>
 #include <fs_mgr_vendor_overlay.h>
 #include <keyutils.h>
@@ -60,8 +64,10 @@
 #include <selinux/android.h>
 #include <unwindstack/AndroidUnwinder.h>
 
+#include "action.h"
+#include "action_manager.h"
 #include "action_parser.h"
-#include "builtins.h"
+#include "apex_init_util.h"
 #include "epoll.h"
 #include "first_stage_init.h"
 #include "first_stage_mount.h"
@@ -79,6 +85,7 @@
 #include "selabel.h"
 #include "selinux.h"
 #include "service.h"
+#include "service_list.h"
 #include "service_parser.h"
 #include "sigchld_handler.h"
 #include "snapuserd_transition.h"
@@ -205,16 +212,16 @@ static class PropWaiterState {
     }
 
   private:
-    void ResetWaitForPropLocked() {
+    void ResetWaitForPropLocked() EXCLUSIVE_LOCKS_REQUIRED(lock_) {
         wait_prop_name_.clear();
         wait_prop_value_.clear();
         waiting_for_prop_.reset();
     }
 
     std::mutex lock_;
-    std::unique_ptr<Timer> waiting_for_prop_{nullptr};
-    std::string wait_prop_name_;
-    std::string wait_prop_value_;
+    GUARDED_BY(lock_) std::unique_ptr<Timer> waiting_for_prop_{nullptr};
+    GUARDED_BY(lock_) std::string wait_prop_name_;
+    GUARDED_BY(lock_) std::string wait_prop_value_;
 
 } prop_waiter_state;
 
@@ -240,47 +247,20 @@ static class ShutdownState {
         WakeMainInitThread();
     }
 
-    std::optional<std::string> CheckShutdown() {
+    std::optional<std::string> CheckShutdown() __attribute__((warn_unused_result)) {
         auto lock = std::lock_guard{shutdown_command_lock_};
         if (do_shutdown_ && !IsShuttingDown()) {
+            do_shutdown_ = false;
             return shutdown_command_;
         }
         return {};
     }
 
-    bool do_shutdown() const { return do_shutdown_; }
-    void set_do_shutdown(bool value) { do_shutdown_ = value; }
-
   private:
     std::mutex shutdown_command_lock_;
-    std::string shutdown_command_;
+    std::string shutdown_command_ GUARDED_BY(shutdown_command_lock_);
     bool do_shutdown_ = false;
 } shutdown_state;
-
-static void UnwindMainThreadStack() {
-    unwindstack::AndroidLocalUnwinder unwinder;
-    unwindstack::AndroidUnwinderData data;
-    if (!unwinder.Unwind(data)) {
-        LOG(ERROR) << __FUNCTION__
-                   << "sys.powerctl: Failed to unwind callstack: " << data.GetErrorString();
-    }
-    for (const auto& frame : data.frames) {
-        LOG(ERROR) << "sys.powerctl: " << unwinder.FormatFrame(frame);
-    }
-}
-
-void DebugRebootLogging() {
-    LOG(INFO) << "sys.powerctl: do_shutdown: " << shutdown_state.do_shutdown()
-              << " IsShuttingDown: " << IsShuttingDown();
-    if (shutdown_state.do_shutdown()) {
-        LOG(ERROR) << "sys.powerctl set while a previous shutdown command has not been handled";
-        UnwindMainThreadStack();
-    }
-    if (IsShuttingDown()) {
-        LOG(ERROR) << "sys.powerctl set while init is already shutting down";
-        UnwindMainThreadStack();
-    }
-}
 
 void DumpState() {
     ServiceList::GetInstance().DumpState();
@@ -443,11 +423,47 @@ static Result<void> DoControlRestart(Service* service) {
     return {};
 }
 
+int StopServicesFromApex(const std::string& apex_name) {
+    auto services = ServiceList::GetInstance().FindServicesByApexName(apex_name);
+    if (services.empty()) {
+        LOG(INFO) << "No service found for APEX: " << apex_name;
+        return 0;
+    }
+    std::set<std::string> service_names;
+    for (const auto& service : services) {
+        service_names.emplace(service->name());
+    }
+    constexpr std::chrono::milliseconds kServiceStopTimeout = 10s;
+    int still_running = StopServicesAndLogViolations(service_names, kServiceStopTimeout,
+                        true /*SIGTERM*/);
+    // Send SIGKILL to ones that didn't terminate cleanly.
+    if (still_running > 0) {
+        still_running = StopServicesAndLogViolations(service_names, 0ms, false /*SIGKILL*/);
+    }
+    return still_running;
+}
+
+void RemoveServiceAndActionFromApex(const std::string& apex_name) {
+    // Remove services and actions that match apex name
+    ActionManager::GetInstance().RemoveActionIf([&](const std::unique_ptr<Action>& action) -> bool {
+        if (GetApexNameFromFileName(action->filename()) == apex_name) {
+            return true;
+        }
+        return false;
+    });
+    ServiceList::GetInstance().RemoveServiceIf([&](const std::unique_ptr<Service>& s) -> bool {
+        if (GetApexNameFromFileName(s->filename()) == apex_name) {
+            return true;
+        }
+        return false;
+    });
+}
+
 static Result<void> DoUnloadApex(const std::string& apex_name) {
-    std::string prop_name = "init.apex." + apex_name;
-    // TODO(b/232114573) remove services and actions read from the apex
-    // TODO(b/232799709) kill services from the apex
-    SetProperty(prop_name, "unloaded");
+    if (StopServicesFromApex(apex_name) > 0) {
+        return Error() << "Unable to stop all service from " << apex_name;
+    }
+    RemoveServiceAndActionFromApex(apex_name);
     return {};
 }
 
@@ -471,14 +487,14 @@ static Result<void> UpdateApexLinkerConfig(const std::string& apex_name) {
 }
 
 static Result<void> DoLoadApex(const std::string& apex_name) {
-    std::string prop_name = "init.apex." + apex_name;
-    // TODO(b/232799709) read .rc files from the apex
+    if (auto result = ParseRcScriptsFromApex(apex_name); !result.ok()) {
+        return result.error();
+    }
 
     if (auto result = UpdateApexLinkerConfig(apex_name); !result.ok()) {
         return result.error();
     }
 
-    SetProperty(prop_name, "loaded");
     return {};
 }
 
@@ -620,6 +636,10 @@ static Result<void> wait_for_coldboot_done_action(const BuiltinArguments& args) 
 }
 
 static Result<void> SetupCgroupsAction(const BuiltinArguments&) {
+    if (!CgroupsAvailable()) {
+        LOG(INFO) << "Cgroups support in kernel is not enabled";
+        return {};
+    }
     // Have to create <CGROUPS_RC_DIR> using make_dir function
     // for appropriate sepolicy to be set for it
     make_dir(android::base::Dirname(CGROUPS_RC_PATH), 0711);
@@ -693,29 +713,12 @@ static void HandleSigtermSignal(const signalfd_siginfo& siginfo) {
     HandlePowerctlMessage("shutdown,container");
 }
 
-static constexpr std::chrono::milliseconds kDiagnosticTimeout = 10s;
-
 static void HandleSignalFd() {
     signalfd_siginfo siginfo;
-    auto started = std::chrono::steady_clock::now();
-    for (;;) {
-        ssize_t bytes_read = TEMP_FAILURE_RETRY(read(signal_fd, &siginfo, sizeof(siginfo)));
-        if (bytes_read < 0 && errno == EAGAIN) {
-            auto now = std::chrono::steady_clock::now();
-            std::chrono::duration<double> waited = now - started;
-            if (waited >= kDiagnosticTimeout) {
-                LOG(ERROR) << "epoll() woke us up, but we waited with no SIGCHLD!";
-                started = now;
-            }
-
-            std::this_thread::sleep_for(100ms);
-            continue;
-        }
-        if (bytes_read != sizeof(siginfo)) {
-            PLOG(ERROR) << "Failed to read siginfo from signal_fd";
-            return;
-        }
-        break;
+    ssize_t bytes_read = TEMP_FAILURE_RETRY(read(signal_fd, &siginfo, sizeof(siginfo)));
+    if (bytes_read != sizeof(siginfo)) {
+        PLOG(ERROR) << "Failed to read siginfo from signal_fd";
+        return;
     }
 
     switch (siginfo.ssi_signo) {
@@ -726,7 +729,7 @@ static void HandleSignalFd() {
             HandleSigtermSignal(siginfo);
             break;
         default:
-            PLOG(ERROR) << "signal_fd: received unexpected signal " << siginfo.ssi_signo;
+            LOG(ERROR) << "signal_fd: received unexpected signal " << siginfo.ssi_signo;
             break;
     }
 }
@@ -771,12 +774,13 @@ static void InstallSignalFdHandler(Epoll* epoll) {
         LOG(FATAL) << "Failed to register a fork handler: " << strerror(result);
     }
 
-    signal_fd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
+    signal_fd = signalfd(-1, &mask, SFD_CLOEXEC);
     if (signal_fd == -1) {
         PLOG(FATAL) << "failed to create signalfd";
     }
 
-    if (auto result = epoll->RegisterHandler(signal_fd, HandleSignalFd); !result.ok()) {
+    constexpr int flags = EPOLLIN | EPOLLPRI;
+    if (auto result = epoll->RegisterHandler(signal_fd, HandleSignalFd, flags); !result.ok()) {
         LOG(FATAL) << result.error();
     }
 }
@@ -827,6 +831,12 @@ static void MountExtraFilesystems() {
     // /apex is used to mount APEXes
     CHECKCALL(mount("tmpfs", "/apex", "tmpfs", MS_NOEXEC | MS_NOSUID | MS_NODEV,
                     "mode=0755,uid=0,gid=0"));
+
+    if (NeedsTwoMountNamespaces()) {
+        // /bootstrap-apex is used to mount "bootstrap" APEXes.
+        CHECKCALL(mount("tmpfs", "/bootstrap-apex", "tmpfs", MS_NOEXEC | MS_NOSUID | MS_NODEV,
+                        "mode=0755,uid=0,gid=0"));
+    }
 
     // /linkerconfig is used to keep generated linker configuration
     CHECKCALL(mount("tmpfs", "/linkerconfig", "tmpfs", MS_NOEXEC | MS_NOSUID | MS_NODEV,
@@ -922,6 +932,8 @@ int SecondStageMain(int argc, char** argv) {
     InitKernelLogging(argv);
     LOG(INFO) << "init second stage started!";
 
+    SelinuxSetupKernelLogging();
+
     // Update $PATH in the case the second stage init is newer than first stage init, where it is
     // first set.
     if (setenv("PATH", _PATH_DEFPATH, 1) != 0) {
@@ -982,7 +994,6 @@ int SecondStageMain(int argc, char** argv) {
     MountExtraFilesystems();
 
     // Now set up SELinux for second stage.
-    SelinuxSetupKernelLogging();
     SelabelInitialize();
     SelinuxRestoreContext();
 
@@ -990,6 +1001,11 @@ int SecondStageMain(int argc, char** argv) {
     if (auto result = epoll.Open(); !result.ok()) {
         PLOG(FATAL) << result.error();
     }
+
+    // We always reap children before responding to the other pending functions. This is to
+    // prevent a race where other daemons see that a service has exited and ask init to
+    // start it again via ctl.start before init has reaped it.
+    epoll.SetFirstCallback(ReapAnyOutstandingChildren);
 
     InstallSignalFdHandler(&epoll);
     InstallInitNotifier(&epoll);
@@ -1033,6 +1049,12 @@ int SecondStageMain(int argc, char** argv) {
     SetProperty(gsi::kGsiBootedProp, is_running);
     auto is_installed = android::gsi::IsGsiInstalled() ? "1" : "0";
     SetProperty(gsi::kGsiInstalledProp, is_installed);
+    if (android::gsi::IsGsiRunning()) {
+        std::string dsu_slot;
+        if (android::gsi::GetActiveDsu(&dsu_slot)) {
+            SetProperty(gsi::kDsuSlotProp, dsu_slot);
+        }
+    }
 
     am.QueueBuiltinAction(SetupCgroupsAction, "SetupCgroups");
     am.QueueBuiltinAction(SetKptrRestrictAction, "SetKptrRestrict");
@@ -1072,54 +1094,46 @@ int SecondStageMain(int argc, char** argv) {
     // Restore prio before main loop
     setpriority(PRIO_PROCESS, 0, 0);
     while (true) {
-        // By default, sleep until something happens.
-        auto epoll_timeout = std::optional<std::chrono::milliseconds>{kDiagnosticTimeout};
+        // By default, sleep until something happens. Do not convert far_future into
+        // std::chrono::milliseconds because that would trigger an overflow. The unit of boot_clock
+        // is 1ns.
+        const boot_clock::time_point far_future = boot_clock::time_point::max();
+        boot_clock::time_point next_action_time = far_future;
 
         auto shutdown_command = shutdown_state.CheckShutdown();
         if (shutdown_command) {
             LOG(INFO) << "Got shutdown_command '" << *shutdown_command
                       << "' Calling HandlePowerctlMessage()";
             HandlePowerctlMessage(*shutdown_command);
-            shutdown_state.set_do_shutdown(false);
         }
 
         if (!(prop_waiter_state.MightBeWaiting() || Service::is_exec_service_running())) {
             am.ExecuteOneCommand();
+            // If there's more work to do, wake up again immediately.
+            if (am.HasMoreCommands()) {
+                next_action_time = boot_clock::now();
+            }
         }
+        // Since the above code examined pending actions, no new actions must be
+        // queued by the code between this line and the Epoll::Wait() call below
+        // without calling WakeMainInitThread().
         if (!IsShuttingDown()) {
             auto next_process_action_time = HandleProcessActions();
 
             // If there's a process that needs restarting, wake up in time for that.
             if (next_process_action_time) {
-                epoll_timeout = std::chrono::ceil<std::chrono::milliseconds>(
-                        *next_process_action_time - boot_clock::now());
-                if (*epoll_timeout < 0ms) epoll_timeout = 0ms;
+                next_action_time = std::min(next_action_time, *next_process_action_time);
             }
         }
 
-        if (!(prop_waiter_state.MightBeWaiting() || Service::is_exec_service_running())) {
-            // If there's more work to do, wake up again immediately.
-            if (am.HasMoreCommands()) epoll_timeout = 0ms;
+        std::optional<std::chrono::milliseconds> epoll_timeout;
+        if (next_action_time != far_future) {
+            epoll_timeout = std::chrono::ceil<std::chrono::milliseconds>(
+                    std::max(next_action_time - boot_clock::now(), 0ns));
         }
-
-        auto pending_functions = epoll.Wait(epoll_timeout);
-        if (!pending_functions.ok()) {
-            LOG(ERROR) << pending_functions.error();
-        } else if (!pending_functions->empty()) {
-            // We always reap children before responding to the other pending functions. This is to
-            // prevent a race where other daemons see that a service has exited and ask init to
-            // start it again via ctl.start before init has reaped it.
-            ReapAnyOutstandingChildren();
-            for (const auto& function : *pending_functions) {
-                (*function)();
-            }
-        } else if (Service::is_exec_service_running()) {
-            std::chrono::duration<double> waited =
-                    std::chrono::steady_clock::now() - Service::exec_service_started();
-            if (waited >= kDiagnosticTimeout) {
-                LOG(ERROR) << "Exec service is hung? Waited " << waited.count()
-                           << " without SIGCHLD";
-            }
+        auto epoll_result = epoll.Wait(epoll_timeout);
+        if (!epoll_result.ok()) {
+            LOG(ERROR) << epoll_result.error();
         }
         if (!IsShuttingDown()) {
             HandleControlMessages();

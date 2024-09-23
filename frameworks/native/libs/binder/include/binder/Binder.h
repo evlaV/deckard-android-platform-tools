@@ -59,6 +59,8 @@ public:
     virtual void*       findObject(const void* objectID) const final;
     virtual void* detachObject(const void* objectID) final;
     void withLock(const std::function<void()>& doWithLock);
+    sp<IBinder> lookupOrCreateWeak(const void* objectID, IBinder::object_make_func make,
+                                   const void* makeArgs);
 
     virtual BBinder*    localBinder();
 
@@ -123,13 +125,15 @@ private:
 
     [[nodiscard]] status_t setRpcClientDebug(const Parcel& data);
     void removeRpcServerLink(const sp<RpcServerLink>& link);
+    [[nodiscard]] status_t startRecordingTransactions(const Parcel& data);
+    [[nodiscard]] status_t stopRecordingTransactions();
 
     std::atomic<Extras*> mExtras;
 
     friend ::android::internal::Stability;
     int16_t mStability;
     bool mParceled;
-    uint8_t mReserved0;
+    bool mRecordingOn;
 
 #ifdef __LP64__
     int32_t mReserved1;

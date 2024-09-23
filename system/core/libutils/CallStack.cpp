@@ -49,7 +49,7 @@ void CallStack::update(int32_t ignoreDepth, pid_t tid) {
     unwindstack::AndroidUnwinderData data;
     std::optional<pid_t> tid_val;
     if (tid != -1) {
-        *tid_val = tid;
+        tid_val = tid;
     }
     if (!unwinder.Unwind(tid_val, data)) {
         ALOGW("%s: Failed to unwind callstack: %s", __FUNCTION__, data.GetErrorString().c_str());
@@ -82,7 +82,7 @@ String8 CallStack::toString(const char* prefix) const {
 
 void CallStack::print(Printer& printer) const {
     for (size_t i = 0; i < mFrameLines.size(); i++) {
-        printer.printLine(mFrameLines[i]);
+        printer.printLine(mFrameLines[i].c_str());
     }
 }
 

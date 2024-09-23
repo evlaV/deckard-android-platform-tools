@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <type_traits>
 #include <utility>
 
 #include "fdevent/fdevent_test.h"
@@ -30,7 +31,10 @@ static IOVector::block_type create_block(const std::string& string) {
 static IOVector::block_type create_block(char value, size_t len) {
     auto block = IOVector::block_type();
     block.resize(len);
+
+    static_assert(std::is_standard_layout<decltype(block)>());
     memset(&(block)[0], value, len);
+
     return block;
 }
 
@@ -45,6 +49,13 @@ TEST(IOVector, empty) {
     // Empty IOVector.
     IOVector bc;
     CHECK_EQ(0ULL, bc.coalesce().size());
+}
+
+TEST(IOVector, move_constructor) {
+    IOVector x;
+    size_t xsize = x.coalesce().size();
+    IOVector y(std::move(x));
+    CHECK_EQ(xsize, y.coalesce().size());
 }
 
 TEST(IOVector, single_block) {
@@ -179,7 +190,7 @@ TEST_F(weak_ptr_test, smoke) {
     bool destroyed = false;
     std::optional<weak_ptr<Destructor>> p;
 
-    fdevent_run_on_main_thread([&p, &destructor, &destroyed]() {
+    fdevent_run_on_looper([&p, &destructor, &destroyed]() {
         destructor = new Destructor(&destroyed);
         p = destructor->weak();
         ASSERT_TRUE(p->get());
@@ -198,7 +209,7 @@ TEST_F(weak_ptr_test, smoke) {
     WaitForFdeventLoop();
 
     ASSERT_TRUE(destroyed);
-    fdevent_run_on_main_thread([&p]() {
+    fdevent_run_on_looper([&p]() {
         ASSERT_FALSE(p->get());
         p.reset();
     });

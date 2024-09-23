@@ -34,6 +34,10 @@
 
 #include <inttypes.h>
 
+#ifdef __ANDROID__
+#include <cutils/properties.h>
+#endif
+
 namespace android {
 
 using base::StringPrintf;
@@ -41,7 +45,7 @@ using base::StringPrintf;
 #if RPC_FLAKE_PRONE
 void rpcMaybeWaitToFlake() {
     [[clang::no_destroy]] static std::random_device r;
-    [[clang::no_destroy]] static std::mutex m;
+    [[clang::no_destroy]] static RpcMutex m;
     unsigned num;
     {
         RpcMutexLockGuard lock(m);
@@ -56,8 +60,10 @@ static bool enableAncillaryFds(RpcSession::FileDescriptorTransportMode mode) {
         case RpcSession::FileDescriptorTransportMode::NONE:
             return false;
         case RpcSession::FileDescriptorTransportMode::UNIX:
+        case RpcSession::FileDescriptorTransportMode::TRUSTY:
             return true;
     }
+    LOG_ALWAYS_FATAL("Invalid FileDescriptorTransportMode: %d", static_cast<int>(mode));
 }
 
 RpcState::RpcState() {}
@@ -261,8 +267,10 @@ void RpcState::dump() {
 }
 
 void RpcState::clear() {
-    RpcMutexUniqueLock _l(mNodeMutex);
+    return clear(RpcMutexUniqueLock(mNodeMutex));
+}
 
+void RpcState::clear(RpcMutexUniqueLock nodeLock) {
     if (mTerminated) {
         LOG_ALWAYS_FATAL_IF(!mNodeForAddress.empty(),
                             "New state should be impossible after terminating!");
@@ -291,7 +299,7 @@ void RpcState::clear() {
     auto temp = std::move(mNodeForAddress);
     mNodeForAddress.clear(); // RpcState isn't reusable, but for future/explicit
 
-    _l.unlock();
+    nodeLock.unlock();
     temp.clear(); // explicit
 }
 
@@ -393,6 +401,31 @@ status_t RpcState::rpcRec(
                        android::base::HexString(iovs[i].iov_base, iovs[i].iov_len).c_str());
     }
     return OK;
+}
+
+bool RpcState::validateProtocolVersion(uint32_t version) {
+    if (version == RPC_WIRE_PROTOCOL_VERSION_EXPERIMENTAL) {
+#if defined(__ANDROID__)
+        char codename[PROPERTY_VALUE_MAX];
+        property_get("ro.build.version.codename", codename, "");
+        if (!strcmp(codename, "REL")) {
+            ALOGE("Cannot use experimental RPC binder protocol on a release branch.");
+            return false;
+        }
+#else
+        // don't restrict on other platforms, though experimental should
+        // only really be used for testing, we don't have a good way to see
+        // what is shipping outside of Android
+#endif
+    } else if (version >= RPC_WIRE_PROTOCOL_VERSION_NEXT) {
+        ALOGE("Cannot use RPC binder protocol version %u which is unknown (current protocol "
+              "version "
+              "is %u).",
+              version, RPC_WIRE_PROTOCOL_VERSION);
+        return false;
+    }
+
+    return true;
 }
 
 status_t RpcState::readNewSessionResponse(const sp<RpcSession::RpcConnection>& connection,
@@ -556,13 +589,12 @@ status_t RpcState::transactAddress(const sp<RpcSession::RpcConnection>& connecti
             .parcelDataSize = static_cast<uint32_t>(data.dataSize()),
     };
 
-    constexpr size_t kWaitMaxUs = 1000000;
-    constexpr size_t kWaitLogUs = 10000;
-    size_t waitUs = 0;
-
     // Oneway calls have no sync point, so if many are sent before, whether this
     // is a twoway or oneway transaction, they may have filled up the socket.
     // So, make sure we drain them before polling
+    constexpr size_t kWaitMaxUs = 1000000;
+    constexpr size_t kWaitLogUs = 10000;
+    size_t waitUs = 0;
 
     iovec iovs[]{
             {&command, sizeof(RpcWireHeader)},
@@ -590,8 +622,9 @@ status_t RpcState::transactAddress(const sp<RpcSession::RpcConnection>& connecti
                 },
                 rpcFields->mFds.get());
         status != OK) {
-        // TODO(b/167966510): need to undo onBinderLeaving - we know the
-        // refcount isn't successfully transferred.
+        // rpcSend calls shutdownAndWait, so all refcounts should be reset. If we ever tolerate
+        // errors here, then we may need to undo the binder-sent counts for the transaction as
+        // well as for the binder objects in the Parcel
         return status;
     }
 
@@ -703,7 +736,7 @@ status_t RpcState::sendDecStrongToTarget(const sp<RpcSession::RpcConnection>& co
     };
 
     {
-        RpcMutexLockGuard _l(mNodeMutex);
+        RpcMutexUniqueLock _l(mNodeMutex);
         if (mTerminated) return DEAD_OBJECT; // avoid fatal only, otherwise races
         auto it = mNodeForAddress.find(addr);
         LOG_ALWAYS_FATAL_IF(it == mNodeForAddress.end(),
@@ -719,8 +752,9 @@ status_t RpcState::sendDecStrongToTarget(const sp<RpcSession::RpcConnection>& co
         body.amount = it->second.timesRecd - target;
         it->second.timesRecd = target;
 
-        LOG_ALWAYS_FATAL_IF(nullptr != tryEraseNode(it),
+        LOG_ALWAYS_FATAL_IF(nullptr != tryEraseNode(session, std::move(_l), it),
                             "Bad state. RpcState shouldn't own received binder");
+        // LOCK ALREADY RELEASED
     }
 
     RpcWireHeader cmd = {
@@ -886,6 +920,7 @@ processTransactInternalTailCall:
                 it->second.asyncTodo.push(BinderNode::AsyncTodo{
                         .ref = target,
                         .data = std::move(transactionData),
+                        .ancillaryFds = std::move(ancillaryFds),
                         .asyncNumber = transaction->asyncNumber,
                 });
 
@@ -923,7 +958,7 @@ processTransactInternalTailCall:
                                           transactionData.size() -
                                                   offsetof(RpcWireTransaction, data)};
         Span<const uint32_t> objectTableSpan;
-        if (session->getProtocolVersion().value() >
+        if (session->getProtocolVersion().value() >=
             RPC_WIRE_PROTOCOL_VERSION_RPC_HEADER_FEATURE_EXPLICIT_PARCEL_SIZE) {
             std::optional<Span<const uint8_t>> objectTableBytes =
                     parcelSpan.splitOff(transaction->parcelDataSize);
@@ -1034,8 +1069,8 @@ processTransactInternalTailCall:
                 return DEAD_OBJECT;
             }
 
-            if (it->second.asyncTodo.size() == 0) return OK;
-            if (it->second.asyncTodo.top().asyncNumber == it->second.asyncNumber) {
+            if (it->second.asyncTodo.size() != 0 &&
+                it->second.asyncTodo.top().asyncNumber == it->second.asyncNumber) {
                 LOG_RPC_DETAIL("Found next async transaction %" PRIu64 " on %" PRIu64,
                                it->second.asyncNumber, addr);
 
@@ -1046,6 +1081,7 @@ processTransactInternalTailCall:
 
                 // reset up arguments
                 transactionData = std::move(todo.data);
+                ancillaryFds = std::move(todo.ancillaryFds);
                 LOG_ALWAYS_FATAL_IF(target != todo.ref,
                                     "async list should be associated with a binder");
 
@@ -1161,8 +1197,8 @@ status_t RpcState::processDecStrong(const sp<RpcSession::RpcConnection>& connect
                    it->second.timesSent);
 
     it->second.timesSent -= body.amount;
-    sp<IBinder> tempHold = tryEraseNode(it);
-    _l.unlock();
+    sp<IBinder> tempHold = tryEraseNode(session, std::move(_l), it);
+    // LOCK ALREADY RELEASED
     tempHold = nullptr; // destructor may make binder calls on this session
 
     return OK;
@@ -1205,6 +1241,20 @@ status_t RpcState::validateParcel(const sp<RpcSession>& session, const Parcel& p
                                              rpcFields->mFds->size(), kMaxFdsPerMsg);
                     return BAD_VALUE;
                 }
+                break;
+            }
+            case RpcSession::FileDescriptorTransportMode::TRUSTY: {
+                // Keep this in sync with trusty_ipc.h!!!
+                // We could import that file here on Trusty, but it's not
+                // available on Android
+                constexpr size_t kMaxFdsPerMsg = 8;
+                if (rpcFields->mFds->size() > kMaxFdsPerMsg) {
+                    *errorMsg = StringPrintf("Too many file descriptors in Parcel for Trusty "
+                                             "IPC connection: %zu (max is %zu)",
+                                             rpcFields->mFds->size(), kMaxFdsPerMsg);
+                    return BAD_VALUE;
+                }
+                break;
             }
         }
     }
@@ -1212,7 +1262,10 @@ status_t RpcState::validateParcel(const sp<RpcSession>& session, const Parcel& p
     return OK;
 }
 
-sp<IBinder> RpcState::tryEraseNode(std::map<uint64_t, BinderNode>::iterator& it) {
+sp<IBinder> RpcState::tryEraseNode(const sp<RpcSession>& session, RpcMutexUniqueLock nodeLock,
+                                   std::map<uint64_t, BinderNode>::iterator& it) {
+    bool shouldShutdown = false;
+
     sp<IBinder> ref;
 
     if (it->second.timesSent == 0) {
@@ -1222,7 +1275,25 @@ sp<IBinder> RpcState::tryEraseNode(std::map<uint64_t, BinderNode>::iterator& it)
             LOG_ALWAYS_FATAL_IF(!it->second.asyncTodo.empty(),
                                 "Can't delete binder w/ pending async transactions");
             mNodeForAddress.erase(it);
+
+            if (mNodeForAddress.size() == 0) {
+                shouldShutdown = true;
+            }
         }
+    }
+
+    // If we shutdown, prevent RpcState from being re-used. This prevents another
+    // thread from getting the root object again.
+    if (shouldShutdown) {
+        clear(std::move(nodeLock));
+    } else {
+        nodeLock.unlock(); // explicit
+    }
+    // LOCK IS RELEASED
+
+    if (shouldShutdown) {
+        ALOGI("RpcState has no binders left, so triggering shutdown...");
+        (void)session->shutdownAndWait(false);
     }
 
     return ref;

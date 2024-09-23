@@ -42,9 +42,12 @@
 #include "binder_test_utils.h"
 #include "dexopt.h"
 #include "globals.h"
+#include "unique_file.h"
 #include "utils.h"
 
 using android::base::StringPrintf;
+using android::base::unique_fd;
+using android::os::ParcelFileDescriptor;
 using std::filesystem::is_empty;
 
 namespace android {
@@ -113,6 +116,10 @@ bool create_cache_path(char path[PKG_PATH_MAX], const char *src, const char *ins
     return create_cache_path_default(path, src, instruction_set);
 }
 
+bool force_compile_without_image() {
+    return false;
+}
+
 static std::string get_full_path(const std::string& path) {
     return StringPrintf("%s/%s", kTestPath.c_str(), path.c_str());
 }
@@ -130,6 +137,16 @@ static int create(const std::string& path, uid_t owner, gid_t group, mode_t mode
     EXPECT_EQ(::fchown(fd, owner, group), 0);
     EXPECT_EQ(::fchmod(fd, mode), 0);
     return fd;
+}
+
+static void create_with_content(const std::string& path, uid_t owner, gid_t group, mode_t mode,
+                                const std::string& content) {
+    int fd = ::open(path.c_str(), O_RDWR | O_CREAT, mode);
+    EXPECT_NE(fd, -1);
+    EXPECT_TRUE(android::base::WriteStringToFd(content, fd));
+    EXPECT_EQ(::fchown(fd, owner, group), 0);
+    EXPECT_EQ(::fchmod(fd, mode), 0);
+    close(fd);
 }
 
 static void touch(const std::string& path, uid_t owner, gid_t group, mode_t mode) {
@@ -509,100 +526,7 @@ TEST_F(ServiceTest, GetAppSizeManualForMedia) {
         system(removeCommand.c_str());
     }
 }
-// TEST_F(ServiceTest, GetAppSizeProjectID_UID) {
-//     struct stat s;
-//     std::string externalPicDir =
-//             StringPrintf("%s/Pictures", create_data_media_path(nullptr, 0).c_str());
-//     if (stat(externalPicDir.c_str(), &s) == 0) {
-//         // fetch the appId from the uid of the external storage owning app
-//         int32_t externalStorageAppId = multiuser_get_app_id(s.st_uid);
-//         // Fetch Package Name for the external storage owning app uid
-//         std::string pkg = get_package_name(s.st_uid);
-//
-//         std::vector<int64_t> externalStorageSize, externalStorageSizeAfterAddingCacheFile;
-//         std::vector<int64_t> ceDataInodes;
-//
-//         std::vector<std::string> codePaths;
-//         std::vector<std::string> packageNames;
-//         // set up parameters
-//         packageNames.push_back(pkg);
-//         ceDataInodes.push_back(0);
-//         // initialise the mounts
-//         service->invalidateMounts();
-//         auto using_project_ids =
-//                 StringPrintf("%smisc/installd/using_project_ids", android_data_dir.c_str());
-//         bool usingProjectIds = access(using_project_ids.c_str(), F_OK) == 0;
-//         if (!usingProjectIds) {
-//             service->setFirstBoot();
-//         }
-//
-//         if (access(using_project_ids.c_str(), F_OK) != 0) {
-//             // projectids is not used, so check that ioctl features should be absent
-//             auto temp_path = StringPrintf("%smisc/installd/ioctl_check",
-//             android_data_dir.c_str());
-//
-//             if (access(temp_path.c_str(), F_OK) != 0) {
-//                 open(temp_path.c_str(), O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC, 0644);
-//                 bool result = set_quota_project_id(temp_path, 0, false) == 0;
-//                 // delete the temp file
-//                 // remove the external file
-//                 remove(temp_path.c_str());
-//                 // since using_project_ids file is not present, so ioctl settings should be
-//                 absent
-//                 //  that is denoted by the result of setting project id flag as false
-//                 ASSERT_FALSE(result);
-//             }
-//         }
-//         // call the getAppSize to get the current size of the external storage owning app
-//         service->getAppSize(std::nullopt, packageNames, 0, InstalldNativeService::FLAG_USE_QUOTA,
-//                             externalStorageAppId, ceDataInodes, codePaths, &externalStorageSize);
-//         // add a file with 20MB size to the external storage
-//         std::string externalStorageCacheDir =
-//                 StringPrintf("%s/%s/cache", create_data_user_ce_path(nullptr, 0).c_str(),
-//                              pkg.c_str());
-//         std::string cacheFileLocation =
-//                 StringPrintf("%s/%s", externalStorageCacheDir.c_str(), "External.jpg");
-//         std::string externalFileContentCommand =
-//                 StringPrintf("dd if=/dev/zero of=%s bs=1M count=20", cacheFileLocation.c_str());
-//         system(externalFileContentCommand.c_str());
-//         // call the getAppSize again to get the new size of the external storage owning app
-//         service->getAppSize(std::nullopt, packageNames, 0, InstalldNativeService::FLAG_USE_QUOTA,
-//                             externalStorageAppId, ceDataInodes, codePaths,
-//                             &externalStorageSizeAfterAddingCacheFile);
-//         // check that the size of cache and data increases when cache file is added
-//         int64_t sizeDiffData = externalStorageSizeAfterAddingCacheFile[1] -
-//         externalStorageSize[1]; int64_t sizeDiffCache =
-//         externalStorageSizeAfterAddingCacheFile[2] - externalStorageSize[2];
-//         ASSERT_TRUE(sizeDiffData == sizeDiffCache);
-//         // remove the external file
-//         std::string removeCommand = StringPrintf("rm -f %s", cacheFileLocation.c_str());
-//         system(removeCommand.c_str());
-//         // remove the setFirstBoot setting
-//         std::string removeCommand2 = "rm -f /data/misc/installd/using_project_ids";
-//         system(removeCommand2.c_str());
-//         // Do now without project id
-//         std::vector<int64_t> sizeWithUID, sizeWithUIDAfterAddingCacheFile;
-//         // call the getAppSize to get the current size of the external storage owning app
-//         service->getAppSize(std::nullopt, packageNames, 0, InstalldNativeService::FLAG_USE_QUOTA,
-//                             externalStorageAppId, ceDataInodes, codePaths, &sizeWithUID);
-//         // add a file with 20MB size to the external storage
-//         system(externalFileContentCommand.c_str());
-//         // call the getAppSize again to get the new size of the external storage owning app
-//         service->getAppSize(std::nullopt, packageNames, 0, InstalldNativeService::FLAG_USE_QUOTA,
-//                             externalStorageAppId, ceDataInodes, codePaths,
-//                             &sizeWithUIDAfterAddingCacheFile);
-//         // check that the size of cache and data increases when cache file is added
-//         sizeDiffData = sizeWithUIDAfterAddingCacheFile[1] - sizeWithUID[1];
-//         sizeDiffCache = sizeWithUIDAfterAddingCacheFile[2] - sizeWithUID[2];
-//         ASSERT_TRUE(sizeDiffData == sizeDiffCache);
-//         // remove the external file
-//         system(removeCommand.c_str());
-//         // reset the using_project_id if it was initially set
-//         if (usingProjectIds) {
-//             service->setFirstBoot();
-//         }
-//     }
-// }
+
 TEST_F(ServiceTest, GetAppSizeWrongSizes) {
     int32_t externalStorageAppId = -1;
     std::vector<int64_t> externalStorageSize;
@@ -616,6 +540,94 @@ TEST_F(ServiceTest, GetAppSizeWrongSizes) {
                                            externalStorageAppId, ceDataInodes, codePaths,
                                            &externalStorageSize));
 }
+
+class FsverityTest : public ServiceTest {
+protected:
+    binder::Status createFsveritySetupAuthToken(const std::string& path, int open_mode,
+                                                sp<IFsveritySetupAuthToken>* _aidl_return) {
+        unique_fd ufd(open(path.c_str(), open_mode));
+        EXPECT_GE(ufd.get(), 0) << "open failed: " << strerror(errno);
+        ParcelFileDescriptor rfd(std::move(ufd));
+        return service->createFsveritySetupAuthToken(std::move(rfd), kTestAppId, kTestUserId,
+                                                     _aidl_return);
+    }
+};
+
+TEST_F(FsverityTest, enableFsverity) {
+    const std::string path = kTestPath + "/foo";
+    create_with_content(path, kTestAppUid, kTestAppUid, 0600, "content");
+    UniqueFile raii(/*fd=*/-1, path, [](const std::string& path) { unlink(path.c_str()); });
+
+    // Expect to fs-verity setup to succeed
+    sp<IFsveritySetupAuthToken> authToken;
+    binder::Status status = createFsveritySetupAuthToken(path, O_RDWR, &authToken);
+    EXPECT_TRUE(status.isOk());
+    EXPECT_TRUE(authToken != nullptr);
+
+    // Verity auth token works to enable fs-verity
+    int32_t errno_local;
+    status = service->enableFsverity(authToken, path, "fake.package.name", &errno_local);
+    EXPECT_TRUE(status.isOk());
+    EXPECT_EQ(errno_local, 0);
+}
+
+TEST_F(FsverityTest, enableFsverity_nullAuthToken) {
+    const std::string path = kTestPath + "/foo";
+    create_with_content(path, kTestAppUid, kTestAppUid, 0600, "content");
+    UniqueFile raii(/*fd=*/-1, path, [](const std::string& path) { unlink(path.c_str()); });
+
+    // Verity null auth token fails
+    sp<IFsveritySetupAuthToken> authToken;
+    int32_t errno_local;
+    binder::Status status =
+            service->enableFsverity(authToken, path, "fake.package.name", &errno_local);
+    EXPECT_FALSE(status.isOk());
+}
+
+TEST_F(FsverityTest, enableFsverity_differentFile) {
+    const std::string path = kTestPath + "/foo";
+    create_with_content(path, kTestAppUid, kTestAppUid, 0600, "content");
+    UniqueFile raii(/*fd=*/-1, path, [](const std::string& path) { unlink(path.c_str()); });
+
+    // Expect to fs-verity setup to succeed
+    sp<IFsveritySetupAuthToken> authToken;
+    binder::Status status = createFsveritySetupAuthToken(path, O_RDWR, &authToken);
+    EXPECT_TRUE(status.isOk());
+    EXPECT_TRUE(authToken != nullptr);
+
+    // Verity auth token does not work for a different file
+    const std::string anotherPath = kTestPath + "/bar";
+    ASSERT_TRUE(android::base::WriteStringToFile("content", anotherPath));
+    UniqueFile raii2(/*fd=*/-1, anotherPath, [](const std::string& path) { unlink(path.c_str()); });
+    int32_t errno_local;
+    status = service->enableFsverity(authToken, anotherPath, "fake.package.name", &errno_local);
+    EXPECT_TRUE(status.isOk());
+    EXPECT_NE(errno_local, 0);
+}
+
+TEST_F(FsverityTest, createFsveritySetupAuthToken_ReadonlyFdDoesNotAuthenticate) {
+    const std::string path = kTestPath + "/foo";
+    create_with_content(path, kTestAppUid, kTestAppUid, 0600, "content");
+    UniqueFile raii(/*fd=*/-1, path, [](const std::string& path) { unlink(path.c_str()); });
+
+    // Expect the fs-verity setup to fail
+    sp<IFsveritySetupAuthToken> authToken;
+    binder::Status status = createFsveritySetupAuthToken(path, O_RDONLY, &authToken);
+    EXPECT_FALSE(status.isOk());
+}
+
+TEST_F(FsverityTest, createFsveritySetupAuthToken_UnownedFile) {
+    const std::string path = kTestPath + "/foo";
+    // Simulate world-writable file owned by another app
+    create_with_content(path, kTestAppUid + 1, kTestAppUid + 1, 0666, "content");
+    UniqueFile raii(/*fd=*/-1, path, [](const std::string& path) { unlink(path.c_str()); });
+
+    // Expect the fs-verity setup to fail
+    sp<IFsveritySetupAuthToken> authToken;
+    binder::Status status = createFsveritySetupAuthToken(path, O_RDWR, &authToken);
+    EXPECT_FALSE(status.isOk());
+}
+
 static bool mkdirs(const std::string& path, mode_t mode) {
     struct stat sb;
     if (stat(path.c_str(), &sb) != -1 && S_ISDIR(sb.st_mode)) {

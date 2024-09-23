@@ -170,6 +170,7 @@ void add_mountinfo();
 #define RECOVERY_DIR "/cache/recovery"
 #define RECOVERY_DATA_DIR "/data/misc/recovery"
 #define UPDATE_ENGINE_LOG_DIR "/data/misc/update_engine_log"
+#define UPDATE_ENGINE_PREF_DIR "/data/misc/update_engine/prefs"
 #define LOGPERSIST_DATA_DIR "/data/misc/logd"
 #define PREREBOOT_DATA_DIR "/data/misc/prereboot"
 #define PROFILE_DATA_DIR_CUR "/data/misc/profiles/cur"
@@ -183,6 +184,9 @@ void add_mountinfo();
 #define PACKAGE_DEX_USE_LIST "/data/system/package-dex-usage.list"
 #define SYSTEM_TRACE_SNAPSHOT "/data/misc/perfetto-traces/bugreport/systrace.pftrace"
 #define CGROUPFS_DIR "/sys/fs/cgroup"
+#define SDK_EXT_INFO "/apex/com.android.sdkext/bin/derive_sdk"
+#define DROPBOX_DIR "/data/system/dropbox"
+#define PRINT_FLAGS "/system/bin/printflags"
 
 // TODO(narayan): Since this information has to be kept in sync
 // with tombstoned, we should just put it in a common header.
@@ -192,6 +196,8 @@ static const std::string TOMBSTONE_DIR = "/data/tombstones/";
 static const std::string TOMBSTONE_FILE_PREFIX = "tombstone_";
 static const std::string ANR_DIR = "/data/anr/";
 static const std::string ANR_FILE_PREFIX = "anr_";
+static const std::string SHUTDOWN_CHECKPOINTS_DIR = "/data/system/shutdown-checkpoints/";
+static const std::string SHUTDOWN_CHECKPOINTS_FILE_PREFIX = "checkpoints-";
 
 // TODO: temporary variables and functions used during C++ refactoring
 
@@ -233,6 +239,7 @@ static const char* WAKE_LOCK_NAME = "dumpstate_wakelock";
 // task and the log title of the duration report.
 static const std::string DUMP_TRACES_TASK = "DUMP TRACES";
 static const std::string DUMP_INCIDENT_REPORT_TASK = "INCIDENT REPORT";
+static const std::string DUMP_NETSTATS_PROTO_TASK = "DUMP NETSTATS PROTO";
 static const std::string DUMP_HALS_TASK = "DUMP HALS";
 static const std::string DUMP_BOARD_TASK = "dumpstate_board()";
 static const std::string DUMP_CHECKINS_TASK = "DUMP CHECKINS";
@@ -519,6 +526,15 @@ static bool skip_not_stat(const char *path) {
     return strcmp(path + len - sizeof(stat) + 1, stat); /* .../stat? */
 }
 
+static bool skip_wtf_strictmode(const char *path) {
+    if (strstr(path, "_wtf")) {
+        return true;
+    } else if (strstr(path, "_strictmode")) {
+        return true;
+    }
+    return false;
+}
+
 static bool skip_none(const char* path __attribute__((unused))) {
     return false;
 }
@@ -765,7 +781,7 @@ uint64_t Dumpstate::ConsentCallback::getElapsedTimeMs() const {
 }
 
 void Dumpstate::PrintHeader() const {
-    std::string build, fingerprint, radio, bootloader, network;
+    std::string build, fingerprint, radio, bootloader, network, sdkversion;
     char date[80];
 
     build = android::base::GetProperty("ro.build.display.id", "(unknown)");
@@ -773,6 +789,7 @@ void Dumpstate::PrintHeader() const {
     radio = android::base::GetProperty("gsm.version.baseband", "(unknown)");
     bootloader = android::base::GetProperty("ro.bootloader", "(unknown)");
     network = android::base::GetProperty("gsm.operator.alpha", "(unknown)");
+    sdkversion = android::base::GetProperty("ro.build.version.sdk", "(unknown)");
     strftime(date, sizeof(date), "%Y-%m-%d %H:%M:%S", localtime(&now_));
 
     printf("========================================================\n");
@@ -790,20 +807,26 @@ void Dumpstate::PrintHeader() const {
     if (module_metadata_version != 0) {
         printf("Module Metadata version: %" PRId64 "\n", module_metadata_version);
     }
-    printf("SDK extension versions [r=%s s=%s]\n",
-           android::base::GetProperty("build.version.extensions.r", "-").c_str(),
-           android::base::GetProperty("build.version.extensions.s", "-").c_str());
+    printf("Android SDK version: %s\n", sdkversion.c_str());
+    printf("SDK extensions: ");
+    RunCommandToFd(STDOUT_FILENO, "", {SDK_EXT_INFO, "--header"},
+                   CommandOptions::WithTimeout(1).Always().DropRoot().Build());
 
     printf("Kernel: ");
     DumpFileToFd(STDOUT_FILENO, "", "/proc/version");
     printf("Command line: %s\n", strtok(cmdline_buf, "\n"));
+    printf("Bootconfig: ");
+    DumpFileToFd(STDOUT_FILENO, "", "/proc/bootconfig");
     printf("Uptime: ");
     RunCommandToFd(STDOUT_FILENO, "", {"uptime", "-p"},
                    CommandOptions::WithTimeout(1).Always().Build());
     printf("Bugreport format version: %s\n", version_.c_str());
-    printf("Dumpstate info: id=%d pid=%d dry_run=%d parallel_run=%d args=%s bugreport_mode=%s\n",
-           id_, pid_, PropertiesHelper::IsDryRun(), PropertiesHelper::IsParallelRun(),
-           options_->args.c_str(), options_->bugreport_mode_string.c_str());
+    printf(
+        "Dumpstate info: id=%d pid=%d dry_run=%d parallel_run=%d strict_run=%d args=%s "
+        "bugreport_mode=%s\n",
+        id_, pid_, PropertiesHelper::IsDryRun(), PropertiesHelper::IsParallelRun(),
+        PropertiesHelper::IsStrictRun(), options_->args.c_str(),
+        options_->bugreport_mode_string.c_str());
     printf("\n");
 }
 
@@ -1025,13 +1048,34 @@ static void DumpIncidentReport() {
         MYLOGE("Could not open %s to dump incident report.\n", path.c_str());
         return;
     }
-    RunCommandToFd(fd, "", {"incident", "-u"}, CommandOptions::WithTimeout(120).Build());
+    RunCommandToFd(fd, "", {"incident", "-u"},
+                   CommandOptions::WithTimeout(PropertiesHelper::IsStrictRun() ? 20 : 120).Build());
     bool empty = 0 == lseek(fd, 0, SEEK_END);
     if (!empty) {
         // Use a different name from "incident.proto"
         // /proto/incident.proto is reserved for incident service dump
         // i.e. metadata for debugging.
         ds.EnqueueAddZipEntryAndCleanupIfNeeded(kProtoPath + "incident_report" + kProtoExt,
+                path);
+    } else {
+        unlink(path.c_str());
+    }
+}
+
+static void DumpNetstatsProto() {
+    const std::string path = ds.bugreport_internal_dir_ + "/tmp_netstats_proto";
+    auto fd = android::base::unique_fd(TEMP_FAILURE_RETRY(open(path.c_str(),
+                O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)));
+    if (fd < 0) {
+        MYLOGE("Could not open %s to dump netstats proto.\n", path.c_str());
+        return;
+    }
+    RunCommandToFd(fd, "", {"dumpsys", "netstats", "--proto"},
+            CommandOptions::WithTimeout(120).Build());
+    bool empty = 0 == lseek(fd, 0, SEEK_END);
+    if (!empty) {
+        ds.EnqueueAddZipEntryAndCleanupIfNeeded(kProtoPath + "netstats" + kProtoExt,
                 path);
     } else {
         unlink(path.c_str());
@@ -1063,7 +1107,7 @@ static void DumpVisibleWindowViews() {
         return;
     }
     RunCommandToFd(fd, "", {"cmd", "window", "dump-visible-window-views"},
-                   CommandOptions::WithTimeout(120).Build());
+                   CommandOptions::WithTimeout(10).Build());
     bool empty = 0 == lseek(fd, 0, SEEK_END);
     if (!empty) {
         ds.AddZipEntry("visible_windows.zip", path);
@@ -1082,6 +1126,16 @@ static void DumpIpTablesAsRoot() {
     RunCommand("IP6TABLES MANGLE", {"ip6tables", "-t", "mangle", "-L", "-nvx"});
     RunCommand("IPTABLES RAW", {"iptables", "-t", "raw", "-L", "-nvx"});
     RunCommand("IP6TABLES RAW", {"ip6tables", "-t", "raw", "-L", "-nvx"});
+}
+
+static void DumpShutdownCheckpoints() {
+    const bool shutdown_checkpoints_dumped = AddDumps(
+        ds.shutdown_checkpoints_.begin(), ds.shutdown_checkpoints_.end(),
+        "SHUTDOWN CHECKPOINTS", false /* add_to_zip */);
+    if (!shutdown_checkpoints_dumped) {
+        printf("*** NO SHUTDOWN CHECKPOINTS to dump in %s\n\n",
+            SHUTDOWN_CHECKPOINTS_DIR.c_str());
+    }
 }
 
 static void DumpDynamicPartitionInfo() {
@@ -1205,8 +1259,10 @@ static Dumpstate::RunStatus RunDumpsysTextByPriority(const std::string& title, i
              dumpsys.writeDumpHeader(STDOUT_FILENO, service, priority);
              dumpsys.writeDumpFooter(STDOUT_FILENO, service, std::chrono::milliseconds(1));
         } else {
-            status_t status = dumpsys.startDumpThread(Dumpsys::TYPE_DUMP, service, args);
-            if (status == OK) {
+             status_t status = dumpsys.startDumpThread(Dumpsys::TYPE_DUMP | Dumpsys::TYPE_PID |
+                                                       Dumpsys::TYPE_CLIENTS | Dumpsys::TYPE_THREAD,
+                                                       service, args);
+             if (status == OK) {
                 dumpsys.writeDumpHeader(STDOUT_FILENO, service, priority);
                 std::chrono::duration<double> elapsed_seconds;
                 if (priority == IServiceManager::DUMP_FLAG_PRIORITY_HIGH &&
@@ -1223,6 +1279,9 @@ static Dumpstate::RunStatus RunDumpsysTextByPriority(const std::string& title, i
                 dumpsys.writeDumpFooter(STDOUT_FILENO, service, elapsed_seconds);
                 bool dump_complete = (status == OK);
                 dumpsys.stopDumpThread(dump_complete);
+            } else {
+                MYLOGE("Failed to start dump thread for service: %s, status: %d",
+                       String8(service).c_str(), status);
             }
         }
 
@@ -1360,12 +1419,12 @@ static void DumpHals(int out_fd = STDOUT_FILENO) {
     auto ret = sm->list([&](const auto& interfaces) {
         for (const std::string& interface : interfaces) {
             std::string cleanName = interface;
-            std::replace_if(cleanName.begin(),
-                            cleanName.end(),
-                            [](char c) {
-                                return !isalnum(c) &&
-                                    std::string("@-_:.").find(c) == std::string::npos;
-                            }, '_');
+            std::replace_if(
+                cleanName.begin(), cleanName.end(),
+                [](char c) {
+                    return !isalnum(c) && std::string("@-_.").find(c) == std::string::npos;
+                },
+                '_');
             const std::string path = ds.bugreport_internal_dir_ + "/lshal_debug_" + cleanName;
 
             bool empty = false;
@@ -1402,7 +1461,9 @@ static void DumpHals(int out_fd = STDOUT_FILENO) {
 // Dump all of the files that make up the vendor interface.
 // See the files listed in dumpFileList() for the latest list of files.
 static void DumpVintf() {
-    const auto vintfFiles = android::vintf::details::dumpFileList();
+
+    const std::string sku = android::base::GetProperty("ro.boot.product.hardware.sku", "");
+    const auto vintfFiles = android::vintf::details::dumpFileList(sku);
     for (const auto vintfFile : vintfFiles) {
         struct stat st;
         if (stat(vintfFile.c_str(), &st) == 0) {
@@ -1571,7 +1632,8 @@ static Dumpstate::RunStatus dumpstate() {
     DurationReporter duration_reporter("DUMPSTATE");
 
     // Enqueue slow functions into the thread pool, if the parallel run is enabled.
-    std::future<std::string> dump_hals, dump_incident_report, dump_board, dump_checkins;
+    std::future<std::string> dump_hals, dump_incident_report, dump_board, dump_checkins,
+            dump_netstats_report;
     if (ds.dump_pool_) {
         // Pool was shutdown in DumpstateDefaultAfterCritical method in order to
         // drop root user. Restarts it with two threads for the parallel run.
@@ -1580,6 +1642,8 @@ static Dumpstate::RunStatus dumpstate() {
         dump_hals = ds.dump_pool_->enqueueTaskWithFd(DUMP_HALS_TASK, &DumpHals, _1);
         dump_incident_report = ds.dump_pool_->enqueueTask(
             DUMP_INCIDENT_REPORT_TASK, &DumpIncidentReport);
+        dump_netstats_report = ds.dump_pool_->enqueueTask(
+            DUMP_NETSTATS_PROTO_TASK, &DumpNetstatsProto);
         dump_board = ds.dump_pool_->enqueueTaskWithFd(
             DUMP_BOARD_TASK, &Dumpstate::DumpstateBoard, &ds, _1);
         dump_checkins = ds.dump_pool_->enqueueTaskWithFd(DUMP_CHECKINS_TASK, &DumpCheckins, _1);
@@ -1595,7 +1659,8 @@ static Dumpstate::RunStatus dumpstate() {
     RunCommand("CPU INFO", {"top", "-b", "-n", "1", "-H", "-s", "6", "-o",
                             "pid,tid,user,pr,ni,%cpu,s,virt,res,pcy,cmd,name"});
 
-    RUN_SLOW_FUNCTION_WITH_CONSENT_CHECK(RunCommand, "PROCRANK", {"procrank"}, AS_ROOT_20);
+    RUN_SLOW_FUNCTION_WITH_CONSENT_CHECK(RunCommand, "BUGREPORT_PROCDUMP", {"bugreport_procdump"},
+                                         CommandOptions::AS_ROOT);
 
     RUN_SLOW_FUNCTION_WITH_CONSENT_CHECK(DumpVisibleWindowViews);
 
@@ -1611,9 +1676,6 @@ static Dumpstate::RunStatus dumpstate() {
 
     RunCommand("PROCESSES AND THREADS",
                {"ps", "-A", "-T", "-Z", "-O", "pri,nice,rtprio,sched,pcy,time"});
-
-    RUN_SLOW_FUNCTION_WITH_CONSENT_CHECK(RunCommand, "LIBRANK", {"librank"},
-                                         CommandOptions::AS_ROOT);
 
     if (ds.dump_pool_) {
         WAIT_TASK_WITH_CONSENT_CHECK(std::move(dump_hals));
@@ -1644,8 +1706,6 @@ static Dumpstate::RunStatus dumpstate() {
 
     RunCommand("LIST OF OPEN FILES", {"lsof"}, CommandOptions::AS_ROOT);
 
-    RUN_SLOW_FUNCTION_WITH_CONSENT_CHECK(for_each_pid, do_showmap, "SMAPS OF ALL PROCESSES");
-
     for_each_tid(show_wchan, "BLOCKED PROCESS WAIT-CHANNELS");
     for_each_pid(show_showtime, "PROCESS TIMES (pid cmd user system iowait+percentage)");
 
@@ -1675,6 +1735,8 @@ static Dumpstate::RunStatus dumpstate() {
 
     DoKmsg();
 
+    DumpShutdownCheckpoints();
+
     DumpIpAddrAndRules();
 
     dump_route_tables();
@@ -1692,6 +1754,14 @@ static Dumpstate::RunStatus dumpstate() {
                    CommandOptions::WithTimeout(10).Build());
 
     RunCommand("SYSTEM PROPERTIES", {"getprop"});
+
+    DumpFile("SYSTEM BUILD-TIME RELEASE FLAGS", "/system/etc/build_flags.json");
+    DumpFile("SYSTEM_EXT BUILD-TIME RELEASE FLAGS", "/system_ext/etc/build_flags.json");
+    DumpFile("PRODUCT BUILD-TIME RELEASE FLAGS", "/product/etc/build_flags.json");
+    DumpFile("VENDOR BUILD-TIME RELEASE FLAGS", "/vendor/etc/build_flags.json");
+
+    RunCommand("ACONFIG FLAGS", {PRINT_FLAGS},
+               CommandOptions::WithTimeout(10).Always().DropRoot().Build());
 
     RunCommand("STORAGED IO INFO", {"storaged", "-u", "-p"});
 
@@ -1778,6 +1848,13 @@ static Dumpstate::RunStatus dumpstate() {
     dump_frozen_cgroupfs();
 
     if (ds.dump_pool_) {
+        WAIT_TASK_WITH_CONSENT_CHECK(std::move(dump_netstats_report));
+    } else {
+        RUN_SLOW_FUNCTION_WITH_CONSENT_CHECK_AND_LOG(DUMP_NETSTATS_PROTO_TASK,
+                DumpNetstatsProto);
+    }
+
+    if (ds.dump_pool_) {
         WAIT_TASK_WITH_CONSENT_CHECK(std::move(dump_incident_report));
     } else {
         RUN_SLOW_FUNCTION_WITH_CONSENT_CHECK_AND_LOG(DUMP_INCIDENT_REPORT_TASK,
@@ -1822,11 +1899,14 @@ Dumpstate::RunStatus Dumpstate::DumpstateDefaultAfterCritical() {
     if (!PropertiesHelper::IsDryRun()) {
         ds.tombstone_data_ = GetDumpFds(TOMBSTONE_DIR, TOMBSTONE_FILE_PREFIX);
         ds.anr_data_ = GetDumpFds(ANR_DIR, ANR_FILE_PREFIX);
+        ds.shutdown_checkpoints_ = GetDumpFds(
+            SHUTDOWN_CHECKPOINTS_DIR, SHUTDOWN_CHECKPOINTS_FILE_PREFIX);
     }
 
     ds.AddDir(RECOVERY_DIR, true);
     ds.AddDir(RECOVERY_DATA_DIR, true);
     ds.AddDir(UPDATE_ENGINE_LOG_DIR, true);
+    ds.AddDir(UPDATE_ENGINE_PREF_DIR, true);
     ds.AddDir(LOGPERSIST_DATA_DIR, false);
     if (!PropertiesHelper::IsUserBuild()) {
         ds.AddDir(PROFILE_DATA_DIR_CUR, true);
@@ -1835,9 +1915,17 @@ Dumpstate::RunStatus Dumpstate::DumpstateDefaultAfterCritical() {
     }
     ds.AddDir(PREREBOOT_DATA_DIR, false);
     add_mountinfo();
+    for (const char* path : {"/proc/cpuinfo", "/proc/meminfo"}) {
+        ds.AddZipEntry(ZIP_ROOT_DIR + path, path);
+    }
     DumpIpTablesAsRoot();
     DumpDynamicPartitionInfo();
     ds.AddDir(OTA_METADATA_DIR, true);
+    if (!PropertiesHelper::IsUserBuild()) {
+        // Include dropbox entry files inside ZIP, but exclude
+        // noisy WTF and StrictMode entries
+        dump_files("", DROPBOX_DIR, skip_wtf_strictmode, _add_file_from_fd);
+    }
 
     // Capture any IPSec policies in play. No keys are exposed here.
     RunCommand("IP XFRM POLICY", {"ip", "xfrm", "policy"}, CommandOptions::WithTimeout(10).Build());
@@ -1858,6 +1946,9 @@ Dumpstate::RunStatus Dumpstate::DumpstateDefaultAfterCritical() {
     DumpFile("PSI cpu", "/proc/pressure/cpu");
     DumpFile("PSI memory", "/proc/pressure/memory");
     DumpFile("PSI io", "/proc/pressure/io");
+
+    RunCommand("SDK EXTENSIONS", {SDK_EXT_INFO, "--dump"},
+               CommandOptions::WithTimeout(10).Always().DropRoot().Build());
 
     if (dump_pool_) {
         RETURN_IF_USER_DENIED_CONSENT();
@@ -1986,6 +2077,10 @@ static void DumpstateTelephonyOnly(const std::string& calling_package) {
     RunDumpsys("DUMPSYS", {"network_management"}, CommandOptions::WithTimeout(90).Build(),
                SEC_TO_MSEC(10));
     RunDumpsys("DUMPSYS", {"telephony.registry"}, CommandOptions::WithTimeout(90).Build(),
+               SEC_TO_MSEC(10));
+    RunDumpsys("DUMPSYS", {"isub"}, CommandOptions::WithTimeout(90).Build(),
+               SEC_TO_MSEC(10));
+    RunDumpsys("DUMPSYS", {"telecom"}, CommandOptions::WithTimeout(90).Build(),
                SEC_TO_MSEC(10));
     if (include_sensitive_info) {
         // Contains raw IP addresses, omit from reports on user builds.
@@ -2117,6 +2212,16 @@ Dumpstate::RunStatus Dumpstate::DumpTraces(const char** path) {
             continue;
         }
 
+        // Skip cached processes.
+        if (IsCached(pid)) {
+            // For consistency, the header and footer to this message match those
+            // dumped by debuggerd in the success case.
+            dprintf(fd, "\n---- pid %d at [unknown] ----\n", pid);
+            dprintf(fd, "Dump skipped for cached process.\n");
+            dprintf(fd, "---- end %d ----", pid);
+            continue;
+        }
+
         const std::string link_name = android::base::StringPrintf("/proc/%d/exe", pid);
         std::string exe;
         if (!android::base::Readlink(link_name, &exe)) {
@@ -2147,8 +2252,7 @@ Dumpstate::RunStatus Dumpstate::DumpTraces(const char** path) {
 
         const uint64_t start = Nanotime();
         const int ret = dump_backtrace_to_file_timeout(
-            pid, is_java_process ? kDebuggerdJavaBacktrace : kDebuggerdNativeBacktrace,
-            is_java_process ? 5 : 20, fd);
+            pid, is_java_process ? kDebuggerdJavaBacktrace : kDebuggerdNativeBacktrace, 3, fd);
 
         if (ret == -1) {
             // For consistency, the header and footer to this message match those
@@ -2719,6 +2823,7 @@ static void SetOptionsFromMode(Dumpstate::BugreportMode mode, Dumpstate::DumpOpt
             options->do_screenshot = false;
             break;
         case Dumpstate::BugreportMode::BUGREPORT_WEAR:
+            options->do_vibrate = false;
             options->do_progress_updates = true;
             options->do_screenshot = is_screenshot_requested;
             break;
@@ -2870,6 +2975,7 @@ void Dumpstate::Cancel() {
     }
     tombstone_data_.clear();
     anr_data_.clear();
+    shutdown_checkpoints_.clear();
 
     // Instead of shutdown the pool, we delete temporary files directly since
     // shutdown blocking the call.
@@ -2958,6 +3064,12 @@ Dumpstate::RunStatus Dumpstate::RunInternal(int32_t calling_uid,
 
     if (PropertiesHelper::IsDryRun()) {
         MYLOGI("Running on dry-run mode (to disable it, call 'setprop dumpstate.dry_run false')\n");
+    }
+
+    if (PropertiesHelper::IsStrictRun()) {
+        MYLOGI(
+            "Running on strict-run mode, which has shorter timeouts "
+            "(to disable, call 'setprop dumpstate.strict_run false')\n");
     }
 
     MYLOGI("dumpstate info: id=%d, args='%s', bugreport_mode= %s bugreport format version: %s\n",
@@ -3153,6 +3265,7 @@ Dumpstate::RunStatus Dumpstate::RunInternal(int32_t calling_uid,
 
     tombstone_data_.clear();
     anr_data_.clear();
+    shutdown_checkpoints_.clear();
 
     return (consent_callback_ != nullptr &&
             consent_callback_->getResult() == UserConsentResult::UNAVAILABLE)
@@ -3189,6 +3302,15 @@ void Dumpstate::MaybeSnapshotSystemTrace() {
 }
 
 void Dumpstate::MaybeSnapshotWinTrace() {
+    // Include the proto logging from WMShell.
+    RunCommand(
+        // Empty name because it's not intended to be classified as a bugreport section.
+        // Actual logging files can be found as "/data/misc/wmtrace/shell_log.winscope"
+        // in the bugreport.
+        "", {"dumpsys", "activity", "service", "SystemUIService",
+             "WMShell", "protolog", "save-for-bugreport"},
+        CommandOptions::WithTimeout(10).Always().DropRoot().RedirectStderr().Build());
+
     // Currently WindowManagerService and InputMethodManagerSerivice support WinScope protocol.
     for (const auto& service : {"window", "input_method"}) {
         RunCommand(
@@ -3881,15 +4003,6 @@ void do_dmesg() {
     printf("%s\n\n", buf);
     free(buf);
     return;
-}
-
-void do_showmap(int pid, const char *name) {
-    char title[255];
-    char arg[255];
-
-    snprintf(title, sizeof(title), "SHOW MAP %d (%s)", pid, name);
-    snprintf(arg, sizeof(arg), "%d", pid);
-    RunCommand(title, {"showmap", "-q", arg}, CommandOptions::AS_ROOT);
 }
 
 int Dumpstate::DumpFile(const std::string& title, const std::string& path) {

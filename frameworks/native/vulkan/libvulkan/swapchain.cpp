@@ -16,9 +16,12 @@
 
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 
+#include <aidl/android/hardware/graphics/common/PixelFormat.h>
 #include <android/hardware/graphics/common/1.0/types.h>
 #include <grallocusage/GrallocUsageConversion.h>
 #include <graphicsenv/GraphicsEnv.h>
+#include <hardware/gralloc.h>
+#include <hardware/gralloc1.h>
 #include <log/log.h>
 #include <sync/sync.h>
 #include <system/window.h>
@@ -33,12 +36,33 @@
 
 #include "driver.h"
 
+using PixelFormat = aidl::android::hardware::graphics::common::PixelFormat;
 using android::hardware::graphics::common::V1_0::BufferUsage;
 
 namespace vulkan {
 namespace driver {
 
 namespace {
+
+static uint64_t convertGralloc1ToBufferUsage(uint64_t producerUsage,
+                                             uint64_t consumerUsage) {
+    static_assert(uint64_t(GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN) ==
+                      uint64_t(GRALLOC1_PRODUCER_USAGE_CPU_READ_OFTEN),
+                  "expected ConsumerUsage and ProducerUsage CPU_READ_OFTEN "
+                  "bits to match");
+    uint64_t merged = producerUsage | consumerUsage;
+    if ((merged & (GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN)) ==
+        GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN) {
+        merged &= ~uint64_t(GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN);
+        merged |= BufferUsage::CPU_READ_OFTEN;
+    }
+    if ((merged & (GRALLOC1_PRODUCER_USAGE_CPU_WRITE_OFTEN)) ==
+        GRALLOC1_PRODUCER_USAGE_CPU_WRITE_OFTEN) {
+        merged &= ~uint64_t(GRALLOC1_PRODUCER_USAGE_CPU_WRITE_OFTEN);
+        merged |= BufferUsage::CPU_WRITE_OFTEN;
+    }
+    return merged;
+}
 
 const VkSurfaceTransformFlagsKHR kSupportedTransforms =
     VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR |
@@ -297,6 +321,7 @@ static bool IsFencePending(int fd) {
 }
 
 void ReleaseSwapchainImage(VkDevice device,
+                           bool shared_present,
                            ANativeWindow* window,
                            int release_fence,
                            Swapchain::Image& image,
@@ -328,7 +353,8 @@ void ReleaseSwapchainImage(VkDevice device,
         }
         image.dequeue_fence = -1;
 
-        if (window) {
+        // It's invalid to call cancelBuffer on a shared buffer
+        if (window && !shared_present) {
             window->cancelBuffer(window, image.buffer.get(), release_fence);
         } else {
             if (release_fence >= 0) {
@@ -362,9 +388,10 @@ void OrphanSwapchain(VkDevice device, Swapchain* swapchain) {
     if (swapchain->surface.swapchain_handle != HandleFromSwapchain(swapchain))
         return;
     for (uint32_t i = 0; i < swapchain->num_images; i++) {
-        if (!swapchain->images[i].dequeued)
-            ReleaseSwapchainImage(device, nullptr, -1, swapchain->images[i],
-                                  true);
+        if (!swapchain->images[i].dequeued) {
+            ReleaseSwapchainImage(device, swapchain->shared, nullptr, -1,
+                                  swapchain->images[i], true);
+        }
     }
     swapchain->surface.swapchain_handle = VK_NULL_HANDLE;
     swapchain->timing.clear();
@@ -462,21 +489,27 @@ void copy_ready_timings(Swapchain& swapchain,
     *count = num_copied;
 }
 
-android_pixel_format GetNativePixelFormat(VkFormat format) {
-    android_pixel_format native_format = HAL_PIXEL_FORMAT_RGBA_8888;
+PixelFormat GetNativePixelFormat(VkFormat format) {
+    PixelFormat native_format = PixelFormat::RGBA_8888;
     switch (format) {
         case VK_FORMAT_R8G8B8A8_UNORM:
         case VK_FORMAT_R8G8B8A8_SRGB:
-            native_format = HAL_PIXEL_FORMAT_RGBA_8888;
+            native_format = PixelFormat::RGBA_8888;
             break;
         case VK_FORMAT_R5G6B5_UNORM_PACK16:
-            native_format = HAL_PIXEL_FORMAT_RGB_565;
+            native_format = PixelFormat::RGB_565;
             break;
         case VK_FORMAT_R16G16B16A16_SFLOAT:
-            native_format = HAL_PIXEL_FORMAT_RGBA_FP16;
+            native_format = PixelFormat::RGBA_FP16;
             break;
         case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
-            native_format = HAL_PIXEL_FORMAT_RGBA_1010102;
+            native_format = PixelFormat::RGBA_1010102;
+            break;
+        case VK_FORMAT_R8_UNORM:
+            native_format = PixelFormat::R_8;
+            break;
+        case VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16:
+            native_format = PixelFormat::RGBA_10101010;
             break;
         default:
             ALOGV("unsupported swapchain format %d", format);
@@ -485,7 +518,8 @@ android_pixel_format GetNativePixelFormat(VkFormat format) {
     return native_format;
 }
 
-android_dataspace GetNativeDataspace(VkColorSpaceKHR colorspace) {
+android_dataspace GetNativeDataspace(VkColorSpaceKHR colorspace,
+                                     PixelFormat pixelFormat) {
     switch (colorspace) {
         case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:
             return HAL_DATASPACE_V0_SRGB;
@@ -504,7 +538,14 @@ android_dataspace GetNativeDataspace(VkColorSpaceKHR colorspace) {
         case VK_COLOR_SPACE_BT709_NONLINEAR_EXT:
             return HAL_DATASPACE_V0_SRGB;
         case VK_COLOR_SPACE_BT2020_LINEAR_EXT:
-            return HAL_DATASPACE_BT2020_LINEAR;
+            if (pixelFormat == PixelFormat::RGBA_FP16) {
+                return static_cast<android_dataspace>(
+                    HAL_DATASPACE_STANDARD_BT2020 |
+                    HAL_DATASPACE_TRANSFER_LINEAR |
+                    HAL_DATASPACE_RANGE_EXTENDED);
+            } else {
+                return HAL_DATASPACE_BT2020_LINEAR;
+            }
         case VK_COLOR_SPACE_HDR10_ST2084_EXT:
             return static_cast<android_dataspace>(
                 HAL_DATASPACE_STANDARD_BT2020 | HAL_DATASPACE_TRANSFER_ST2084 |
@@ -514,9 +555,7 @@ android_dataspace GetNativeDataspace(VkColorSpaceKHR colorspace) {
                 HAL_DATASPACE_STANDARD_BT2020 | HAL_DATASPACE_TRANSFER_ST2084 |
                 HAL_DATASPACE_RANGE_FULL);
         case VK_COLOR_SPACE_HDR10_HLG_EXT:
-            return static_cast<android_dataspace>(
-                HAL_DATASPACE_STANDARD_BT2020 | HAL_DATASPACE_TRANSFER_HLG |
-                HAL_DATASPACE_RANGE_FULL);
+            return static_cast<android_dataspace>(HAL_DATASPACE_BT2020_HLG);
         case VK_COLOR_SPACE_ADOBERGB_LINEAR_EXT:
             return static_cast<android_dataspace>(
                 HAL_DATASPACE_STANDARD_ADOBE_RGB |
@@ -638,10 +677,11 @@ VkResult GetPhysicalDeviceSurfaceCapabilitiesKHR(
         // VkSurfaceProtectedCapabilitiesKHR::supportsProtected.  The following
         // four values cannot be known without a surface.  Default values will
         // be supplied anyway, but cannot be relied upon.
-        width = 1000;
-        height = 1000;
-        transform_hint = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-        max_buffer_count = 10;
+        width = 0xFFFFFFFF;
+        height = 0xFFFFFFFF;
+        transform_hint = VK_SURFACE_TRANSFORM_INHERIT_BIT_KHR;
+        capabilities->minImageCount = 0xFFFFFFFF;
+        capabilities->maxImageCount = 0xFFFFFFFF;
     } else {
         ANativeWindow* window = SurfaceFromHandle(surface)->window.get();
 
@@ -673,9 +713,9 @@ VkResult GetPhysicalDeviceSurfaceCapabilitiesKHR(
                   strerror(-err), err);
             return VK_ERROR_SURFACE_LOST_KHR;
         }
+        capabilities->minImageCount = std::min(max_buffer_count, 3);
+        capabilities->maxImageCount = static_cast<uint32_t>(max_buffer_count);
     }
-    capabilities->minImageCount = std::min(max_buffer_count, 3);
-    capabilities->maxImageCount = static_cast<uint32_t>(max_buffer_count);
 
     capabilities->currentExtent =
         VkExtent2D{static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
@@ -683,6 +723,17 @@ VkResult GetPhysicalDeviceSurfaceCapabilitiesKHR(
     // TODO(http://b/134182502): Figure out what the max extent should be.
     capabilities->minImageExtent = VkExtent2D{1, 1};
     capabilities->maxImageExtent = VkExtent2D{4096, 4096};
+
+    if (capabilities->maxImageExtent.height <
+        capabilities->currentExtent.height) {
+        capabilities->maxImageExtent.height =
+            capabilities->currentExtent.height;
+    }
+
+    if (capabilities->maxImageExtent.width <
+        capabilities->currentExtent.width) {
+        capabilities->maxImageExtent.width = capabilities->currentExtent.width;
+    }
 
     capabilities->maxImageArrayLayers = 1;
 
@@ -712,7 +763,6 @@ VkResult GetPhysicalDeviceSurfaceFormatsKHR(VkPhysicalDevice pdev,
 
     const InstanceData& instance_data = GetData(pdev);
 
-    bool wide_color_support = false;
     uint64_t consumer_usage = 0;
     bool colorspace_ext =
         instance_data.hook_extensions.test(ProcHook::EXT_swapchain_colorspace);
@@ -723,27 +773,15 @@ VkResult GetPhysicalDeviceSurfaceFormatsKHR(VkPhysicalDevice pdev,
         if (!surfaceless_enabled) {
             return VK_ERROR_SURFACE_LOST_KHR;
         }
-        // Support for VK_GOOGLE_surfaceless_query.  The EGL loader
-        // unconditionally supports wide color formats, even if they will cause
-        // a SurfaceFlinger fallback.  Based on that, wide_color_support will be
-        // set to true in this case.
-        wide_color_support = true;
+        // Support for VK_GOOGLE_surfaceless_query.
 
         // TODO(b/203826952): research proper value; temporarily use the
         // values seen on Pixel
         consumer_usage = AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
     } else {
         Surface& surface = *SurfaceFromHandle(surface_handle);
-        int err = native_window_get_wide_color_support(surface.window.get(),
-                                                       &wide_color_support);
-        if (err) {
-            return VK_ERROR_SURFACE_LOST_KHR;
-        }
-        ALOGV("wide_color_support is: %d", wide_color_support);
-
         consumer_usage = surface.consumer_usage;
     }
-    wide_color_support = wide_color_support && colorspace_ext;
 
     AHardwareBuffer_Desc desc = {};
     desc.width = 1;
@@ -756,17 +794,15 @@ VkResult GetPhysicalDeviceSurfaceFormatsKHR(VkPhysicalDevice pdev,
     std::vector<VkSurfaceFormatKHR> all_formats = {
         {VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
         {VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
-        // Also allow to use PASS_THROUGH + HAL_DATASPACE_ARBITRARY
-        {VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_PASS_THROUGH_EXT},
-        {VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_PASS_THROUGH_EXT},
     };
 
     if (colorspace_ext) {
         all_formats.emplace_back(VkSurfaceFormatKHR{
+            VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_PASS_THROUGH_EXT});
+        all_formats.emplace_back(VkSurfaceFormatKHR{
+            VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_PASS_THROUGH_EXT});
+        all_formats.emplace_back(VkSurfaceFormatKHR{
             VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_BT709_LINEAR_EXT});
-    }
-
-    if (wide_color_support) {
         all_formats.emplace_back(VkSurfaceFormatKHR{
             VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT});
         all_formats.emplace_back(VkSurfaceFormatKHR{
@@ -781,17 +817,21 @@ VkResult GetPhysicalDeviceSurfaceFormatsKHR(VkPhysicalDevice pdev,
     if (AHardwareBuffer_isSupported(&desc)) {
         all_formats.emplace_back(VkSurfaceFormatKHR{
             VK_FORMAT_R5G6B5_UNORM_PACK16, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR});
-        all_formats.emplace_back(VkSurfaceFormatKHR{
-            VK_FORMAT_R5G6B5_UNORM_PACK16, VK_COLOR_SPACE_PASS_THROUGH_EXT});
+        if (colorspace_ext) {
+            all_formats.emplace_back(
+                VkSurfaceFormatKHR{VK_FORMAT_R5G6B5_UNORM_PACK16,
+                                   VK_COLOR_SPACE_PASS_THROUGH_EXT});
+        }
     }
 
     desc.format = AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT;
     if (AHardwareBuffer_isSupported(&desc)) {
         all_formats.emplace_back(VkSurfaceFormatKHR{
             VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR});
-        all_formats.emplace_back(VkSurfaceFormatKHR{
-            VK_FORMAT_R16G16B16A16_SFLOAT, VK_COLOR_SPACE_PASS_THROUGH_EXT});
-        if (wide_color_support) {
+        if (colorspace_ext) {
+            all_formats.emplace_back(
+                VkSurfaceFormatKHR{VK_FORMAT_R16G16B16A16_SFLOAT,
+                                   VK_COLOR_SPACE_PASS_THROUGH_EXT});
             all_formats.emplace_back(
                 VkSurfaceFormatKHR{VK_FORMAT_R16G16B16A16_SFLOAT,
                                    VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT});
@@ -806,15 +846,57 @@ VkResult GetPhysicalDeviceSurfaceFormatsKHR(VkPhysicalDevice pdev,
         all_formats.emplace_back(
             VkSurfaceFormatKHR{VK_FORMAT_A2B10G10R10_UNORM_PACK32,
                                VK_COLOR_SPACE_SRGB_NONLINEAR_KHR});
-        all_formats.emplace_back(
-            VkSurfaceFormatKHR{VK_FORMAT_A2B10G10R10_UNORM_PACK32,
-                               VK_COLOR_SPACE_PASS_THROUGH_EXT});
-        if (wide_color_support) {
+        if (colorspace_ext) {
+            all_formats.emplace_back(
+                VkSurfaceFormatKHR{VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+                                   VK_COLOR_SPACE_PASS_THROUGH_EXT});
             all_formats.emplace_back(
                 VkSurfaceFormatKHR{VK_FORMAT_A2B10G10R10_UNORM_PACK32,
                                    VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT});
         }
     }
+
+    desc.format = AHARDWAREBUFFER_FORMAT_R8_UNORM;
+    if (AHardwareBuffer_isSupported(&desc)) {
+        if (colorspace_ext) {
+            all_formats.emplace_back(VkSurfaceFormatKHR{
+                VK_FORMAT_R8_UNORM, VK_COLOR_SPACE_PASS_THROUGH_EXT});
+        }
+    }
+
+    bool rgba10x6_formats_ext = false;
+    uint32_t exts_count;
+    const auto& driver = GetData(pdev).driver;
+    driver.EnumerateDeviceExtensionProperties(pdev, nullptr, &exts_count,
+                                              nullptr);
+    std::vector<VkExtensionProperties> props(exts_count);
+    driver.EnumerateDeviceExtensionProperties(pdev, nullptr, &exts_count,
+                                              props.data());
+    for (uint32_t i = 0; i < exts_count; i++) {
+        VkExtensionProperties prop = props[i];
+        if (strcmp(prop.extensionName,
+                   VK_EXT_RGBA10X6_FORMATS_EXTENSION_NAME) == 0) {
+            rgba10x6_formats_ext = true;
+        }
+    }
+    desc.format = AHARDWAREBUFFER_FORMAT_R10G10B10A10_UNORM;
+    if (AHardwareBuffer_isSupported(&desc) && rgba10x6_formats_ext) {
+        all_formats.emplace_back(
+            VkSurfaceFormatKHR{VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16,
+                               VK_COLOR_SPACE_SRGB_NONLINEAR_KHR});
+        if (colorspace_ext) {
+            all_formats.emplace_back(
+                VkSurfaceFormatKHR{VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16,
+                                   VK_COLOR_SPACE_PASS_THROUGH_EXT});
+            all_formats.emplace_back(
+                VkSurfaceFormatKHR{VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16,
+                                   VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT});
+        }
+    }
+
+    // NOTE: Any new formats that are added must be coordinated across different
+    // Android users.  This includes the ANGLE team (a layered implementation of
+    // OpenGL-ES).
 
     VkResult result = VK_SUCCESS;
     if (formats) {
@@ -887,25 +969,87 @@ VkResult GetPhysicalDeviceSurfaceFormats2KHR(
         return GetPhysicalDeviceSurfaceFormatsKHR(physicalDevice,
                                                   pSurfaceInfo->surface,
                                                   pSurfaceFormatCount, nullptr);
-    } else {
-        // temp vector for forwarding; we'll marshal it into the pSurfaceFormats
-        // after the call.
-        std::vector<VkSurfaceFormatKHR> surface_formats(*pSurfaceFormatCount);
-        VkResult result = GetPhysicalDeviceSurfaceFormatsKHR(
-            physicalDevice, pSurfaceInfo->surface, pSurfaceFormatCount,
-            surface_formats.data());
+    }
 
-        if (result == VK_SUCCESS || result == VK_INCOMPLETE) {
-            // marshal results individually due to stride difference.
-            // completely ignore any chained extension structs.
-            uint32_t formats_to_marshal = *pSurfaceFormatCount;
-            for (uint32_t i = 0u; i < formats_to_marshal; i++) {
-                pSurfaceFormats[i].surfaceFormat = surface_formats[i];
-            }
-        }
+    // temp vector for forwarding; we'll marshal it into the pSurfaceFormats
+    // after the call.
+    std::vector<VkSurfaceFormatKHR> surface_formats(*pSurfaceFormatCount);
+    VkResult result = GetPhysicalDeviceSurfaceFormatsKHR(
+        physicalDevice, pSurfaceInfo->surface, pSurfaceFormatCount,
+        surface_formats.data());
 
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
         return result;
     }
+
+    const auto& driver = GetData(physicalDevice).driver;
+
+    // marshal results individually due to stride difference.
+    uint32_t formats_to_marshal = *pSurfaceFormatCount;
+    for (uint32_t i = 0u; i < formats_to_marshal; i++) {
+        pSurfaceFormats[i].surfaceFormat = surface_formats[i];
+
+        // Query the compression properties for the surface format
+        VkSurfaceFormat2KHR* pSurfaceFormat = &pSurfaceFormats[i];
+        while (pSurfaceFormat->pNext) {
+            pSurfaceFormat =
+                reinterpret_cast<VkSurfaceFormat2KHR*>(pSurfaceFormat->pNext);
+            switch (pSurfaceFormat->sType) {
+                case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT: {
+                    VkImageCompressionPropertiesEXT* surfaceCompressionProps =
+                        reinterpret_cast<VkImageCompressionPropertiesEXT*>(
+                            pSurfaceFormat);
+
+                    if (surfaceCompressionProps &&
+                        driver.GetPhysicalDeviceImageFormatProperties2KHR) {
+                        VkPhysicalDeviceImageFormatInfo2 imageFormatInfo = {};
+                        imageFormatInfo.sType =
+                            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+                        imageFormatInfo.format =
+                            pSurfaceFormats[i].surfaceFormat.format;
+                        imageFormatInfo.pNext = nullptr;
+
+                        VkImageCompressionControlEXT compressionControl = {};
+                        compressionControl.sType =
+                            VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT;
+                        compressionControl.pNext = imageFormatInfo.pNext;
+
+                        imageFormatInfo.pNext = &compressionControl;
+
+                        VkImageCompressionPropertiesEXT compressionProps = {};
+                        compressionProps.sType =
+                            VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT;
+                        compressionProps.pNext = nullptr;
+
+                        VkImageFormatProperties2KHR imageFormatProps = {};
+                        imageFormatProps.sType =
+                            VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2_KHR;
+                        imageFormatProps.pNext = &compressionProps;
+
+                        VkResult compressionRes =
+                            driver.GetPhysicalDeviceImageFormatProperties2KHR(
+                                physicalDevice, &imageFormatInfo,
+                                &imageFormatProps);
+                        if (compressionRes == VK_SUCCESS) {
+                            surfaceCompressionProps->imageCompressionFlags =
+                                compressionProps.imageCompressionFlags;
+                            surfaceCompressionProps
+                                ->imageCompressionFixedRateFlags =
+                                compressionProps.imageCompressionFixedRateFlags;
+                        } else {
+                            return compressionRes;
+                        }
+                    }
+                } break;
+
+                default:
+                    // Ignore all other extension structs
+                    break;
+            }
+        }
+    }
+
+    return result;
 }
 
 VKAPI_ATTR
@@ -1078,7 +1222,8 @@ static void DestroySwapchainInternal(VkDevice device,
     }
 
     for (uint32_t i = 0; i < swapchain->num_images; i++) {
-        ReleaseSwapchainImage(device, window, -1, swapchain->images[i], false);
+        ReleaseSwapchainImage(device, swapchain->shared, window, -1,
+                              swapchain->images[i], false);
     }
 
     if (active) {
@@ -1117,10 +1262,10 @@ VkResult CreateSwapchainKHR(VkDevice device,
     if (!allocator)
         allocator = &GetData(device).allocator;
 
-    android_pixel_format native_pixel_format =
+    PixelFormat native_pixel_format =
         GetNativePixelFormat(create_info->imageFormat);
     android_dataspace native_dataspace =
-        GetNativeDataspace(create_info->imageColorSpace);
+        GetNativeDataspace(create_info->imageColorSpace, native_pixel_format);
     if (native_dataspace == HAL_DATASPACE_UNKNOWN) {
         ALOGE(
             "CreateSwapchainKHR(VkSwapchainCreateInfoKHR.imageColorSpace = %d) "
@@ -1212,10 +1357,11 @@ VkResult CreateSwapchainKHR(VkDevice device,
 
     const auto& dispatch = GetData(device).driver;
 
-    err = native_window_set_buffers_format(window, native_pixel_format);
+    err = native_window_set_buffers_format(
+        window, static_cast<int>(native_pixel_format));
     if (err != android::OK) {
-        ALOGE("native_window_set_buffers_format(%d) failed: %s (%d)",
-              native_pixel_format, strerror(-err), err);
+        ALOGE("native_window_set_buffers_format(%s) failed: %s (%d)",
+              toString(native_pixel_format).c_str(), strerror(-err), err);
         return VK_ERROR_SURFACE_LOST_KHR;
     }
 
@@ -1317,8 +1463,48 @@ VkResult CreateSwapchainKHR(VkDevice device,
         num_images = 1;
     }
 
-    int32_t legacy_usage = 0;
-    if (dispatch.GetSwapchainGrallocUsage2ANDROID) {
+    void* usage_info_pNext = nullptr;
+    VkImageCompressionControlEXT image_compression = {};
+    uint64_t native_usage = 0;
+    if (dispatch.GetSwapchainGrallocUsage3ANDROID) {
+        ATRACE_BEGIN("GetSwapchainGrallocUsage3ANDROID");
+        VkGrallocUsageInfoANDROID gralloc_usage_info = {};
+        gralloc_usage_info.sType = VK_STRUCTURE_TYPE_GRALLOC_USAGE_INFO_ANDROID;
+        gralloc_usage_info.format = create_info->imageFormat;
+        gralloc_usage_info.imageUsage = create_info->imageUsage;
+
+        // Look through the pNext chain for an image compression control struct
+        // if one is found AND the appropriate extensions are enabled,
+        // append it to be the gralloc usage pNext chain
+        const VkSwapchainCreateInfoKHR* create_infos = create_info;
+        while (create_infos->pNext) {
+            create_infos = reinterpret_cast<const VkSwapchainCreateInfoKHR*>(
+                create_infos->pNext);
+            switch (create_infos->sType) {
+                case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT: {
+                    const VkImageCompressionControlEXT* compression_infos =
+                        reinterpret_cast<const VkImageCompressionControlEXT*>(
+                            create_infos);
+                    image_compression = *compression_infos;
+                    image_compression.pNext = nullptr;
+                    usage_info_pNext = &image_compression;
+                } break;
+
+                default:
+                    // Ignore all other info structs
+                    break;
+            }
+        }
+        gralloc_usage_info.pNext = usage_info_pNext;
+
+        result = dispatch.GetSwapchainGrallocUsage3ANDROID(
+            device, &gralloc_usage_info, &native_usage);
+        ATRACE_END();
+        if (result != VK_SUCCESS) {
+            ALOGE("vkGetSwapchainGrallocUsage3ANDROID failed: %d", result);
+            return VK_ERROR_SURFACE_LOST_KHR;
+        }
+    } else if (dispatch.GetSwapchainGrallocUsage2ANDROID) {
         uint64_t consumer_usage, producer_usage;
         ATRACE_BEGIN("GetSwapchainGrallocUsage2ANDROID");
         result = dispatch.GetSwapchainGrallocUsage2ANDROID(
@@ -1329,10 +1515,11 @@ VkResult CreateSwapchainKHR(VkDevice device,
             ALOGE("vkGetSwapchainGrallocUsage2ANDROID failed: %d", result);
             return VK_ERROR_SURFACE_LOST_KHR;
         }
-        legacy_usage =
-            android_convertGralloc1To0Usage(producer_usage, consumer_usage);
+        native_usage =
+            convertGralloc1ToBufferUsage(producer_usage, consumer_usage);
     } else if (dispatch.GetSwapchainGrallocUsageANDROID) {
         ATRACE_BEGIN("GetSwapchainGrallocUsageANDROID");
+        int32_t legacy_usage = 0;
         result = dispatch.GetSwapchainGrallocUsageANDROID(
             device, create_info->imageFormat, create_info->imageUsage,
             &legacy_usage);
@@ -1341,8 +1528,9 @@ VkResult CreateSwapchainKHR(VkDevice device,
             ALOGE("vkGetSwapchainGrallocUsageANDROID failed: %d", result);
             return VK_ERROR_SURFACE_LOST_KHR;
         }
+        native_usage = static_cast<uint64_t>(legacy_usage);
     }
-    uint64_t native_usage = static_cast<uint64_t>(legacy_usage);
+    native_usage |= surface.consumer_usage;
 
     bool createProtectedSwapchain = false;
     if (create_info->flags & VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR) {
@@ -1382,7 +1570,7 @@ VkResult CreateSwapchainKHR(VkDevice device,
 #pragma clang diagnostic ignored "-Wold-style-cast"
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_IMAGE_CREATE_INFO_ANDROID,
 #pragma clang diagnostic pop
-        .pNext = nullptr,
+        .pNext = usage_info_pNext,
         .usage = swapchain_image_usage,
     };
     VkNativeBufferANDROID image_native_buffer = {
@@ -1440,6 +1628,7 @@ VkResult CreateSwapchainKHR(VkDevice device,
         android_convertGralloc0To1Usage(int(img.buffer->usage),
             &image_native_buffer.usage2.producer,
             &image_native_buffer.usage2.consumer);
+        image_native_buffer.usage3 = img.buffer->usage;
 
         ATRACE_BEGIN("CreateImage");
         result =
@@ -1852,7 +2041,8 @@ VkResult QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* present_info) {
                     WorstPresentResult(swapchain_result, VK_SUBOPTIMAL_KHR);
             }
         } else {
-            ReleaseSwapchainImage(device, nullptr, fence, img, true);
+            ReleaseSwapchainImage(device, swapchain.shared, nullptr, fence,
+                                  img, true);
             swapchain_result = VK_ERROR_OUT_OF_DATE_KHR;
         }
 

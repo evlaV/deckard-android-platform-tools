@@ -30,12 +30,24 @@
 #include <utils/Errors.h>
 
 #include <binder/RpcCertificateFormat.h>
+#include <binder/RpcThreads.h>
 
 #include <sys/uio.h>
 
 namespace android {
 
 class FdTrigger;
+struct RpcTransportFd;
+
+// for 'friend'
+class RpcTransportRaw;
+class RpcTransportTls;
+class RpcTransportTipcAndroid;
+class RpcTransportTipcTrusty;
+class RpcTransportCtxRaw;
+class RpcTransportCtxTls;
+class RpcTransportCtxTipcAndroid;
+class RpcTransportCtxTipcTrusty;
 
 // Represents a socket connection.
 // No thread-safety is guaranteed for these APIs.
@@ -81,7 +93,30 @@ public:
             const std::optional<android::base::function_ref<status_t()>> &altPoll,
             std::vector<std::variant<base::unique_fd, base::borrowed_fd>> *ancillaryFds) = 0;
 
-protected:
+    /**
+     *  Check whether any threads are blocked while polling the transport
+     *  for read operations
+     *  Return:
+     *    True - Specifies that there is active polling on transport.
+     *    False - No active polling on transport
+     */
+    [[nodiscard]] virtual bool isWaiting() = 0;
+
+private:
+    // limit the classes which can implement RpcTransport. Being able to change this
+    // interface is important to allow development of RPC binder. In the past, we
+    // changed this interface to use iovec for efficiency, and we added FDs to the
+    // interface. If another transport is needed, it should be added directly here.
+    // non-socket FDs likely also need changes in RpcSession in order to get
+    // connected, and similarly to how addrinfo was type-erased from RPC binder
+    // interfaces when RpcTransportTipc* was added, other changes may be needed
+    // to add more transports.
+
+    friend class ::android::RpcTransportRaw;
+    friend class ::android::RpcTransportTls;
+    friend class ::android::RpcTransportTipcAndroid;
+    friend class ::android::RpcTransportTipcTrusty;
+
     RpcTransport() = default;
 };
 
@@ -96,7 +131,7 @@ public:
     // Implementation details: for TLS, this function may incur I/O. |fdTrigger| may be used
     // to interrupt I/O. This function blocks until handshake is finished.
     [[nodiscard]] virtual std::unique_ptr<RpcTransport> newTransport(
-            android::base::unique_fd fd, FdTrigger *fdTrigger) const = 0;
+            android::RpcTransportFd fd, FdTrigger *fdTrigger) const = 0;
 
     // Return the preconfigured certificate of this context.
     //
@@ -106,7 +141,13 @@ public:
     [[nodiscard]] virtual std::vector<uint8_t> getCertificate(
             RpcCertificateFormat format) const = 0;
 
-protected:
+private:
+    // see comment on RpcTransport
+    friend class ::android::RpcTransportCtxRaw;
+    friend class ::android::RpcTransportCtxTls;
+    friend class ::android::RpcTransportCtxTipcAndroid;
+    friend class ::android::RpcTransportCtxTipcTrusty;
+
     RpcTransportCtx() = default;
 };
 
@@ -127,6 +168,38 @@ public:
 
 protected:
     RpcTransportCtxFactory() = default;
+};
+
+struct RpcTransportFd final {
+private:
+    mutable bool isPolling{false};
+
+    void setPollingState(bool state) const { isPolling = state; }
+
+public:
+    base::unique_fd fd;
+
+    RpcTransportFd() = default;
+    explicit RpcTransportFd(base::unique_fd &&descriptor)
+          : isPolling(false), fd(std::move(descriptor)) {}
+
+    RpcTransportFd(RpcTransportFd &&transportFd) noexcept
+          : isPolling(transportFd.isPolling), fd(std::move(transportFd.fd)) {}
+
+    RpcTransportFd &operator=(RpcTransportFd &&transportFd) noexcept {
+        fd = std::move(transportFd.fd);
+        isPolling = transportFd.isPolling;
+        return *this;
+    }
+
+    RpcTransportFd &operator=(base::unique_fd &&descriptor) noexcept {
+        fd = std::move(descriptor);
+        isPolling = false;
+        return *this;
+    }
+
+    bool isInPollingState() const { return isPolling; }
+    friend class FdTrigger;
 };
 
 } // namespace android

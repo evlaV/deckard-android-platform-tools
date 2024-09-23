@@ -138,7 +138,7 @@ public:
     explicit TouchInputMapper(InputDeviceContext& deviceContext);
     ~TouchInputMapper() override;
 
-    uint32_t getSources() override;
+    uint32_t getSources() const override;
     void populateDeviceInfo(InputDeviceInfo* deviceInfo) override;
     void dump(std::string& dump) override;
     void configure(nsecs_t when, const InputReaderConfiguration* config, uint32_t changes) override;
@@ -185,6 +185,8 @@ protected:
         UNSCALED,   // unscaled mapping (touchpad)
         NAVIGATION, // unscaled mapping with assist gesture (touch navigation)
         POINTER,    // pointer mapping (pointer)
+
+        ftl_last = POINTER
     };
     DeviceMode mDeviceMode;
 
@@ -198,6 +200,8 @@ protected:
             TOUCH_PAD,
             TOUCH_NAVIGATION,
             POINTER,
+
+            ftl_last = POINTER
         };
 
         DeviceType deviceType;
@@ -210,6 +214,8 @@ protected:
             ORIENTATION_90 = DISPLAY_ORIENTATION_90,
             ORIENTATION_180 = DISPLAY_ORIENTATION_180,
             ORIENTATION_270 = DISPLAY_ORIENTATION_270,
+
+            ftl_last = ORIENTATION_270
         };
         Orientation orientation;
 
@@ -219,6 +225,8 @@ protected:
         enum class GestureMode {
             SINGLE_TOUCH,
             MULTI_TOUCH,
+
+            ftl_last = MULTI_TOUCH
         };
         GestureMode gestureMode;
 
@@ -235,6 +243,7 @@ protected:
             DIAMETER,
             BOX,
             AREA,
+            ftl_last = AREA
         };
 
         SizeCalibration sizeCalibration;
@@ -318,6 +327,8 @@ protected:
         int32_t rawVScroll;
         int32_t rawHScroll;
 
+        explicit inline RawState() { clear(); }
+
         void copyFrom(const RawState& other) {
             when = other.when;
             readTime = other.readTime;
@@ -398,8 +409,8 @@ protected:
     virtual void dumpParameters(std::string& dump);
     virtual void configureRawPointerAxes();
     virtual void dumpRawPointerAxes(std::string& dump);
-    virtual void configureSurface(nsecs_t when, bool* outResetNeeded);
-    virtual void dumpSurface(std::string& dump);
+    virtual void configureInputDevice(nsecs_t when, bool* outResetNeeded);
+    virtual void dumpDisplay(std::string& dump);
     virtual void configureVirtualKeys();
     virtual void dumpVirtualKeys(std::string& dump);
     virtual void parseCalibration();
@@ -418,38 +429,27 @@ private:
     // The components of the viewport are specified in the display's rotated orientation.
     DisplayViewport mViewport;
 
-    // The surface orientation, width and height set by configureSurface().
-    // The width and height are derived from the viewport but are specified
+    // The width and height are obtained from the viewport and are specified
     // in the natural orientation.
-    // They could be used for calculating diagonal, scaling factors, and virtual keys.
-    int32_t mRawSurfaceWidth;
-    int32_t mRawSurfaceHeight;
+    int32_t mDisplayWidth;
+    int32_t mDisplayHeight;
 
-    // The surface origin specifies how the surface coordinates should be translated
-    // to align with the logical display coordinate space.
-    int32_t mSurfaceLeft;
-    int32_t mSurfaceTop;
-    int32_t mSurfaceRight;
-    int32_t mSurfaceBottom;
-
-    // Similar to the surface coordinates, but in the raw display coordinate space rather than in
-    // the logical coordinate space.
+    // The physical frame is the rectangle in the display's coordinate space that maps to the
+    // the logical display frame.
     int32_t mPhysicalWidth;
     int32_t mPhysicalHeight;
     int32_t mPhysicalLeft;
     int32_t mPhysicalTop;
 
-    // The orientation may be different from the viewport orientation as it specifies
-    // the rotation of the surface coordinates required to produce the viewport's
-    // requested orientation, so it will depend on whether the device is orientation aware.
-    int32_t mSurfaceOrientation;
+    // The orientation of the input device relative to that of the display panel. It specifies
+    // the rotation of the input device coordinates required to produce the display panel
+    // orientation, so it will depend on whether the device is orientation aware.
+    int32_t mInputDeviceOrientation;
 
     // Translation and scaling factors, orientation-independent.
-    float mXTranslate;
     float mXScale;
     float mXPrecision;
 
-    float mYTranslate;
     float mYScale;
     float mYPrecision;
 
@@ -714,6 +714,12 @@ private:
         // Time the pointer last went down.
         nsecs_t downTime;
 
+        // Values reported for the last pointer event.
+        uint32_t source;
+        int32_t displayId;
+        float lastCursorX;
+        float lastCursorY;
+
         void reset() {
             currentCoords.clear();
             currentProperties.clear();
@@ -722,6 +728,10 @@ private:
             down = false;
             hovering = false;
             downTime = 0;
+            source = 0;
+            displayId = ADISPLAY_ID_NONE;
+            lastCursorX = 0.f;
+            lastCursorY = 0.f;
         }
     } mPointerSimple;
 
@@ -734,6 +744,10 @@ private:
 
     void resetExternalStylus();
     void clearStylusDataPendingFlags();
+
+    int32_t clampResolution(const char* axisName, int32_t resolution) const;
+    void initializeOrientedRanges();
+    void initializeSizeRanges();
 
     void sync(nsecs_t when, nsecs_t readTime);
 
@@ -799,21 +813,13 @@ private:
     // touchscreen.
     void updateTouchSpots();
 
-    bool isPointInsideSurface(int32_t x, int32_t y);
+    bool isPointInsidePhysicalFrame(int32_t x, int32_t y) const;
     const VirtualKey* findVirtualKeyHit(int32_t x, int32_t y);
 
     static void assignPointerIds(const RawState& last, RawState& current);
 
     const char* modeToString(DeviceMode deviceMode);
-    void rotateAndScale(float& x, float& y);
-
-    // Wrapper methods for interfacing with PointerController. These are used to convert points
-    // between the coordinate spaces used by InputReader and PointerController, if they differ.
-    void moveMouseCursor(float dx, float dy) const;
-    std::pair<float, float> getMouseCursorPosition() const;
-    void setMouseCursorPosition(float x, float y) const;
-    void setTouchSpots(const PointerCoords* spotCoords, const uint32_t* spotIdToIndex,
-                       BitSet32 spotIdBits, int32_t displayId);
+    void rotateAndScale(float& x, float& y) const;
 };
 
 } // namespace android

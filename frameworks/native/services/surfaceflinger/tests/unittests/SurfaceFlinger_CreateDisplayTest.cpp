@@ -46,13 +46,13 @@ TEST_F(CreateDisplayTest, createDisplaySetsCurrentStateForNonsecureDisplay) {
     const auto& display = getCurrentDisplayState(displayToken);
     EXPECT_TRUE(display.isVirtual());
     EXPECT_FALSE(display.isSecure);
-    EXPECT_EQ(name.string(), display.displayName);
+    EXPECT_EQ(name.c_str(), display.displayName);
 
     // --------------------------------------------------------------------
     // Cleanup conditions
 
-    // Destroying the display invalidates the display state.
-    EXPECT_CALL(*mMessageQueue, invalidate()).Times(1);
+    // Creating the display commits a display transaction.
+    EXPECT_CALL(*mFlinger.scheduler(), scheduleFrame()).Times(1);
 }
 
 TEST_F(CreateDisplayTest, createDisplaySetsCurrentStateForSecureDisplay) {
@@ -81,13 +81,13 @@ TEST_F(CreateDisplayTest, createDisplaySetsCurrentStateForSecureDisplay) {
     const auto& display = getCurrentDisplayState(displayToken);
     EXPECT_TRUE(display.isVirtual());
     EXPECT_TRUE(display.isSecure);
-    EXPECT_EQ(name.string(), display.displayName);
+    EXPECT_EQ(name.c_str(), display.displayName);
 
     // --------------------------------------------------------------------
     // Cleanup conditions
 
-    // Destroying the display invalidates the display state.
-    EXPECT_CALL(*mMessageQueue, invalidate()).Times(1);
+    // Creating the display commits a display transaction.
+    EXPECT_CALL(*mFlinger.scheduler(), scheduleFrame()).Times(1);
 }
 
 } // namespace

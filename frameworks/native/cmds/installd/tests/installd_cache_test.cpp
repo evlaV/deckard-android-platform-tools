@@ -42,6 +42,7 @@ constexpr int64_t kTbInBytes = 1024 * kGbInBytes;
 
 #define FLAG_FREE_CACHE_V2 InstalldNativeService::FLAG_FREE_CACHE_V2
 #define FLAG_FREE_CACHE_V2_DEFY_QUOTA InstalldNativeService::FLAG_FREE_CACHE_V2_DEFY_QUOTA
+#define FLAG_FREE_CACHE_DEFY_TARGET_FREE_BYTES InstalldNativeService::FLAG_FREE_CACHE_DEFY_TARGET_FREE_BYTES
 
 int get_property(const char *key, char *value, const char *default_value) {
     return property_get(key, value, default_value);
@@ -63,6 +64,10 @@ bool calculate_odex_file_path(char path[PKG_PATH_MAX] ATTRIBUTE_UNUSED,
 bool create_cache_path(char path[PKG_PATH_MAX] ATTRIBUTE_UNUSED,
         const char *src ATTRIBUTE_UNUSED,
         const char *instruction_set ATTRIBUTE_UNUSED) {
+    return false;
+}
+
+bool force_compile_without_image() {
     return false;
 }
 
@@ -146,12 +151,68 @@ TEST_F(CacheTest, FreeCache_All) {
     EXPECT_EQ(0, exists("com.example/cache/foo/one"));
     EXPECT_EQ(0, exists("com.example/cache/foo/two"));
 
-    service->freeCache(testUuid, kTbInBytes, 0,
+    service->freeCache(testUuid, kTbInBytes,
             FLAG_FREE_CACHE_V2 | FLAG_FREE_CACHE_V2_DEFY_QUOTA);
 
     EXPECT_EQ(0, exists("com.example/normal"));
     EXPECT_EQ(-1, exists("com.example/cache/foo/one"));
     EXPECT_EQ(-1, exists("com.example/cache/foo/two"));
+}
+
+TEST_F(CacheTest, FreeCache_NonAggressive) {
+    LOG(INFO) << "FreeCache_NonAggressive";
+
+    mkdir("com.example");
+    touch("com.example/normal", 1 * kMbInBytes, 60);
+    mkdir("com.example/cache");
+    mkdir("com.example/cache/foo");
+    touch("com.example/cache/foo/one", 65 * kMbInBytes, 60);
+    touch("com.example/cache/foo/two", 2 * kMbInBytes, 120);
+
+    EXPECT_EQ(0, exists("com.example/normal"));
+    EXPECT_EQ(0, exists("com.example/cache/foo/one"));
+    EXPECT_EQ(0, exists("com.example/cache/foo/two"));
+
+    service->freeCache(testUuid, kTbInBytes, FLAG_FREE_CACHE_V2);
+
+    EXPECT_EQ(0, exists("com.example/normal"));
+    EXPECT_EQ(-1, exists("com.example/cache/foo/one"));
+    EXPECT_EQ(0, exists("com.example/cache/foo/two"));
+
+    service->freeCache(testUuid, kTbInBytes, FLAG_FREE_CACHE_V2);
+
+    EXPECT_EQ(0, exists("com.example/normal"));
+    EXPECT_EQ(-1, exists("com.example/cache/foo/one"));
+    EXPECT_EQ(0, exists("com.example/cache/foo/two"));
+}
+
+TEST_F(CacheTest, FreeCache_DefyTargetFreeBytes) {
+    LOG(INFO) << "FreeCache_DefyTargetFreeBytes";
+
+    mkdir("com.example");
+    touch("com.example/normal", 1 * kMbInBytes, 60);
+    mkdir("com.example/cache");
+    mkdir("com.example/cache/foo");
+    touch("com.example/cache/foo/one", 65 * kMbInBytes, 60);
+    touch("com.example/cache/foo/two", 2 * kMbInBytes, 120);
+
+    EXPECT_EQ(0, exists("com.example/normal"));
+    EXPECT_EQ(0, exists("com.example/cache/foo/one"));
+    EXPECT_EQ(0, exists("com.example/cache/foo/two"));
+
+    service->freeCache(testUuid, kMbInBytes, FLAG_FREE_CACHE_V2
+            | FLAG_FREE_CACHE_DEFY_TARGET_FREE_BYTES);
+
+    EXPECT_EQ(0, exists("com.example/normal"));
+    EXPECT_EQ(-1, exists("com.example/cache/foo/one"));
+    EXPECT_EQ(0, exists("com.example/cache/foo/two"));
+
+    service->freeCache(testUuid, kMbInBytes, FLAG_FREE_CACHE_V2
+            | FLAG_FREE_CACHE_DEFY_TARGET_FREE_BYTES);
+
+    EXPECT_EQ(0, exists("com.example/normal"));
+    EXPECT_EQ(-1, exists("com.example/cache/foo/one"));
+    EXPECT_EQ(0, exists("com.example/cache/foo/two"));
 }
 
 TEST_F(CacheTest, FreeCache_Age) {
@@ -163,13 +224,13 @@ TEST_F(CacheTest, FreeCache_Age) {
     touch("com.example/cache/foo/one", kMbInBytes, 60);
     touch("com.example/cache/foo/two", kMbInBytes, 120);
 
-    service->freeCache(testUuid, free() + kKbInBytes, 0,
+    service->freeCache(testUuid, free() + kKbInBytes,
             FLAG_FREE_CACHE_V2 | FLAG_FREE_CACHE_V2_DEFY_QUOTA);
 
     EXPECT_EQ(-1, exists("com.example/cache/foo/one"));
     EXPECT_EQ(0, exists("com.example/cache/foo/two"));
 
-    service->freeCache(testUuid, free() + kKbInBytes, 0,
+    service->freeCache(testUuid, free() + kKbInBytes,
             FLAG_FREE_CACHE_V2 | FLAG_FREE_CACHE_V2_DEFY_QUOTA);
 
     EXPECT_EQ(-1, exists("com.example/cache/foo/one"));
@@ -197,7 +258,7 @@ TEST_F(CacheTest, FreeCache_Tombstone) {
     EXPECT_EQ(2 * kMbInBytes, size("com.example/cache/bar/bar1"));
     EXPECT_EQ(2 * kMbInBytes, size("com.example/cache/bar/bar2"));
 
-    service->freeCache(testUuid, kTbInBytes, 0,
+    service->freeCache(testUuid, kTbInBytes,
             FLAG_FREE_CACHE_V2 | FLAG_FREE_CACHE_V2_DEFY_QUOTA);
 
     EXPECT_EQ(-1, exists("com.example/cache/foo/foo1"));
@@ -219,7 +280,7 @@ TEST_F(CacheTest, FreeCache_Group) {
 
     setxattr("com.example/cache/foo", "user.cache_group");
 
-    service->freeCache(testUuid, free() + kKbInBytes, 0,
+    service->freeCache(testUuid, free() + kKbInBytes,
             FLAG_FREE_CACHE_V2 | FLAG_FREE_CACHE_V2_DEFY_QUOTA);
 
     EXPECT_EQ(-1, exists("com.example/cache/foo/foo1"));
@@ -264,7 +325,7 @@ TEST_F(CacheTest, FreeCache_GroupTombstone) {
     setxattr("com.example/cache/tomb", "user.cache_tombstone");
     setxattr("com.example/cache/tomb/group", "user.cache_group");
 
-    service->freeCache(testUuid, free() + kKbInBytes, 0,
+    service->freeCache(testUuid, free() + kKbInBytes,
             FLAG_FREE_CACHE_V2 | FLAG_FREE_CACHE_V2_DEFY_QUOTA);
 
     EXPECT_EQ(kMbInBytes, size("com.example/cache/group/file1"));
@@ -285,7 +346,7 @@ TEST_F(CacheTest, FreeCache_GroupTombstone) {
     EXPECT_EQ(0, size("com.example/cache/tomb/group/dir/file1"));
     EXPECT_EQ(0, size("com.example/cache/tomb/group/dir/file2"));
 
-    service->freeCache(testUuid, free() + kKbInBytes, 0,
+    service->freeCache(testUuid, free() + kKbInBytes,
             FLAG_FREE_CACHE_V2 | FLAG_FREE_CACHE_V2_DEFY_QUOTA);
 
     EXPECT_EQ(-1, size("com.example/cache/group/file1"));
@@ -306,7 +367,7 @@ TEST_F(CacheTest, FreeCache_GroupTombstone) {
     EXPECT_EQ(0, size("com.example/cache/tomb/group/dir/file1"));
     EXPECT_EQ(0, size("com.example/cache/tomb/group/dir/file2"));
 
-    service->freeCache(testUuid, kTbInBytes, 0,
+    service->freeCache(testUuid, kTbInBytes,
             FLAG_FREE_CACHE_V2 | FLAG_FREE_CACHE_V2_DEFY_QUOTA);
 
     EXPECT_EQ(-1, size("com.example/cache/group/file1"));

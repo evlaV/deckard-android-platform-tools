@@ -442,6 +442,16 @@ static unique_fd open_current_profile(uid_t uid, userid_t user, const std::strin
 static unique_fd open_reference_profile(uid_t uid, const std::string& package_name,
         const std::string& location, bool read_write, bool is_secondary_dex) {
     std::string profile = create_reference_profile_path(package_name, location, is_secondary_dex);
+    if (read_write && GetBoolProperty("dalvik.vm.useartservice", false)) {
+        // ART Service doesn't use flock and instead assumes profile files are
+        // immutable, so ensure we don't open a file for writing when it's
+        // active.
+        // TODO(b/251921228): Normally installd isn't called at all in that
+        // case, but OTA is still an exception that uses the legacy code.
+        LOG(ERROR) << "Opening ref profile " << profile
+                   << " for writing is unsafe when ART Service is enabled.";
+        return invalid_unique_fd();
+    }
     return open_profile(
         uid,
         profile,
@@ -450,14 +460,13 @@ static unique_fd open_reference_profile(uid_t uid, const std::string& package_na
 }
 
 static UniqueFile open_reference_profile_as_unique_file(uid_t uid, const std::string& package_name,
-        const std::string& location, bool read_write, bool is_secondary_dex) {
+                                                        const std::string& location,
+                                                        bool is_secondary_dex) {
     std::string profile_path = create_reference_profile_path(package_name, location,
                                                              is_secondary_dex);
-    unique_fd ufd = open_profile(
-        uid,
-        profile_path,
-        read_write ? (O_CREAT | O_RDWR) : O_RDONLY,
-        S_IRUSR | S_IWUSR | S_IRGRP);  // so that ART can also read it when apps run.
+    unique_fd ufd = open_profile(uid, profile_path, O_RDONLY,
+                                 S_IRUSR | S_IWUSR |
+                                         S_IRGRP); // so that ART can also read it when apps run.
 
     return UniqueFile(ufd.release(), profile_path, [](const std::string& path) {
         clear_profile(path);
@@ -624,12 +633,15 @@ class RunProfman : public ExecVHelper {
                   /*for_boot_image*/false);
     }
 
-    void SetupDump(const std::vector<unique_fd>& profiles_fd,
-                   const unique_fd& reference_profile_fd,
+    void SetupDump(const std::vector<unique_fd>& profiles_fd, const unique_fd& reference_profile_fd,
                    const std::vector<std::string>& dex_locations,
-                   const std::vector<unique_fd>& apk_fds,
+                   const std::vector<unique_fd>& apk_fds, bool dump_classes_and_methods,
                    const unique_fd& output_fd) {
-        AddArg("--dump-only");
+        if (dump_classes_and_methods) {
+            AddArg("--dump-classes-and-methods");
+        } else {
+            AddArg("--dump-only");
+        }
         AddArg(StringPrintf("--dump-output-to-fd=%d", output_fd.get()));
         SetupArgs(profiles_fd,
                   reference_profile_fd,
@@ -772,7 +784,7 @@ int analyze_primary_profiles(uid_t uid, const std::string& package_name,
 }
 
 bool dump_profiles(int32_t uid, const std::string& pkgname, const std::string& profile_name,
-        const std::string& code_path) {
+                   const std::string& code_path, bool dump_classes_and_methods) {
     std::vector<unique_fd> profile_fds;
     unique_fd reference_profile_fd;
     std::string out_file_name = StringPrintf("/data/misc/profman/%s-%s.txt",
@@ -808,7 +820,8 @@ bool dump_profiles(int32_t uid, const std::string& pkgname, const std::string& p
 
 
     RunProfman profman_dump;
-    profman_dump.SetupDump(profile_fds, reference_profile_fd, dex_locations, apk_fds, output_fd);
+    profman_dump.SetupDump(profile_fds, reference_profile_fd, dex_locations, apk_fds,
+                           dump_classes_and_methods, output_fd);
     pid_t pid = fork();
     if (pid == 0) {
         /* child -- drop privileges before continuing */
@@ -1100,8 +1113,7 @@ UniqueFile maybe_open_reference_profile(const std::string& pkgname,
             location = profile_name;
         }
     }
-    return open_reference_profile_as_unique_file(uid, pkgname, location, /*read_write*/false,
-                                                 is_secondary_dex);
+    return open_reference_profile_as_unique_file(uid, pkgname, location, is_secondary_dex);
 }
 
 // Opens the vdex files and assigns the input fd to in_vdex_wrapper and the output fd to
@@ -1905,10 +1917,11 @@ int dexopt(const char* dex_path, uid_t uid, const char* pkgname, const char* ins
     // Open the reference profile if needed.
     UniqueFile reference_profile = maybe_open_reference_profile(
             pkgname, dex_path, profile_name, profile_guided, is_public, uid, is_secondary_dex);
-
-    if (reference_profile.fd() == -1) {
-        // We don't create an app image without reference profile since there is no speedup from
-        // loading it in that case and instead will be a small overhead.
+    struct stat sbuf;
+    if (reference_profile.fd() == -1 ||
+        (fstat(reference_profile.fd(), &sbuf) != -1 && sbuf.st_size == 0)) {
+        // We don't create an app image with empty or non existing reference profile since there
+        // is no speedup from loading it in that case and instead will be a small overhead.
         generate_app_image = false;
     }
 
@@ -1929,7 +1942,8 @@ int dexopt(const char* dex_path, uid_t uid, const char* pkgname, const char* ins
         RUNTIME_NATIVE_BOOT_NAMESPACE,
         ENABLE_JITZYGOTE_IMAGE,
         /*default_value=*/ "");
-    bool use_jitzygote_image = jitzygote_flag == "true" || IsBootClassPathProfilingEnable();
+    bool compile_without_image = jitzygote_flag == "true" || IsBootClassPathProfilingEnable() ||
+            force_compile_without_image();
 
     // Decide whether to use dex2oat64.
     bool use_dex2oat64 = false;
@@ -1951,8 +1965,8 @@ int dexopt(const char* dex_path, uid_t uid, const char* pkgname, const char* ins
                       in_dex, in_vdex, dex_metadata, reference_profile, class_loader_context,
                       join_fds(context_input_fds), swap_fd.get(), instruction_set, compiler_filter,
                       debuggable, boot_complete, for_restore, target_sdk_version,
-                      enable_hidden_api_checks, generate_compact_dex, use_jitzygote_image,
-                      compilation_reason);
+                      enable_hidden_api_checks, generate_compact_dex, compile_without_image,
+                      background_job_compile, compilation_reason);
 
     bool cancelled = false;
     pid_t pid = dexopt_status_->check_cancellation_and_fork(&cancelled);
@@ -2773,13 +2787,23 @@ bool prepare_app_profile(const std::string& package_name,
                          const std::string& profile_name,
                          const std::string& code_path,
                          const std::optional<std::string>& dex_metadata) {
-    // Prepare the current profile.
-    std::string cur_profile  = create_current_profile_path(user_id, package_name, profile_name,
-            /*is_secondary_dex*/ false);
-    uid_t uid = multiuser_get_uid(user_id, app_id);
-    if (fs_prepare_file_strict(cur_profile.c_str(), 0600, uid, uid) != 0) {
-        PLOG(ERROR) << "Failed to prepare " << cur_profile;
-        return false;
+    if (user_id != USER_NULL) {
+        if (user_id < 0) {
+            LOG(ERROR) << "Unexpected user ID " << user_id;
+            return false;
+        }
+
+        // Prepare the current profile.
+        std::string cur_profile = create_current_profile_path(user_id, package_name, profile_name,
+                                                              /*is_secondary_dex*/ false);
+        uid_t uid = multiuser_get_uid(user_id, app_id);
+        if (fs_prepare_file_strict(cur_profile.c_str(), 0600, uid, uid) != 0) {
+            PLOG(ERROR) << "Failed to prepare " << cur_profile;
+            return false;
+        }
+    } else {
+        // Prepare the reference profile as the system user.
+        user_id = USER_SYSTEM;
     }
 
     // Check if we need to install the profile from the dex metadata.
@@ -2788,8 +2812,9 @@ bool prepare_app_profile(const std::string& package_name,
     }
 
     // We have a dex metdata. Merge the profile into the reference profile.
-    unique_fd ref_profile_fd = open_reference_profile(uid, package_name, profile_name,
-            /*read_write*/ true, /*is_secondary_dex*/ false);
+    unique_fd ref_profile_fd =
+            open_reference_profile(multiuser_get_uid(user_id, app_id), package_name, profile_name,
+                                   /*read_write*/ true, /*is_secondary_dex*/ false);
     unique_fd dex_metadata_fd(TEMP_FAILURE_RETRY(
             open(dex_metadata->c_str(), O_RDONLY | O_NOFOLLOW)));
     unique_fd apk_fd(TEMP_FAILURE_RETRY(open(code_path.c_str(), O_RDONLY | O_NOFOLLOW)));
@@ -2821,6 +2846,23 @@ bool prepare_app_profile(const std::string& package_name,
         return false;
     }
     return true;
+}
+
+int get_odex_visibility(const char* apk_path, const char* instruction_set, const char* oat_dir) {
+    char oat_path[PKG_PATH_MAX];
+    if (!create_oat_out_path(apk_path, instruction_set, oat_dir, /*is_secondary_dex=*/false,
+                             oat_path)) {
+        return -1;
+    }
+    struct stat st;
+    if (stat(oat_path, &st) == -1) {
+        if (errno == ENOENT) {
+            return ODEX_NOT_FOUND;
+        }
+        PLOG(ERROR) << "Could not stat " << oat_path;
+        return -1;
+    }
+    return (st.st_mode & S_IROTH) ? ODEX_IS_PUBLIC : ODEX_IS_PRIVATE;
 }
 
 }  // namespace installd

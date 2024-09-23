@@ -71,6 +71,8 @@ struct HashtreeInfo {
     std::string algorithm;
     // The root digest of the merkle tree.
     std::string root_digest;
+    // If check_at_most_once is enabled.
+    bool check_at_most_once;
 };
 
 // fs_mgr_mount_all() updates fstab entries that reference device-mapper.
@@ -83,13 +85,10 @@ MountAllResult fs_mgr_mount_all(android::fs_mgr::Fstab* fstab, int mount_mode);
 #define FS_MGR_DOMNT_FAILED (-1)
 #define FS_MGR_DOMNT_BUSY (-2)
 #define FS_MGR_DOMNT_SUCCESS 0
-int fs_mgr_do_mount(android::fs_mgr::Fstab* fstab, const char* n_name, char* n_blk_device,
-                    char* tmp_mount_point);
-int fs_mgr_do_mount(android::fs_mgr::Fstab* fstab, const char* n_name, char* n_blk_device,
-                    char* tmp_mount_point, bool need_cp, bool metadata_encrypted);
+int fs_mgr_do_mount(android::fs_mgr::Fstab* fstab, const std::string& n_name,
+                    const std::string& n_blk_device, int needs_checkpoint, bool needs_encrypt);
 int fs_mgr_do_mount_one(const android::fs_mgr::FstabEntry& entry,
                         const std::string& mount_point = "");
-int fs_mgr_do_tmpfs_mount(const char *n_name);
 bool fs_mgr_load_verity_state(int* mode);
 // Returns true if verity is enabled on this particular FstabEntry.
 bool fs_mgr_is_verity_enabled(const android::fs_mgr::FstabEntry& entry);

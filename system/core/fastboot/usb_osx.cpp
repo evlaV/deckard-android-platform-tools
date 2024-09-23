@@ -191,16 +191,30 @@ static int try_interfaces(IOUSBDeviceInterface500** dev, usb_handle* handle) {
 
         // Iterate over the endpoints for this interface and see if there
         // are any that do bulk in/out.
-        for (UInt8 endpoint = 1; endpoint <= interfaceNumEndpoints; endpoint++) {
+        for (UInt8 endpoint = 1; endpoint <= interfaceNumEndpoints; ++endpoint) {
             UInt8   transferType;
-            UInt16  maxPacketSize;
+            UInt16  endPointMaxPacketSize = 0;
             UInt8   interval;
+
+            // Attempt to retrieve the 'true' packet-size from supported interface.
+            kr = (*interface)
+                 ->GetEndpointProperties(interface, 0, endpoint,
+                                       kUSBOut,
+                                       &transferType,
+                                       &endPointMaxPacketSize, &interval);
+            if (kr == kIOReturnSuccess && !endPointMaxPacketSize) {
+                ERR("GetEndpointProperties() returned zero len packet-size");
+            }
+
+            UInt16  pipePropMaxPacketSize;
             UInt8   number;
             UInt8   direction;
 
+            // Proceed with extracting the transfer direction, so we can fill in the
+            // appropriate fields (bulkIn or bulkOut).
             kr = (*interface)->GetPipeProperties(interface, endpoint,
                     &direction,
-                    &number, &transferType, &maxPacketSize, &interval);
+                    &number, &transferType, &pipePropMaxPacketSize, &interval);
 
             if (kr == 0) {
                 if (transferType != kUSBBulk) {
@@ -216,7 +230,8 @@ static int try_interfaces(IOUSBDeviceInterface500** dev, usb_handle* handle) {
                 }
 
                 if (handle->info.ifc_protocol == 0x01) {
-                    handle->zero_mask = maxPacketSize - 1;
+                    handle->zero_mask = (endPointMaxPacketSize == 0) ?
+                        pipePropMaxPacketSize - 1 : endPointMaxPacketSize - 1;
                 }
             } else {
                 ERR("could not get pipe properties for endpoint %u (%08x)\n", endpoint, kr);
@@ -421,12 +436,7 @@ static int init_usb(ifc_match_func callback, std::unique_ptr<usb_handle>* handle
 
     for (;;) {
         if (! IOIteratorIsValid(iterator)) {
-            /*
-             * Apple documentation advises resetting the iterator if
-             * it should become invalid during iteration.
-             */
-            IOIteratorReset(iterator);
-            continue;
+            break;
         }
 
         io_service_t device = IOIteratorNext(iterator);
@@ -441,8 +451,7 @@ static int init_usb(ifc_match_func callback, std::unique_ptr<usb_handle>* handle
         }
 
         if (h.success) {
-            handle->reset(new usb_handle);
-            memcpy(handle->get(), &h, sizeof(usb_handle));
+            handle->reset(new usb_handle(h));
             ret = 0;
             break;
         }
@@ -460,16 +469,20 @@ static int init_usb(ifc_match_func callback, std::unique_ptr<usb_handle>* handle
 /*
  * Definitions of this file's public functions.
  */
-
-UsbTransport* usb_open(ifc_match_func callback, uint32_t timeout_ms) {
+std::unique_ptr<UsbTransport> usb_open(ifc_match_func callback, uint32_t timeout_ms) {
+    std::unique_ptr<UsbTransport> result;
     std::unique_ptr<usb_handle> handle;
 
     if (init_usb(callback, &handle) < 0) {
         /* Something went wrong initializing USB. */
-        return nullptr;
+        return result;
     }
 
-    return new OsxUsbTransport(std::move(handle), timeout_ms);
+    if (handle) {
+        result = std::make_unique<OsxUsbTransport>(std::move(handle), timeout_ms);
+    }
+
+    return result;
 }
 
 OsxUsbTransport::~OsxUsbTransport() {

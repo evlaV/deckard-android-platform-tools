@@ -34,13 +34,8 @@
 #include <binder/IInterface.h>
 #include <binder/Parcelable.h>
 
-#ifdef BINDER_IPC_32BIT
-//NOLINTNEXTLINE(google-runtime-int) b/173188702
-typedef unsigned int binder_size_t;
-#else
 //NOLINTNEXTLINE(google-runtime-int) b/173188702
 typedef unsigned long long binder_size_t;
-#endif
 
 struct flat_binder_object;
 
@@ -75,6 +70,7 @@ public:
     size_t              dataAvail() const;
     size_t              dataPosition() const;
     size_t              dataCapacity() const;
+    size_t dataBufferSize() const;
 
     status_t            setDataSize(size_t size);
 
@@ -149,6 +145,14 @@ public:
     // Verify there are no bytes left to be read on the Parcel.
     // Returns Status(EX_BAD_PARCELABLE) when the Parcel is not consumed.
     binder::Status enforceNoDataAvail() const;
+
+    // This Api is used by fuzzers to skip dataAvail checks.
+    void setEnforceNoDataAvail(bool enforceNoDataAvail);
+
+    // When fuzzing, we want to remove certain ABI checks that cause significant
+    // lost coverage, and we also want to avoid logs that cost too much to write.
+    void setServiceFuzzing();
+    bool isServiceFuzzing() const;
 
     void                freeData();
 
@@ -262,7 +266,8 @@ public:
     status_t            writeEnumVector(const std::optional<std::vector<T>>& val)
             { return writeData(val); }
     template<typename T, std::enable_if_t<std::is_enum_v<T> && std::is_same_v<typename std::underlying_type_t<T>,int8_t>, bool> = 0>
-    status_t            writeEnumVector(const std::unique_ptr<std::vector<T>>& val) __attribute__((deprecated("use std::optional version instead")))
+    [[deprecated("use std::optional version instead")]] //
+    status_t            writeEnumVector(const std::unique_ptr<std::vector<T>>& val)
             { return writeData(val); }
     // Write an Enum vector with underlying type != int8_t.
     template<typename T, std::enable_if_t<std::is_enum_v<T> && !std::is_same_v<typename std::underlying_type_t<T>,int8_t>, bool> = 0>
@@ -272,17 +277,20 @@ public:
     status_t            writeEnumVector(const std::optional<std::vector<T>>& val)
             { return writeData(val); }
     template<typename T, std::enable_if_t<std::is_enum_v<T> && !std::is_same_v<typename std::underlying_type_t<T>,int8_t>, bool> = 0>
-    status_t            writeEnumVector(const std::unique_ptr<std::vector<T>>& val) __attribute__((deprecated("use std::optional version instead")))
+    [[deprecated("use std::optional version instead")]] //
+    status_t            writeEnumVector(const std::unique_ptr<std::vector<T>>& val)
             { return writeData(val); }
 
     template<typename T>
     status_t            writeParcelableVector(const std::optional<std::vector<std::optional<T>>>& val)
             { return writeData(val); }
     template<typename T>
-    status_t            writeParcelableVector(const std::unique_ptr<std::vector<std::unique_ptr<T>>>& val) __attribute__((deprecated("use std::optional version instead")))
+    [[deprecated("use std::optional version instead")]] //
+    status_t            writeParcelableVector(const std::unique_ptr<std::vector<std::unique_ptr<T>>>& val)
             { return writeData(val); }
     template<typename T>
-    status_t            writeParcelableVector(const std::shared_ptr<std::vector<std::unique_ptr<T>>>& val) __attribute__((deprecated("use std::optional version instead")))
+    [[deprecated("use std::optional version instead")]] //
+    status_t            writeParcelableVector(const std::shared_ptr<std::vector<std::unique_ptr<T>>>& val)
             { return writeData(val); }
     template<typename T>
     status_t            writeParcelableVector(const std::shared_ptr<std::vector<std::optional<T>>>& val)
@@ -418,7 +426,8 @@ public:
     status_t            readEnumVector(std::vector<T>* val) const
             { return readData(val); }
     template<typename T, std::enable_if_t<std::is_enum_v<T> && std::is_same_v<typename std::underlying_type_t<T>,int8_t>, bool> = 0>
-    status_t            readEnumVector(std::unique_ptr<std::vector<T>>* val) const __attribute__((deprecated("use std::optional version instead")))
+    [[deprecated("use std::optional version instead")]] //
+    status_t            readEnumVector(std::unique_ptr<std::vector<T>>* val) const
             { return readData(val); }
     template<typename T, std::enable_if_t<std::is_enum_v<T> && std::is_same_v<typename std::underlying_type_t<T>,int8_t>, bool> = 0>
     status_t            readEnumVector(std::optional<std::vector<T>>* val) const
@@ -428,7 +437,8 @@ public:
     status_t            readEnumVector(std::vector<T>* val) const
             { return readData(val); }
     template<typename T, std::enable_if_t<std::is_enum_v<T> && !std::is_same_v<typename std::underlying_type_t<T>,int8_t>, bool> = 0>
-    status_t            readEnumVector(std::unique_ptr<std::vector<T>>* val) const __attribute__((deprecated("use std::optional version instead")))
+    [[deprecated("use std::optional version instead")]] //
+    status_t            readEnumVector(std::unique_ptr<std::vector<T>>* val) const
             { return readData(val); }
     template<typename T, std::enable_if_t<std::is_enum_v<T> && !std::is_same_v<typename std::underlying_type_t<T>,int8_t>, bool> = 0>
     status_t            readEnumVector(std::optional<std::vector<T>>* val) const
@@ -439,8 +449,9 @@ public:
                             std::optional<std::vector<std::optional<T>>>* val) const
             { return readData(val); }
     template<typename T>
+    [[deprecated("use std::optional version instead")]] //
     status_t            readParcelableVector(
-                            std::unique_ptr<std::vector<std::unique_ptr<T>>>* val) const __attribute__((deprecated("use std::optional version instead")))
+                            std::unique_ptr<std::vector<std::unique_ptr<T>>>* val) const
             { return readData(val); }
     template<typename T>
     status_t            readParcelableVector(std::vector<T>* val) const
@@ -595,7 +606,7 @@ public:
     // uid.
     uid_t               readCallingWorkSourceUid() const;
 
-    void                print(TextOutput& to, uint32_t flags = 0) const;
+    void print(std::ostream& to, uint32_t flags = 0) const;
 
 private:
     // `objects` and `objectsSize` always 0 for RPC Parcels.
@@ -1329,6 +1340,10 @@ private:
     // data to be overridden with zero when deallocated
     mutable bool        mDeallocZero;
 
+    // Set this to false to skip dataAvail checks.
+    bool mEnforceNoDataAvail;
+    bool mServiceFuzzing;
+
     release_func        mOwner;
 
     size_t mReserved;
@@ -1594,8 +1609,7 @@ status_t Parcel::readNullableStrongBinder(sp<T>* val) const {
 
 // ---------------------------------------------------------------------------
 
-inline TextOutput& operator<<(TextOutput& to, const Parcel& parcel)
-{
+inline std::ostream& operator<<(std::ostream& to, const Parcel& parcel) {
     parcel.print(to);
     return to;
 }

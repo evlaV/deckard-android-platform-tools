@@ -111,15 +111,15 @@ def is_newer_version(args, prev_version, prev_id, check_version, check_id):
 
 
 def get_max_version(pkg):
-  """Ask crates.io for a pkg's latest version."""
+  """Ask crates.io for a pkg's latest stable version."""
   url = "https://crates.io/api/v1/crates/" + pkg
   with urllib.request.urlopen(url) as request:
     data = json.loads(request.read().decode())
-    return data["crate"]["max_version"]
+    return data["crate"]["max_stable_version"]
 
 
 def find_dl_path(args, name):
-  """Ask crates.io for the latest version download path."""
+  """Ask crates.io for the latest stable version download path."""
   base_name, version = pkg_base_name(name)
   if not version:
     version = get_max_version(name)
@@ -168,10 +168,10 @@ def fetch_pkg(args, pkg, dl_path):
     echo(args, "Calling add3prf.py in {}".format(dest_dir))
     cwd = os.getcwd()
     os.chdir(dest_dir)
-    os.system("add3prf.py")
+    # add3prf.py is in the same directory as this python script
+    os.system(os.path.dirname(__file__) +  "/add3prf.py")
     os.chdir(cwd)
   return True
-
 
 def get_crate_dependencies(args, pkg):
   """Ask crates.io for pkg's dependencies."""

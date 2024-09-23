@@ -32,7 +32,6 @@ SensorService::SensorDirectConnection::SensorDirectConnection(const sp<SensorSer
         : mService(service), mUid(uid), mMem(*mem),
         mHalChannelHandle(halChannelHandle),
         mOpPackageName(opPackageName), mDestroyed(false) {
-    mIsRateCappedBasedOnPermission = mService->isRateCappedBasedOnPermission(mOpPackageName);
     mUserId = multiuser_get_user_id(mUid);
     ALOGD_IF(DEBUG_CONNECTIONS, "Created SensorDirectConnection");
 }
@@ -64,7 +63,7 @@ void SensorService::SensorDirectConnection::onFirstRef() {
 void SensorService::SensorDirectConnection::dump(String8& result) const {
     Mutex::Autolock _l(mConnectionLock);
     result.appendFormat("\tPackage %s, HAL channel handle %d, total sensor activated %zu\n",
-            String8(mOpPackageName).string(), getHalChannelHandle(), mActivated.size());
+            String8(mOpPackageName).c_str(), getHalChannelHandle(), mActivated.size());
     for (auto &i : mActivated) {
         result.appendFormat("\t\tSensor %#08x, rate %d\n", i.first, i.second);
     }
@@ -80,7 +79,7 @@ void SensorService::SensorDirectConnection::dump(String8& result) const {
 void SensorService::SensorDirectConnection::dump(ProtoOutputStream* proto) const {
     using namespace service::SensorDirectConnectionProto;
     Mutex::Autolock _l(mConnectionLock);
-    proto->write(PACKAGE_NAME, std::string(String8(mOpPackageName).string()));
+    proto->write(PACKAGE_NAME, std::string(String8(mOpPackageName).c_str()));
     proto->write(HAL_CHANNEL_HANDLE, getHalChannelHandle());
     proto->write(NUM_SENSOR_ACTIVATED, int(mActivated.size()));
     for (auto &i : mActivated) {
@@ -158,7 +157,7 @@ int32_t SensorService::SensorDirectConnection::configureChannel(int handle, int 
     }
 
     const Sensor& s = si->getSensor();
-    if (!SensorService::canAccessSensor(s, "config direct channel", mOpPackageName)) {
+    if (!mService->canAccessSensor(s, "config direct channel", mOpPackageName)) {
         return PERMISSION_DENIED;
     }
 
@@ -197,8 +196,8 @@ int32_t SensorService::SensorDirectConnection::configureChannel(int handle, int 
             if (mService->isSensorInCappedSet(s.getType())) {
                 // Back up the rates that the app is allowed to have if the mic toggle is off
                 // This is used in the uncapRates() function.
-                if (!mIsRateCappedBasedOnPermission ||
-                            requestedRateLevel <= SENSOR_SERVICE_CAPPED_SAMPLING_RATE_LEVEL) {
+                if ((requestedRateLevel <= SENSOR_SERVICE_CAPPED_SAMPLING_RATE_LEVEL) ||
+                    !isRateCappedBasedOnPermission()) {
                     mMicRateBackup[handle] = requestedRateLevel;
                 } else {
                     mMicRateBackup[handle] = SENSOR_SERVICE_CAPPED_SAMPLING_RATE_LEVEL;

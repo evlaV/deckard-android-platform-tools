@@ -18,13 +18,15 @@
 
 #include <sys/types.h>
 
+#include <algorithm>
+
 #include "adb_unique_fd.h"
 
 #if defined(_WIN32)
 
 // Layout of this struct must match struct WSABUF (verified via static assert in sysdeps_win32.cpp)
 struct adb_iovec {
-    size_t iov_len;
+    unsigned int iov_len;
     void* iov_base;
 };
 
@@ -35,7 +37,7 @@ ssize_t adb_writev(borrowed_fd fd, const adb_iovec* iov, int iovcnt);
 #include <sys/uio.h>
 using adb_iovec = struct iovec;
 inline ssize_t adb_writev(borrowed_fd fd, const adb_iovec* iov, int iovcnt) {
-    return writev(fd.get(), iov, iovcnt);
+    return writev(fd.get(), iov, std::min(iovcnt, IOV_MAX));
 }
 
 #endif

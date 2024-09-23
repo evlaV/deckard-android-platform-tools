@@ -110,14 +110,20 @@ bool Daemon::StartServerForUserspaceSnapshots(int arg_start, int argc, char** ar
     for (int i = arg_start; i < argc; i++) {
         auto parts = android::base::Split(argv[i], ",");
         if (parts.size() != 4) {
-            LOG(ERROR) << "Malformed message, expected three sub-arguments.";
+            LOG(ERROR) << "Malformed message, expected four sub-arguments.";
             return false;
         }
         auto handler = user_server_.AddHandler(parts[0], parts[1], parts[2], parts[3]);
-        if (!handler || !user_server_.StartHandler(handler)) {
+        if (!handler || !user_server_.StartHandler(parts[0])) {
             return false;
         }
     }
+
+    // We reach this point only during selinux transition during device boot.
+    // At this point, all threads are spin up and are ready to serve the I/O
+    // requests for dm-user. Lets inform init.
+    auto client = std::make_unique<SnapuserdClient>();
+    client->NotifyTransitionDaemonIsReady();
 
     // Skip the accept() call to avoid spurious log spam. The server will still
     // run until all handlers have completed.

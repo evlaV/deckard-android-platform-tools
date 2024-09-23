@@ -269,6 +269,7 @@ abi_dump::BuiltinType IRToProtobufConverter::ConvertBuiltinTypeIR(
 abi_dump::ArrayType IRToProtobufConverter::ConvertArrayTypeIR(
     const ArrayTypeIR *array_typep) {
   abi_dump::ArrayType added_array_type;
+  added_array_type.set_is_of_unknown_bound(array_typep->IsOfUnknownBound());
   if (!AddTypeInfo(added_array_type.mutable_type_info(), array_typep)) {
     llvm::errs() << "ArrayTypeIR could not be converted\n";
     ::exit(1);
@@ -476,8 +477,13 @@ bool ProtobufIRDumper::Dump(const ModuleIR &module) {
   DumpModule(module);
   assert( tu_ptr_.get() != nullptr);
   std::ofstream text_output(dump_path_);
-  google::protobuf::io::OstreamOutputStream text_os(&text_output);
-  return google::protobuf::TextFormat::Print(*tu_ptr_.get(), &text_os);
+  {
+    google::protobuf::io::OstreamOutputStream text_os(&text_output);
+    if (!google::protobuf::TextFormat::Print(*tu_ptr_.get(), &text_os)) {
+      return false;
+    }
+  }
+  return text_output.flush().good();
 }
 
 std::unique_ptr<IRDumper> CreateProtobufIRDumper(const std::string &dump_path) {

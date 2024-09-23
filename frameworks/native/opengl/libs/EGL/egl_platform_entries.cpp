@@ -29,6 +29,7 @@
 #include <private/android/AHardwareBufferHelpers.h>
 #include <stdlib.h>
 #include <string.h>
+#include <aidl/android/hardware/graphics/common/PixelFormat.h>
 
 #include <condition_variable>
 #include <deque>
@@ -48,6 +49,7 @@
 #include "egl_trace.h"
 
 using namespace android;
+using PixelFormat = aidl::android::hardware::graphics::common::PixelFormat;
 
 // ----------------------------------------------------------------------------
 
@@ -83,7 +85,8 @@ extern const char* const gExtensionString;
 // Extensions implemented by the EGL wrapper.
 const char* const gBuiltinExtensionString =
         "EGL_ANDROID_front_buffer_auto_refresh "
-        "EGL_ANDROID_get_frame_timestamps "
+        // b/269060366 Conditionally enabled during display initialization:
+        //"EGL_ANDROID_get_frame_timestamps "
         "EGL_ANDROID_get_native_client_buffer "
         "EGL_ANDROID_presentation_time "
         "EGL_EXT_surface_CTA861_3_metadata "
@@ -404,7 +407,7 @@ EGLBoolean eglGetConfigAttribImpl(EGLDisplay dpy, EGLConfig config, EGLint attri
 // ----------------------------------------------------------------------------
 
 // Translates EGL color spaces to Android data spaces.
-static android_dataspace dataSpaceFromEGLColorSpace(EGLint colorspace) {
+static android_dataspace dataSpaceFromEGLColorSpace(EGLint colorspace, PixelFormat pixelFormat) {
     if (colorspace == EGL_GL_COLORSPACE_LINEAR_KHR) {
         return HAL_DATASPACE_UNKNOWN;
     } else if (colorspace == EGL_GL_COLORSPACE_SRGB_KHR) {
@@ -420,7 +423,13 @@ static android_dataspace dataSpaceFromEGLColorSpace(EGLint colorspace) {
     } else if (colorspace == EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT) {
         return HAL_DATASPACE_V0_SCRGB_LINEAR;
     } else if (colorspace == EGL_GL_COLORSPACE_BT2020_LINEAR_EXT) {
-        return HAL_DATASPACE_BT2020_LINEAR;
+        if (pixelFormat == PixelFormat::RGBA_FP16) {
+            return static_cast<android_dataspace>(HAL_DATASPACE_STANDARD_BT2020 |
+                                                  HAL_DATASPACE_TRANSFER_LINEAR |
+                                                  HAL_DATASPACE_RANGE_EXTENDED);
+        } else {
+            return HAL_DATASPACE_BT2020_LINEAR;
+        }
     } else if (colorspace == EGL_GL_COLORSPACE_BT2020_PQ_EXT) {
         return HAL_DATASPACE_BT2020_PQ;
     }
@@ -566,7 +575,7 @@ void convertAttribs(const EGLAttrib* attribList, std::vector<EGLint>& newList) {
 
 // Gets the native pixel format corrsponding to the passed EGLConfig.
 void getNativePixelFormat(EGLDisplay dpy, egl_connection_t* cnx, EGLConfig config,
-                          android_pixel_format* format) {
+                          PixelFormat* format) {
     // Set the native window's buffers format to match what this config requests.
     // Whether to use sRGB gamma is not part of the EGLconfig, but is part
     // of our native format. So if sRGB gamma is requested, we have to
@@ -599,28 +608,30 @@ void getNativePixelFormat(EGLDisplay dpy, egl_connection_t* cnx, EGLConfig confi
     //    strip colorspace from attribs.
     // endif
     if (a == 0) {
-        if (colorDepth <= 16) {
-            *format = HAL_PIXEL_FORMAT_RGB_565;
+        if (8 == r && 0 == g && 0 == b) {
+            *format = PixelFormat::R_8;
+        } else if (colorDepth <= 16) {
+            *format = PixelFormat::RGB_565;
         } else {
             if (componentType == EGL_COLOR_COMPONENT_TYPE_FIXED_EXT) {
                 if (colorDepth > 24) {
-                    *format = HAL_PIXEL_FORMAT_RGBA_1010102;
+                    *format = PixelFormat::RGBA_1010102;
                 } else {
-                    *format = HAL_PIXEL_FORMAT_RGBX_8888;
+                    *format = PixelFormat::RGBX_8888;
                 }
             } else {
-                *format = HAL_PIXEL_FORMAT_RGBA_FP16;
+                *format = PixelFormat::RGBA_FP16;
             }
         }
     } else {
         if (componentType == EGL_COLOR_COMPONENT_TYPE_FIXED_EXT) {
             if (colorDepth > 24) {
-                *format = HAL_PIXEL_FORMAT_RGBA_1010102;
+                *format = PixelFormat::RGBA_1010102;
             } else {
-                *format = HAL_PIXEL_FORMAT_RGBA_8888;
+                *format = PixelFormat::RGBA_8888;
             }
         } else {
-            *format = HAL_PIXEL_FORMAT_RGBA_FP16;
+            *format = PixelFormat::RGBA_FP16;
         }
     }
 }
@@ -678,7 +689,7 @@ EGLSurface eglCreateWindowSurfaceTmpl(egl_display_t* dp, egl_connection_t* cnx, 
     }
 
     EGLDisplay iDpy = dp->disp.dpy;
-    android_pixel_format format;
+    PixelFormat format;
     getNativePixelFormat(iDpy, cnx, config, &format);
 
     // now select correct colorspace and dataspace based on user's attribute list
@@ -694,14 +705,14 @@ EGLSurface eglCreateWindowSurfaceTmpl(egl_display_t* dp, egl_connection_t* cnx, 
     attrib_list = strippedAttribList.data();
 
     if (!cnx->useAngle) {
-        int err = native_window_set_buffers_format(window, format);
+        int err = native_window_set_buffers_format(window, static_cast<int>(format));
         if (err != 0) {
             ALOGE("error setting native window pixel format: %s (%d)", strerror(-err), err);
             native_window_api_disconnect(window, NATIVE_WINDOW_API_EGL);
             return setError(EGL_BAD_NATIVE_WINDOW, EGL_NO_SURFACE);
         }
 
-        android_dataspace dataSpace = dataSpaceFromEGLColorSpace(colorSpace);
+        android_dataspace dataSpace = dataSpaceFromEGLColorSpace(colorSpace, format);
         // Set dataSpace even if it could be HAL_DATASPACE_UNKNOWN.
         // HAL_DATASPACE_UNKNOWN is the default value, but it may have changed
         // at this point.
@@ -818,7 +829,7 @@ EGLSurface eglCreatePbufferSurfaceImpl(EGLDisplay dpy, EGLConfig config,
     if (!dp) return EGL_NO_SURFACE;
 
     EGLDisplay iDpy = dp->disp.dpy;
-    android_pixel_format format;
+    PixelFormat format;
     getNativePixelFormat(iDpy, cnx, config, &format);
 
     // Select correct colorspace based on user's attribute list
@@ -2178,6 +2189,10 @@ EGLBoolean eglGetNextFrameIdANDROIDImpl(EGLDisplay dpy, EGLSurface surface, EGLu
         return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
     }
 
+    if (!dp->haveExtension("EGL_ANDROID_get_frame_timestamps")) {
+        return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
+    }
+
     SurfaceRef _s(dp, surface);
     if (!_s.get()) {
         return setError(EGL_BAD_SURFACE, (EGLBoolean)EGL_FALSE);
@@ -2208,6 +2223,10 @@ EGLBoolean eglGetCompositorTimingANDROIDImpl(EGLDisplay dpy, EGLSurface surface,
                                              EGLnsecsANDROID* values) {
     const egl_display_t* dp = validate_display(dpy);
     if (!dp) {
+        return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
+    }
+
+    if (!dp->haveExtension("EGL_ANDROID_get_frame_timestamps")) {
         return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
     }
 
@@ -2265,6 +2284,10 @@ EGLBoolean eglGetCompositorTimingSupportedANDROIDImpl(EGLDisplay dpy, EGLSurface
         return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
     }
 
+    if (!dp->haveExtension("EGL_ANDROID_get_frame_timestamps")) {
+        return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
+    }
+
     SurfaceRef _s(dp, surface);
     if (!_s.get()) {
         return setError(EGL_BAD_SURFACE, (EGLBoolean)EGL_FALSE);
@@ -2292,6 +2315,10 @@ EGLBoolean eglGetFrameTimestampsANDROIDImpl(EGLDisplay dpy, EGLSurface surface,
                                             const EGLint* timestamps, EGLnsecsANDROID* values) {
     const egl_display_t* dp = validate_display(dpy);
     if (!dp) {
+        return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
+    }
+
+    if (!dp->haveExtension("EGL_ANDROID_get_frame_timestamps")) {
         return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
     }
 
@@ -2377,6 +2404,10 @@ EGLBoolean eglGetFrameTimestampSupportedANDROIDImpl(EGLDisplay dpy, EGLSurface s
                                                     EGLint timestamp) {
     const egl_display_t* dp = validate_display(dpy);
     if (!dp) {
+        return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
+    }
+
+    if (!dp->haveExtension("EGL_ANDROID_get_frame_timestamps")) {
         return setError(EGL_BAD_DISPLAY, (EGLBoolean)EGL_FALSE);
     }
 

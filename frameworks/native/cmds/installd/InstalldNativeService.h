@@ -19,6 +19,7 @@
 #define COMMANDS_H_
 
 #include <inttypes.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <shared_mutex>
@@ -35,8 +36,26 @@
 namespace android {
 namespace installd {
 
+using IFsveritySetupAuthToken = android::os::IInstalld::IFsveritySetupAuthToken;
+
 class InstalldNativeService : public BinderService<InstalldNativeService>, public os::BnInstalld {
 public:
+    class FsveritySetupAuthToken : public os::IInstalld::BnFsveritySetupAuthToken {
+    public:
+        FsveritySetupAuthToken() : mStatFromAuthFd() {}
+
+        binder::Status authenticate(const android::os::ParcelFileDescriptor& authFd, int32_t appUid,
+                                    int32_t userId);
+        bool isSameStat(const struct stat& st) const;
+
+    private:
+        // Not copyable or movable
+        FsveritySetupAuthToken(const FsveritySetupAuthToken&) = delete;
+        FsveritySetupAuthToken& operator=(const FsveritySetupAuthToken&) = delete;
+
+        struct stat mStatFromAuthFd;
+    };
+
     static status_t start();
     static char const* getServiceName() { return "installd"; }
     virtual status_t dump(int fd, const Vector<String16> &args) override;
@@ -49,7 +68,8 @@ public:
     binder::Status createAppData(const std::optional<std::string>& uuid,
                                  const std::string& packageName, int32_t userId, int32_t flags,
                                  int32_t appId, int32_t previousAppId, const std::string& seInfo,
-                                 int32_t targetSdkVersion, int64_t* _aidl_return);
+                                 int32_t targetSdkVersion, int64_t* ceDataInode,
+                                 int64_t* deDataInode);
 
     binder::Status createAppData(
             const android::os::CreateAppDataArgs& args,
@@ -114,16 +134,15 @@ public:
             int32_t appId, const std::string& seInfo,
             int32_t targetSdkVersion, const std::string& fromCodePath);
 
-    binder::Status dexopt(const std::string& apkPath, int32_t uid,
-            const std::optional<std::string>& packageName, const std::string& instructionSet,
-            int32_t dexoptNeeded, const std::optional<std::string>& outputPath, int32_t dexFlags,
-            const std::string& compilerFilter, const std::optional<std::string>& uuid,
-            const std::optional<std::string>& classLoaderContext,
-            const std::optional<std::string>& seInfo, bool downgrade,
-            int32_t targetSdkVersion, const std::optional<std::string>& profileName,
-            const std::optional<std::string>& dexMetadataPath,
-            const std::optional<std::string>& compilationReason,
-            bool* aidl_return);
+    binder::Status dexopt(const std::string& apkPath, int32_t uid, const std::string& packageName,
+                          const std::string& instructionSet, int32_t dexoptNeeded,
+                          const std::optional<std::string>& outputPath, int32_t dexFlags,
+                          const std::string& compilerFilter, const std::optional<std::string>& uuid,
+                          const std::optional<std::string>& classLoaderContext,
+                          const std::optional<std::string>& seInfo, bool downgrade,
+                          int32_t targetSdkVersion, const std::optional<std::string>& profileName,
+                          const std::optional<std::string>& dexMetadataPath,
+                          const std::optional<std::string>& compilationReason, bool* aidl_return);
 
     binder::Status controlDexOptBlocking(bool block);
 
@@ -135,30 +154,35 @@ public:
     binder::Status mergeProfiles(int32_t uid, const std::string& packageName,
             const std::string& profileName, int* _aidl_return);
     binder::Status dumpProfiles(int32_t uid, const std::string& packageName,
-            const std::string& profileName, const std::string& codePath, bool* _aidl_return);
+                                const std::string& profileName, const std::string& codePath,
+                                bool dumpClassesAndMethods, bool* _aidl_return);
     binder::Status copySystemProfile(const std::string& systemProfile,
             int32_t uid, const std::string& packageName, const std::string& profileName,
             bool* _aidl_return);
     binder::Status clearAppProfiles(const std::string& packageName, const std::string& profileName);
     binder::Status destroyAppProfiles(const std::string& packageName);
+    binder::Status deleteReferenceProfile(const std::string& packageName,
+                                          const std::string& profileName);
 
     binder::Status createProfileSnapshot(int32_t appId, const std::string& packageName,
             const std::string& profileName, const std::string& classpath, bool* _aidl_return);
     binder::Status destroyProfileSnapshot(const std::string& packageName,
             const std::string& profileName);
 
-    binder::Status rmPackageDir(const std::string& packageDir);
+    binder::Status rmPackageDir(const std::string& packageName, const std::string& packageDir);
     binder::Status freeCache(const std::optional<std::string>& uuid, int64_t targetFreeBytes,
-            int64_t cacheReservedBytes, int32_t flags);
+            int32_t flags);
     binder::Status linkNativeLibraryDirectory(const std::optional<std::string>& uuid,
             const std::string& packageName, const std::string& nativeLibPath32, int32_t userId);
-    binder::Status createOatDir(const std::string& oatDir, const std::string& instructionSet);
-    binder::Status linkFile(const std::string& relativePath, const std::string& fromBase,
-            const std::string& toBase);
-    binder::Status moveAb(const std::string& apkPath, const std::string& instructionSet,
-            const std::string& outputPath);
-    binder::Status deleteOdex(const std::string& apkPath, const std::string& instructionSet,
-            const std::optional<std::string>& outputPath, int64_t* _aidl_return);
+    binder::Status createOatDir(const std::string& packageName, const std::string& oatDir,
+                                const std::string& instructionSet);
+    binder::Status linkFile(const std::string& packageName, const std::string& relativePath,
+                            const std::string& fromBase, const std::string& toBase);
+    binder::Status moveAb(const std::string& packageName, const std::string& apkPath,
+                          const std::string& instructionSet, const std::string& outputPath);
+    binder::Status deleteOdex(const std::string& packageName, const std::string& apkPath,
+                              const std::string& instructionSet,
+                              const std::optional<std::string>& outputPath, int64_t* _aidl_return);
     binder::Status reconcileSecondaryDexFile(const std::string& dexPath,
         const std::string& packageName, int32_t uid, const std::vector<std::string>& isa,
         const std::optional<std::string>& volumeUuid, int32_t storage_flag, bool* _aidl_return);
@@ -183,6 +207,18 @@ public:
     binder::Status cleanupInvalidPackageDirs(const std::optional<std::string>& uuid, int32_t userId,
                                              int32_t flags);
 
+    binder::Status getOdexVisibility(const std::string& packageName, const std::string& apkPath,
+                                     const std::string& instructionSet,
+                                     const std::optional<std::string>& outputPath,
+                                     int32_t* _aidl_return);
+
+    binder::Status createFsveritySetupAuthToken(const android::os::ParcelFileDescriptor& authFd,
+                                                int32_t appUid, int32_t userId,
+                                                android::sp<IFsveritySetupAuthToken>* _aidl_return);
+    binder::Status enableFsverity(const android::sp<IFsveritySetupAuthToken>& authToken,
+                                  const std::string& filePath, const std::string& packageName,
+                                  int32_t* _aidl_return);
+
 private:
     std::recursive_mutex mLock;
     std::unordered_map<userid_t, std::weak_ptr<std::shared_mutex>> mUserIdLock;
@@ -203,7 +239,7 @@ private:
                                        const std::string& packageName, int32_t userId,
                                        int32_t flags, int32_t appId, int32_t previousAppId,
                                        const std::string& seInfo, int32_t targetSdkVersion,
-                                       int64_t* _aidl_return);
+                                       int64_t* ceDataInode, int64_t* deDataInode);
     binder::Status restoreconAppDataLocked(const std::optional<std::string>& uuid,
                                            const std::string& packageName, int32_t userId,
                                            int32_t flags, int32_t appId, const std::string& seInfo);

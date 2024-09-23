@@ -59,6 +59,10 @@ using namespace android::incfs;
 using namespace android::sysprop;
 namespace ab = android::base;
 
+namespace android::incfs {
+extern const size_t kPageSize = getpagesize();
+}
+
 struct IncFsControl final {
     IncFsFd cmd;
     IncFsFd pendingReads;
@@ -1611,7 +1615,8 @@ IncFsErrorCode IncFs_IsFullyLoadedByPath(const IncFsControl* control, const char
         }
         return isFullyLoadedV2(root, id);
     }
-    return isFullyLoadedSlow(openForSpecialOps(control->cmd, makeCommandPath(root, path).c_str()));
+    auto fd = ab::unique_fd(openForSpecialOps(control->cmd, makeCommandPath(root, path).c_str()));
+    return isFullyLoadedSlow(fd.get());
 }
 IncFsErrorCode IncFs_IsFullyLoadedById(const IncFsControl* control, IncFsFileId fileId) {
     if (!control) {
@@ -1624,9 +1629,10 @@ IncFsErrorCode IncFs_IsFullyLoadedById(const IncFsControl* control, IncFsFileId 
     if (features() & Features::v2) {
         return isFullyLoadedV2(root, fileId);
     }
-    return isFullyLoadedSlow(
+    auto fd = ab::unique_fd(
             openForSpecialOps(control->cmd,
                               makeCommandPath(root, indexPath(root, fileId)).c_str()));
+    return isFullyLoadedSlow(fd.get());
 }
 
 static IncFsErrorCode isEverythingLoadedV2(const IncFsControl* control) {

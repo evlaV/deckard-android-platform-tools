@@ -74,7 +74,7 @@ Sensor::Sensor(struct sensor_t const& hwSensor, const uuid_t& uuid, int halVersi
         if (hwSensor.maxDelay > INT_MAX) {
             // Max delay is declared as a 64 bit integer for 64 bit architectures. But it should
             // always fit in a 32 bit integer, log error and cap it to INT_MAX.
-            ALOGE("Sensor maxDelay overflow error %s %" PRId64, mName.string(),
+            ALOGE("Sensor maxDelay overflow error %s %" PRId64, mName.c_str(),
                   static_cast<int64_t>(hwSensor.maxDelay));
             mMaxDelay = INT_MAX;
         } else {
@@ -276,6 +276,30 @@ Sensor::Sensor(struct sensor_t const& hwSensor, const uuid_t& uuid, int halVersi
         mStringType = SENSOR_STRING_TYPE_HINGE_ANGLE;
         mFlags |= SENSOR_FLAG_ON_CHANGE_MODE;
         break;
+    case SENSOR_TYPE_HEAD_TRACKER:
+        mStringType = SENSOR_STRING_TYPE_HEAD_TRACKER;
+        mFlags |= SENSOR_FLAG_CONTINUOUS_MODE;
+        break;
+    case SENSOR_TYPE_ACCELEROMETER_LIMITED_AXES:
+        mStringType = SENSOR_STRING_TYPE_ACCELEROMETER_LIMITED_AXES;
+        mFlags |= SENSOR_FLAG_CONTINUOUS_MODE;
+        break;
+    case SENSOR_TYPE_GYROSCOPE_LIMITED_AXES:
+        mStringType = SENSOR_STRING_TYPE_GYROSCOPE_LIMITED_AXES;
+        mFlags |= SENSOR_FLAG_CONTINUOUS_MODE;
+        break;
+    case SENSOR_TYPE_ACCELEROMETER_LIMITED_AXES_UNCALIBRATED:
+        mStringType = SENSOR_STRING_TYPE_ACCELEROMETER_LIMITED_AXES_UNCALIBRATED;
+        mFlags |= SENSOR_FLAG_CONTINUOUS_MODE;
+        break;
+    case SENSOR_TYPE_GYROSCOPE_LIMITED_AXES_UNCALIBRATED:
+        mStringType = SENSOR_STRING_TYPE_GYROSCOPE_LIMITED_AXES_UNCALIBRATED;
+        mFlags |= SENSOR_FLAG_CONTINUOUS_MODE;
+        break;
+    case SENSOR_TYPE_HEADING:
+        mStringType = SENSOR_STRING_TYPE_HEADING;
+        mFlags |= SENSOR_FLAG_CONTINUOUS_MODE;
+        break;
     default:
         // Only pipe the stringType, requiredPermission and flags for custom sensors.
         if (halVersion > SENSORS_DEVICE_API_VERSION_1_0 && hwSensor.stringType) {
@@ -315,7 +339,7 @@ Sensor::Sensor(struct sensor_t const& hwSensor, const uuid_t& uuid, int halVersi
         if (actualReportingMode != expectedReportingMode) {
             ALOGE("Reporting Mode incorrect: sensor %s handle=%#010" PRIx32 " type=%" PRId32 " "
                    "actual=%d expected=%d",
-                   mName.string(), mHandle, mType, actualReportingMode, expectedReportingMode);
+                   mName.c_str(), mHandle, mType, actualReportingMode, expectedReportingMode);
         }
     }
 
@@ -468,7 +492,15 @@ const Sensor::uuid_t& Sensor::getUuid() const {
 }
 
 void Sensor::setId(int32_t id) {
-    mUuid.i64[0] = id;
+    mId = id;
+}
+
+int32_t Sensor::getId() const {
+    return mId;
+}
+
+void Sensor::anonymizeUuid() {
+    mUuid.i64[0] = mId;
     mUuid.i64[1] = 0;
 }
 
@@ -485,17 +517,14 @@ void Sensor::capHighestDirectReportRateLevel(int32_t cappedRateLevel) {
     }
 }
 
-int32_t Sensor::getId() const {
-    return int32_t(mUuid.i64[0]);
-}
-
 size_t Sensor::getFlattenedSize() const {
     size_t fixedSize =
             sizeof(mVersion) + sizeof(mHandle) + sizeof(mType) +
             sizeof(mMinValue) + sizeof(mMaxValue) + sizeof(mResolution) +
             sizeof(mPower) + sizeof(mMinDelay) + sizeof(mFifoMaxEventCount) +
             sizeof(mFifoMaxEventCount) + sizeof(mRequiredPermissionRuntime) +
-            sizeof(mRequiredAppOp) + sizeof(mMaxDelay) + sizeof(mFlags) + sizeof(mUuid);
+            sizeof(mRequiredAppOp) + sizeof(mMaxDelay) + sizeof(mFlags) +
+            sizeof(mUuid) + sizeof(mId);
 
     size_t variableSize =
             sizeof(uint32_t) + FlattenableUtils::align<4>(mName.length()) +
@@ -529,18 +558,8 @@ status_t Sensor::flatten(void* buffer, size_t size) const {
     FlattenableUtils::write(buffer, size, mRequiredAppOp);
     FlattenableUtils::write(buffer, size, mMaxDelay);
     FlattenableUtils::write(buffer, size, mFlags);
-    if (mUuid.i64[1] != 0) {
-        // We should never hit this case with our current API, but we
-        // could via a careless API change.  If that happens,
-        // this code will keep us from leaking our UUID (while probably
-        // breaking dynamic sensors).  See b/29547335.
-        ALOGW("Sensor with UUID being flattened; sending 0.  Expect "
-              "bad dynamic sensor behavior");
-        uuid_t tmpUuid;  // default constructor makes this 0.
-        FlattenableUtils::write(buffer, size, tmpUuid);
-    } else {
-        FlattenableUtils::write(buffer, size, mUuid);
-    }
+    FlattenableUtils::write(buffer, size, mUuid);
+    FlattenableUtils::write(buffer, size, mId);
     return NO_ERROR;
 }
 
@@ -580,7 +599,7 @@ status_t Sensor::unflatten(void const* buffer, size_t size) {
 
     size_t fixedSize2 =
             sizeof(mRequiredPermissionRuntime) + sizeof(mRequiredAppOp) + sizeof(mMaxDelay) +
-            sizeof(mFlags) + sizeof(mUuid);
+            sizeof(mFlags) + sizeof(mUuid) + sizeof(mId);
     if (size < fixedSize2) {
         return NO_MEMORY;
     }
@@ -590,6 +609,7 @@ status_t Sensor::unflatten(void const* buffer, size_t size) {
     FlattenableUtils::read(buffer, size, mMaxDelay);
     FlattenableUtils::read(buffer, size, mFlags);
     FlattenableUtils::read(buffer, size, mUuid);
+    FlattenableUtils::read(buffer, size, mId);
     return NO_ERROR;
 }
 
@@ -597,7 +617,7 @@ void Sensor::flattenString8(void*& buffer, size_t& size,
         const String8& string8) {
     uint32_t len = static_cast<uint32_t>(string8.length());
     FlattenableUtils::write(buffer, size, len);
-    memcpy(static_cast<char*>(buffer), string8.string(), len);
+    memcpy(static_cast<char*>(buffer), string8.c_str(), len);
     FlattenableUtils::advance(buffer, size, len);
     size -= FlattenableUtils::align<4>(buffer);
 }
@@ -611,8 +631,14 @@ bool Sensor::unflattenString8(void const*& buffer, size_t& size, String8& output
     if (size < len) {
         return false;
     }
-    outputString8.setTo(static_cast<char const*>(buffer), len);
+    outputString8 = String8(static_cast<char const*>(buffer), len);
+
+    if (size < FlattenableUtils::align<4>(len)) {
+        ALOGE("Malformed Sensor String8 field. Should be in a 4-byte aligned buffer but is not.");
+        return false;
+    }
     FlattenableUtils::advance(buffer, size, FlattenableUtils::align<4>(len));
+
     return true;
 }
 

@@ -36,6 +36,7 @@ cc_defaults {
         "-std=c11",
     ],
     shared_libs: ["liblog"],
+    export_shared_lib_headers: ["liblog"],
 }
 
 cc_library_headers {
@@ -43,6 +44,7 @@ cc_library_headers {
     host_supported: true,
     export_include_dirs: ["include_jni"],
     native_bridge_supported: true,
+    product_available: true,
     vendor_available: true,
     target: {
         windows: {
@@ -205,6 +207,7 @@ cc_library {
         "//packages/modules/Connectivity:__subpackages__",
         "//packages/modules/ExtServices:__subpackages__",
         "//packages/modules/NetworkStack:__subpackages__",
+        "//packages/modules/Permission/tests/cts:__subpackages__",
         ":__subpackages__",
     ],
 }

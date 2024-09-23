@@ -24,7 +24,6 @@ cc_library_srcs = \
   properties.cpp \
   record_stream.cpp \
   strlcpy.c \
-  threads.cpp \
 
 cc_library_target_not_windows_srcs = \
   ashmem-host.cpp \
@@ -43,7 +42,6 @@ OBJECTS_C := $(SOURCES_C:.c=.o)
 SOURCES_CXX := $(foreach source, $(filter %.cpp, $(SOURCES)), system/core/libcutils/$(source))
 OBJECTS_CXX := $(SOURCES_CXX:.cpp=.o)
 
-CXXFLAGS += -std=gnu++2a
 CPPFLAGS += \
   -Isystem/core/include \
   -Isystem/core/libcutils/include \

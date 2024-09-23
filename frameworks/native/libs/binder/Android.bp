@@ -71,14 +71,8 @@ filegroup {
 }
 
 cc_defaults {
-    name: "libbinder_defaults",
+    name: "libbinder_common_defaults",
     host_supported: true,
-
-    // TODO(b/31559095): get headers from bionic on host
-    include_dirs: [
-        "bionic/libc/kernel/android/uapi/",
-        "bionic/libc/kernel/uapi/",
-    ],
 
     srcs: [
         "Binder.cpp",
@@ -87,17 +81,45 @@ cc_defaults {
         "FdTrigger.cpp",
         "IInterface.cpp",
         "IResultReceiver.cpp",
-        "OS.cpp",
         "Parcel.cpp",
         "ParcelFileDescriptor.cpp",
+        "RecordedTransaction.cpp",
         "RpcSession.cpp",
         "RpcServer.cpp",
         "RpcState.cpp",
-        "RpcTransportRaw.cpp",
         "Stability.cpp",
         "Status.cpp",
         "TextOutput.cpp",
+        "Trace.cpp",
         "Utils.cpp",
+    ],
+
+    shared_libs: [
+        "libcutils",
+        "libutils",
+    ],
+
+    static_libs: [
+        "libbase",
+    ],
+
+    header_libs: [
+        "libbinder_headers",
+    ],
+}
+
+cc_defaults {
+    name: "libbinder_android_defaults",
+
+    // TODO(b/31559095): get headers from bionic on host
+    include_dirs: [
+        "bionic/libc/kernel/android/uapi/",
+        "bionic/libc/kernel/uapi/",
+    ],
+
+    srcs: [
+        "OS.cpp",
+        "RpcTransportRaw.cpp",
     ],
 
     target: {
@@ -122,28 +144,20 @@ cc_defaults {
         "-DANDROID_UTILS_REF_BASE_DISABLE_IMPLICIT_CONSTRUCTION",
     ],
     product_variables: {
-        binder32bit: {
-            cflags: ["-DBINDER_IPC_32BIT=1"],
-        },
-
         debuggable: {
-            cflags: ["-DBINDER_RPC_DEV_SERVERS"],
+            cflags: [
+                "-DBINDER_RPC_DEV_SERVERS",
+                "-DBINDER_ENABLE_RECORDING",
+            ],
         },
     },
 
     shared_libs: [
         "liblog",
-        "libcutils",
-        "libutils",
-    ],
-
-    static_libs: [
-        "libbase",
     ],
 
     header_libs: [
-        "libbinder_headers",
-        "libandroid_runtime_vm_headers",
+        "jni_headers",
     ],
 
     export_header_lib_headers: [
@@ -173,7 +187,74 @@ cc_defaults {
         "google-*",
         "misc-*",
         "performance*",
+        "-performance-move-const-arg", // b/273486801
         "portability*",
+    ],
+    lto: {
+        thin: true,
+    },
+}
+
+cc_library_headers {
+    name: "trusty_mock_headers",
+    host_supported: true,
+
+    export_include_dirs: [
+        "trusty/include",
+        "trusty/include_mock",
+    ],
+
+    visibility: [
+        ":__subpackages__",
+    ],
+}
+
+cc_defaults {
+    name: "trusty_mock_defaults",
+    host_supported: true,
+
+    header_libs: [
+        "trusty_mock_headers",
+    ],
+
+    cflags: [
+        "-DBINDER_RPC_SINGLE_THREADED",
+        // Trusty libbinder uses vendor stability for its binders
+        "-D__ANDROID_VNDK__",
+        "-U__ANDROID__",
+        "-D__TRUSTY__",
+        "-DTRUSTY_USERSPACE",
+        // Flags from the Trusty build system
+        "-Werror",
+        "-Wsign-compare",
+        "-Wno-unused-function",
+        "-Wno-unused-label",
+        "-fno-common",
+        "-fno-omit-frame-pointer",
+        "-fno-threadsafe-statics",
+    ],
+    rtti: false,
+
+    visibility: [
+        ":__subpackages__",
+    ],
+}
+
+cc_library_shared {
+    name: "libbinder_on_trusty_mock",
+    defaults: [
+        "libbinder_common_defaults",
+        "trusty_mock_defaults",
+    ],
+
+    srcs: [
+        // Trusty-specific files
+        "trusty/logging.cpp",
+        "trusty/OS.cpp",
+        "trusty/RpcServerTrusty.cpp",
+        "trusty/RpcTransportTipcTrusty.cpp",
+        "trusty/TrustyStatus.cpp",
+        "trusty/socket.cpp",
     ],
 }
 
@@ -208,7 +289,8 @@ cc_defaults {
 cc_library {
     name: "libbinder",
     defaults: [
-        "libbinder_defaults",
+        "libbinder_common_defaults",
+        "libbinder_android_defaults",
         "libbinder_kernel_defaults",
     ],
 
@@ -254,17 +336,25 @@ cc_library {
         },
         recovery: {
             exclude_header_libs: [
-                "libandroid_runtime_vm_headers",
+                "jni_headers",
             ],
         },
     },
 
     afdo: true,
+
+    header_abi_checker: {
+        diff_flags: ["-allow-adding-removing-weak-symbols"],
+    },
 }
 
 cc_library_static {
     name: "libbinder_rpc_no_kernel",
-    defaults: ["libbinder_defaults"],
+    vendor_available: true,
+    defaults: [
+        "libbinder_common_defaults",
+        "libbinder_android_defaults",
+    ],
     visibility: [
         ":__subpackages__",
     ],
@@ -273,7 +363,8 @@ cc_library_static {
 cc_library_static {
     name: "libbinder_rpc_single_threaded",
     defaults: [
-        "libbinder_defaults",
+        "libbinder_common_defaults",
+        "libbinder_android_defaults",
         "libbinder_kernel_defaults",
     ],
     cflags: [
@@ -286,7 +377,10 @@ cc_library_static {
 
 cc_library_static {
     name: "libbinder_rpc_single_threaded_no_kernel",
-    defaults: ["libbinder_defaults"],
+    defaults: [
+        "libbinder_common_defaults",
+        "libbinder_android_defaults",
+    ],
     cflags: [
         "-DBINDER_RPC_SINGLE_THREADED",
     ],
@@ -309,6 +403,7 @@ cc_defaults {
 cc_defaults {
     name: "libbinder_tls_defaults",
     defaults: ["libbinder_tls_shared_deps"],
+    vendor_available: true,
     host_supported: true,
 
     header_libs: [
@@ -333,6 +428,34 @@ cc_defaults {
 cc_library_shared {
     name: "libbinder_tls",
     defaults: ["libbinder_tls_defaults"],
+}
+
+cc_library {
+    name: "libbinder_trusty",
+    vendor: true,
+    srcs: [
+        "RpcTransportTipcAndroid.cpp",
+        "RpcTrusty.cpp",
+    ],
+
+    shared_libs: [
+        "libbinder",
+        "liblog",
+        "libtrusty",
+        "libutils",
+    ],
+    static_libs: [
+        "libbase",
+    ],
+    export_include_dirs: ["include_trusty"],
+
+    // Most of Android doesn't need this library and shouldn't use it,
+    // so we restrict its visibility to the Trusty-specific packages.
+    visibility: [
+        ":__subpackages__",
+        "//system/core/trusty:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
 }
 
 // For testing
@@ -391,6 +514,10 @@ aidl_interface {
             enabled: false,
         },
     },
+    visibility: [
+        ":__subpackages__",
+        "//system/tools/aidl:__subpackages__",
+    ],
 }
 
 // TODO(b/184872979): remove once the Rust API is created.
@@ -414,7 +541,12 @@ cc_library {
     // This library is intentionally limited to these targets, and it will be removed later.
     // Do not expand the visibility.
     visibility: [
-        "//packages/modules/Virtualization:__subpackages__",
+        ":__subpackages__",
+        "//packages/modules/Virtualization/javalib/jni",
+        "//packages/modules/Virtualization/vm_payload",
+        "//packages/modules/Virtualization/demo_native",
+        "//device/google/cuttlefish/shared/minidroid:__subpackages__",
+        "//system/software_defined_vehicle:__subpackages__",
     ],
 }
 

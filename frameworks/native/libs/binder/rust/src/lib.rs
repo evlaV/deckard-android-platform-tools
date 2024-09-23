@@ -94,21 +94,19 @@
 //! ```
 
 #[macro_use]
-mod proxy;
-
-#[macro_use]
 mod binder;
 mod binder_async;
 mod error;
 mod native;
 mod parcel;
+mod proxy;
 mod state;
 
 use binder_ndk_sys as sys;
 
 pub use crate::binder_async::{BinderAsyncPool, BoxFuture};
 pub use binder::{BinderFeatures, FromIBinder, IBinder, Interface, Strong, Weak};
-pub use error::{ExceptionCode, Status, StatusCode};
+pub use error::{ExceptionCode, IntoBinderResult, Status, StatusCode};
 pub use native::{
     add_service, force_lazy_services_persist, is_handling_transaction, register_lazy_service,
     LazyServiceGuard,
@@ -148,4 +146,5 @@ pub mod unstable_api {
     pub use crate::binder::AsNative;
     pub use crate::proxy::unstable_api::new_spibinder;
     pub use crate::sys::AIBinder;
+    pub use crate::sys::AParcel;
 }

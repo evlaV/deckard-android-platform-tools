@@ -48,6 +48,7 @@
 #include <utils/String8.h>
 #include <utils/misc.h>
 
+#include "OS.h"
 #include "RpcState.h"
 #include "Static.h"
 #include "Utils.h"
@@ -374,6 +375,10 @@ size_t Parcel::dataSize() const
     return (mDataSize > mDataPos ? mDataSize : mDataPos);
 }
 
+size_t Parcel::dataBufferSize() const {
+    return mDataSize;
+}
+
 size_t Parcel::dataAvail() const
 {
     size_t result = dataSize() - dataPosition();
@@ -613,11 +618,14 @@ status_t Parcel::appendFrom(const Parcel* parcel, size_t offset, size_t len) {
                 if (status_t status = readInt32(&fdIndex); status != OK) {
                     return status;
                 }
-                const auto& oldFd = otherRpcFields->mFds->at(fdIndex);
+                int oldFd = toRawFd(otherRpcFields->mFds->at(fdIndex));
                 // To match kernel binder behavior, we always dup, even if the
                 // FD was unowned in the source parcel.
-                rpcFields->mFds->emplace_back(
-                        base::unique_fd(fcntl(toRawFd(oldFd), F_DUPFD_CLOEXEC, 0)));
+                int newFd = -1;
+                if (status_t status = dupFileDescriptor(oldFd, &newFd); status != OK) {
+                    ALOGW("Failed to duplicate file descriptor %d: %s", oldFd, strerror(-status));
+                }
+                rpcFields->mFds->emplace_back(base::unique_fd(newFd));
                 // Fixup the index in the data.
                 mDataPos = newDataPos + 4;
                 if (status_t status = writeInt32(rpcFields->mFds->size() - 1); status != OK) {
@@ -846,7 +854,7 @@ constexpr int32_t kHeader = B_PACK_CHARS('S', 'Y', 'S', 'T');
 // Write RPC headers.  (previously just the interface token)
 status_t Parcel::writeInterfaceToken(const String16& interface)
 {
-    return writeInterfaceToken(interface.string(), interface.size());
+    return writeInterfaceToken(interface.c_str(), interface.size());
 }
 
 status_t Parcel::writeInterfaceToken(const char16_t* str, size_t len) {
@@ -910,7 +918,7 @@ bool Parcel::checkInterface(IBinder* binder) const
 bool Parcel::enforceInterface(const String16& interface,
                               IPCThreadState* threadState) const
 {
-    return enforceInterface(interface.string(), interface.size(), threadState);
+    return enforceInterface(interface.c_str(), interface.size(), threadState);
 }
 
 bool Parcel::enforceInterface(const char16_t* interface,
@@ -939,7 +947,10 @@ bool Parcel::enforceInterface(const char16_t* interface,
         threadState->setCallingWorkSourceUidWithoutPropagation(workSource);
         // vendor header
         int32_t header = readInt32();
-        if (header != kHeader) {
+
+        // fuzzers skip this check, because it is for protecting the underlying ABI, but
+        // we don't want it to reduce our coverage
+        if (header != kHeader && !mServiceFuzzing) {
             ALOGE("Expecting header 0x%x but found 0x%x. Mixing copies of libbinder?", kHeader,
                   header);
             return false;
@@ -958,14 +969,38 @@ bool Parcel::enforceInterface(const char16_t* interface,
             (!len || !memcmp(parcel_interface, interface, len * sizeof (char16_t)))) {
         return true;
     } else {
-        ALOGW("**** enforceInterface() expected '%s' but read '%s'",
-              String8(interface, len).string(),
-              String8(parcel_interface, parcel_interface_len).string());
-        return false;
+        if (mServiceFuzzing) {
+            // ignore. Theoretically, this could cause a few false positives, because
+            // people could assume things about getInterfaceDescriptor if they pass
+            // this point, but it would be extremely fragile. It's more important that
+            // we fuzz with the above things read from the Parcel.
+            return true;
+        } else {
+            ALOGW("**** enforceInterface() expected '%s' but read '%s'",
+                  String8(interface, len).c_str(),
+                  String8(parcel_interface, parcel_interface_len).c_str());
+            return false;
+        }
     }
 }
 
+void Parcel::setEnforceNoDataAvail(bool enforceNoDataAvail) {
+    mEnforceNoDataAvail = enforceNoDataAvail;
+}
+
+void Parcel::setServiceFuzzing() {
+    mServiceFuzzing = true;
+}
+
+bool Parcel::isServiceFuzzing() const {
+    return mServiceFuzzing;
+}
+
 binder::Status Parcel::enforceNoDataAvail() const {
+    if (!mEnforceNoDataAvail) {
+        return binder::Status::ok();
+    }
+
     const auto n = dataAvail();
     if (n == 0) {
         return binder::Status::ok();
@@ -1341,7 +1376,7 @@ status_t Parcel::writeCString(const char* str)
 
 status_t Parcel::writeString8(const String8& str)
 {
-    return writeString8(str.string(), str.size());
+    return writeString8(str.c_str(), str.size());
 }
 
 status_t Parcel::writeString8(const char* str, size_t len)
@@ -1364,7 +1399,7 @@ status_t Parcel::writeString8(const char* str, size_t len)
 
 status_t Parcel::writeString16(const String16& str)
 {
-    return writeString16(str.string(), str.size());
+    return writeString16(str.c_str(), str.size());
 }
 
 status_t Parcel::writeString16(const char16_t* str, size_t len)
@@ -1438,7 +1473,8 @@ status_t Parcel::writeFileDescriptor(int fd, bool takeOwnership) {
             case RpcSession::FileDescriptorTransportMode::NONE: {
                 return FDS_NOT_ALLOWED;
             }
-            case RpcSession::FileDescriptorTransportMode::UNIX: {
+            case RpcSession::FileDescriptorTransportMode::UNIX:
+            case RpcSession::FileDescriptorTransportMode::TRUSTY: {
                 if (rpcFields->mFds == nullptr) {
                     rpcFields->mFds = std::make_unique<decltype(rpcFields->mFds)::element_type>();
                 }
@@ -1462,7 +1498,7 @@ status_t Parcel::writeFileDescriptor(int fd, bool takeOwnership) {
 #ifdef BINDER_WITH_KERNEL_IPC
     flat_binder_object obj;
     obj.hdr.type = BINDER_TYPE_FD;
-    obj.flags = 0x7f | FLAT_BINDER_FLAG_ACCEPTS_FDS;
+    obj.flags = 0;
     obj.binder = 0; /* Don't pass uninitialized stack data to a remote process */
     obj.handle = fd;
     obj.cookie = takeOwnership ? 1 : 0;
@@ -1477,9 +1513,9 @@ status_t Parcel::writeFileDescriptor(int fd, bool takeOwnership) {
 
 status_t Parcel::writeDupFileDescriptor(int fd)
 {
-    int dupFd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
-    if (dupFd < 0) {
-        return -errno;
+    int dupFd;
+    if (status_t err = dupFileDescriptor(fd, &dupFd); err != OK) {
+        return err;
     }
     status_t err = writeFileDescriptor(dupFd, true /*takeOwnership*/);
     if (err != OK) {
@@ -1496,9 +1532,9 @@ status_t Parcel::writeParcelFileDescriptor(int fd, bool takeOwnership)
 
 status_t Parcel::writeDupParcelFileDescriptor(int fd)
 {
-    int dupFd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
-    if (dupFd < 0) {
-        return -errno;
+    int dupFd;
+    if (status_t err = dupFileDescriptor(fd, &dupFd); err != OK) {
+        return err;
     }
     status_t err = writeParcelFileDescriptor(dupFd, true /*takeOwnership*/);
     if (err != OK) {
@@ -1705,7 +1741,9 @@ status_t Parcel::validateReadData(size_t upperBound) const
             do {
                 if (mDataPos < kernelFields->mObjects[nextObject] + sizeof(flat_binder_object)) {
                     // Requested info overlaps with an object
-                    ALOGE("Attempt to read from protected data in Parcel %p", this);
+                    if (!mServiceFuzzing) {
+                        ALOGE("Attempt to read from protected data in Parcel %p", this);
+                    }
                     return PERMISSION_DENIED;
                 }
                 nextObject++;
@@ -2075,7 +2113,11 @@ String8 Parcel::readString8() const
     size_t len;
     const char* str = readString8Inplace(&len);
     if (str) return String8(str, len);
-    ALOGE("Reading a NULL string not supported here.");
+
+    if (!mServiceFuzzing) {
+        ALOGE("Reading a NULL string not supported here.");
+    }
+
     return String8();
 }
 
@@ -2115,7 +2157,11 @@ String16 Parcel::readString16() const
     size_t len;
     const char16_t* str = readString16Inplace(&len);
     if (str) return String16(str, len);
-    ALOGE("Reading a NULL string not supported here.");
+
+    if (!mServiceFuzzing) {
+        ALOGE("Reading a NULL string not supported here.");
+    }
+
     return String16();
 }
 
@@ -2155,7 +2201,9 @@ status_t Parcel::readStrongBinder(sp<IBinder>* val) const
 {
     status_t status = readNullableStrongBinder(val);
     if (status == OK && !val->get()) {
-        ALOGW("Expecting binder but got null!");
+        if (!mServiceFuzzing) {
+            ALOGW("Expecting binder but got null!");
+        }
         status = UNEXPECTED_NULL;
     }
     return status;
@@ -2220,9 +2268,11 @@ int Parcel::readFileDescriptor() const {
     if (const auto* rpcFields = maybeRpcFields()) {
         if (!std::binary_search(rpcFields->mObjectPositions.begin(),
                                 rpcFields->mObjectPositions.end(), mDataPos)) {
-            ALOGW("Attempt to read file descriptor from Parcel %p at offset %zu that is not in the "
-                  "object list",
-                  this, mDataPos);
+            if (!mServiceFuzzing) {
+                ALOGW("Attempt to read file descriptor from Parcel %p at offset %zu that is not in "
+                      "the object list",
+                      this, mDataPos);
+            }
             return BAD_TYPE;
         }
 
@@ -2295,7 +2345,12 @@ status_t Parcel::readUniqueFileDescriptor(base::unique_fd* val) const
         return BAD_TYPE;
     }
 
-    val->reset(fcntl(got, F_DUPFD_CLOEXEC, 0));
+    int dupFd;
+    if (status_t err = dupFileDescriptor(got, &dupFd); err != OK) {
+        return BAD_VALUE;
+    }
+
+    val->reset(dupFd);
 
     if (val->get() < 0) {
         return BAD_VALUE;
@@ -2312,7 +2367,12 @@ status_t Parcel::readUniqueParcelFileDescriptor(base::unique_fd* val) const
         return BAD_TYPE;
     }
 
-    val->reset(fcntl(got, F_DUPFD_CLOEXEC, 0));
+    int dupFd;
+    if (status_t err = dupFileDescriptor(got, &dupFd); err != OK) {
+        return BAD_VALUE;
+    }
+
+    val->reset(dupFd);
 
     if (val->get() < 0) {
         return BAD_VALUE;
@@ -2470,8 +2530,11 @@ const flat_binder_object* Parcel::readObject(bool nullMetaData) const
                 return obj;
             }
         }
-        ALOGW("Attempt to read object from Parcel %p at offset %zu that is not in the object list",
-             this, DPOS);
+        if (!mServiceFuzzing) {
+            ALOGW("Attempt to read object from Parcel %p at offset %zu that is not in the object "
+                  "list",
+                  this, DPOS);
+        }
     }
     return nullptr;
 }
@@ -2628,8 +2691,7 @@ status_t Parcel::rpcSetDataReference(
     return OK;
 }
 
-void Parcel::print(TextOutput& to, uint32_t /*flags*/) const
-{
+void Parcel::print(std::ostream& to, uint32_t /*flags*/) const {
     to << "Parcel(";
 
     if (errorCheck() != NO_ERROR) {
@@ -2637,7 +2699,7 @@ void Parcel::print(TextOutput& to, uint32_t /*flags*/) const
         to << "Error: " << (void*)(intptr_t)err << " \"" << strerror(-err) << "\"";
     } else if (dataSize() > 0) {
         const uint8_t* DATA = data();
-        to << indent << HexDump(DATA, dataSize()) << dedent;
+        to << "\t" << HexDump(DATA, dataSize());
 #ifdef BINDER_WITH_KERNEL_IPC
         if (const auto* kernelFields = maybeKernelFields()) {
             const binder_size_t* OBJS = kernelFields->mObjects;
@@ -2645,8 +2707,7 @@ void Parcel::print(TextOutput& to, uint32_t /*flags*/) const
             for (size_t i = 0; i < N; i++) {
                 const flat_binder_object* flat =
                         reinterpret_cast<const flat_binder_object*>(DATA + OBJS[i]);
-                to << endl
-                   << "Object #" << i << " @ " << (void*)OBJS[i] << ": "
+                to << "Object #" << i << " @ " << (void*)OBJS[i] << ": "
                    << TypeCode(flat->hdr.type & 0x7f7f7f00) << " = " << flat->binder;
             }
         }
@@ -3067,6 +3128,8 @@ void Parcel::initState()
     mAllowFds = true;
     mDeallocZero = false;
     mOwner = nullptr;
+    mEnforceNoDataAvail = true;
+    mServiceFuzzing = false;
 }
 
 void Parcel::scanForFds() const {

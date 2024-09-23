@@ -27,6 +27,7 @@
 #include <android-base/properties.h>
 #include <android-base/strings.h>
 #include <cutils/android_reboot.h>
+#include <fs_mgr.h>
 #include <unwindstack/AndroidUnwinder.h>
 
 #include "capabilities.h"
@@ -48,13 +49,9 @@ void SetFatalRebootTarget(const std::optional<std::string>& reboot_target) {
 
     const std::string kInitFatalPanicParamString = "androidboot.init_fatal_panic";
     if (cmdline.find(kInitFatalPanicParamString) == std::string::npos) {
-        init_fatal_panic = false;
-        ImportBootconfig(
-                [kInitFatalPanicParamString](const std::string& key, const std::string& value) {
-                    if (key == kInitFatalPanicParamString && value == "true") {
-                        init_fatal_panic = true;
-                    }
-                });
+        std::string value;
+        init_fatal_panic = (android::fs_mgr::GetBootconfig(kInitFatalPanicParamString, &value) &&
+                            value == "true");
     } else {
         const std::string kInitFatalPanicString = kInitFatalPanicParamString + "=true";
         init_fatal_panic = cmdline.find(kInitFatalPanicString) != std::string::npos;
@@ -68,11 +65,7 @@ void SetFatalRebootTarget(const std::optional<std::string>& reboot_target) {
     const std::string kRebootTargetString = "androidboot.init_fatal_reboot_target";
     auto start_pos = cmdline.find(kRebootTargetString);
     if (start_pos == std::string::npos) {
-        ImportBootconfig([kRebootTargetString](const std::string& key, const std::string& value) {
-            if (key == kRebootTargetString) {
-                init_fatal_reboot_target = value;
-            }
-        });
+        android::fs_mgr::GetBootconfig(kRebootTargetString, &init_fatal_reboot_target);
         // We already default to bootloader if no setting is provided.
     } else {
         const std::string kRebootTargetStringPattern = kRebootTargetString + "=";
@@ -106,7 +99,8 @@ bool IsRebootCapable() {
     return value == CAP_SET;
 }
 
-void __attribute__((noreturn)) RebootSystem(unsigned int cmd, const std::string& rebootTarget) {
+void __attribute__((noreturn))
+RebootSystem(unsigned int cmd, const std::string& rebootTarget, const std::string& reboot_reason) {
     LOG(INFO) << "Reboot ending, jumping to kernel";
 
     if (!IsRebootCapable()) {
@@ -127,10 +121,12 @@ void __attribute__((noreturn)) RebootSystem(unsigned int cmd, const std::string&
 
         case ANDROID_RB_THERMOFF:
             if (android::base::GetBoolProperty("ro.thermal_warmreset", false)) {
+                std::string reason = "shutdown,thermal";
+                if (!reboot_reason.empty()) reason = reboot_reason;
+
                 LOG(INFO) << "Try to trigger a warm reset for thermal shutdown";
-                static constexpr const char kThermalShutdownTarget[] = "shutdown,thermal";
                 syscall(__NR_reboot, LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2,
-                        LINUX_REBOOT_CMD_RESTART2, kThermalShutdownTarget);
+                        LINUX_REBOOT_CMD_RESTART2, reason.c_str());
             } else {
                 reboot(RB_POWER_OFF);
             }

@@ -32,8 +32,8 @@ SensorInfo convertSensor(const Sensor& src) {
     SensorInfo dst;
     const String8& name = src.getName();
     const String8& vendor = src.getVendor();
-    dst.name = hidl_string{name.string(), name.size()};
-    dst.vendor = hidl_string{vendor.string(), vendor.size()};
+    dst.name = hidl_string{name.c_str(), name.size()};
+    dst.vendor = hidl_string{vendor.c_str(), vendor.size()};
     dst.version = src.getVersion();
     dst.sensorHandle = src.getHandle();
     dst.type = static_cast<::android::hardware::sensors::V1_0::SensorType>(
@@ -76,8 +76,8 @@ Result convertResult(status_t status) {
 
 ::android::hardware::sensors::V1_0::Event convertEvent(const ::ASensorEvent& src) {
     ::android::hardware::sensors::V1_0::Event dst;
-    ::android::hardware::sensors::V1_0::implementation::convertFromSensorEvent(
-            reinterpret_cast<const sensors_event_t&>(src), &dst);
+    ::android::hardware::sensors::V1_0::implementation::convertFromASensorEvent(
+            src, &dst);
     return dst;
 }
 

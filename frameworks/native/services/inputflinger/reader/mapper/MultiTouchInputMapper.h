@@ -71,7 +71,6 @@ public:
     ~MultiTouchMotionAccumulator();
 
     void configure(InputDeviceContext& deviceContext, size_t slotCount, bool usingSlotsProtocol);
-    void reset(InputDeviceContext& deviceContext);
     void process(const RawEvent* rawEvent);
     void finishSync();
     bool hasStylus() const;
@@ -86,7 +85,7 @@ private:
     bool mUsingSlotsProtocol;
     bool mHaveStylus;
 
-    void clearSlots(int32_t initialSlot);
+    void resetSlots();
     void warnIfNotInUse(const RawEvent& event, const Slot& slot);
 };
 
@@ -104,6 +103,14 @@ protected:
     bool hasStylus() const override;
 
 private:
+    // simulate_stylus_with_touch is a debug mode that converts all finger pointers reported by this
+    // mapper's touchscreen into stylus pointers, and adds SOURCE_STYLUS to the input device.
+    // It is used to simulate stylus events for debugging and testing on a device that does not
+    // support styluses. It can be enabled using
+    // "adb shell setprop persist.debug.input.simulate_stylus_with_touch true",
+    // and requires a reboot to take effect.
+    inline bool shouldSimulateStylusWithTouch() const;
+
     // If the slot is in use, return the bit id. Return std::nullopt otherwise.
     std::optional<int32_t> getActiveBitId(const MultiTouchMotionAccumulator::Slot& inSlot);
     MultiTouchMotionAccumulator mMultiTouchMotionAccumulator;

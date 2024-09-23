@@ -139,17 +139,17 @@ int main(int, char**) {
 
     set_sched_policy(0, SP_FOREGROUND);
 
-    // Put most SurfaceFlinger threads in the system-background cpuset
-    // Keeps us from unnecessarily using big cores
-    // Do this after the binder thread pool init
-    if (cpusets_enabled()) set_cpuset_policy(0, SP_SYSTEM);
-
     // initialize before clients can connect
     flinger->init();
 
     // publish surface flinger
     sp<IServiceManager> sm(defaultServiceManager());
     sm->addService(String16(SurfaceFlinger::getServiceName()), flinger, false,
+                   IServiceManager::DUMP_FLAG_PRIORITY_CRITICAL | IServiceManager::DUMP_FLAG_PROTO);
+
+    // publish gui::ISurfaceComposer, the new AIDL interface
+    sp<SurfaceComposerAIDL> composerAIDL = new SurfaceComposerAIDL(flinger);
+    sm->addService(String16("SurfaceFlingerAIDL"), composerAIDL, false,
                    IServiceManager::DUMP_FLAG_PRIORITY_CRITICAL | IServiceManager::DUMP_FLAG_PROTO);
 
     startDisplayService(); // dependency on SF getting registered above

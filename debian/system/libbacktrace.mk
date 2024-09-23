@@ -2,16 +2,6 @@ include /usr/share/dpkg/architecture.mk
 
 NAME = libbacktrace
 
-# system/unwinding/libbacktrace/Android.bp
-libbacktrace_SOURCES = \
-  Backtrace.cpp \
-  BacktraceCurrent.cpp \
-  BacktraceMap.cpp \
-  BacktracePtrace.cpp \
-  ThreadEntry.cpp \
-  UnwindStack.cpp \
-  UnwindStackMap.cpp \
-
 # system/unwinding/libunwindstack/Android.bp
 libunwindstack_SOURCES := \
   AndroidUnwinder.cpp \
@@ -37,6 +27,7 @@ libunwindstack_SOURCES := \
   RegsArm64.cpp \
   RegsX86.cpp \
   RegsX86_64.cpp \
+  RegsRiscv64.cpp \
   RegsMips.cpp \
   RegsMips64.cpp \
   Symbols.cpp \
@@ -57,7 +48,6 @@ else ifeq ($(DEB_HOST_ARCH), mipsel)
 endif
 
 SOURCES = \
-  $(foreach source, $(filter %.cpp, $(libbacktrace_SOURCES)), libbacktrace/$(source)) \
   $(foreach source, $(filter %.cpp, $(libunwindstack_SOURCES)), libunwindstack/$(source)) \
 
 SOURCES := $(foreach source, $(SOURCES), system/unwinding/$(source))
@@ -65,13 +55,12 @@ OBJECTS_CXX = $(SOURCES:.cpp=.o)
 SOURCES_ASSEMBLY := $(foreach source, $(SOURCES_ASSEMBLY), system/unwinding/$(source))
 OBJECTS_ASSEMBLY := $(SOURCES_ASSEMBLY:.S=.o)
 
-CXXFLAGS += -std=gnu++17 -fno-omit-frame-pointer
+CXXFLAGS += -fno-omit-frame-pointer
 CPPFLAGS += \
   -Iexternal/lzma/C \
   -Isystem/libbase/include \
   -Isystem/libprocinfo/include \
   -Isystem/logging/liblog/include \
-  -Isystem/unwinding/libbacktrace/include \
   -Isystem/unwinding/libunwindstack/include \
 
 LDFLAGS += \

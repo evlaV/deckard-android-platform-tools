@@ -19,7 +19,9 @@
 #include <math/mat4.h>
 #include <math/vec3.h>
 #include <renderengine/ExternalTexture.h>
+#include <renderengine/PrintMatrix.h>
 #include <ui/BlurRegion.h>
+#include <ui/DebugUtils.h>
 #include <ui/Fence.h>
 #include <ui/FloatRect.h>
 #include <ui/GraphicBuffer.h>
@@ -85,7 +87,7 @@ struct Geometry {
     // rectangle to figure out how to apply the radius for this layer. The crop rectangle will be
     // in local layer coordinate space, so we have to take the layer transform into account when
     // walking up the tree.
-    float roundedCornersRadius = 0.0;
+    vec2 roundedCornersRadius = vec2(0.0f, 0.0f);
 
     // Rectangle within which corners will be rounded.
     FloatRect roundedCornersCrop = FloatRect();
@@ -171,6 +173,12 @@ struct LayerSettings {
 
     // Name associated with the layer for debugging purposes.
     std::string name;
+
+    // Luminance of the white point for this layer. Used for linear dimming.
+    // Individual layers will be dimmed by (whitePointNits / maxWhitePoint).
+    // If white point nits are unknown, then this layer is assumed to have the
+    // same luminance as the brightest layer in the scene.
+    float whitePointNits = -1.f;
 };
 
 // Keep in sync with custom comparison function in
@@ -202,6 +210,10 @@ static inline bool operator==(const ShadowSettings& lhs, const ShadowSettings& r
             lhs.casterIsTranslucent == rhs.casterIsTranslucent;
 }
 
+static inline bool operator!=(const ShadowSettings& lhs, const ShadowSettings& rhs) {
+    return !(operator==(lhs, rhs));
+}
+
 static inline bool operator==(const LayerSettings& lhs, const LayerSettings& rhs) {
     if (lhs.blurRegions.size() != rhs.blurRegions.size()) {
         return false;
@@ -220,18 +232,19 @@ static inline bool operator==(const LayerSettings& lhs, const LayerSettings& rhs
             lhs.skipContentDraw == rhs.skipContentDraw && lhs.shadow == rhs.shadow &&
             lhs.backgroundBlurRadius == rhs.backgroundBlurRadius &&
             lhs.blurRegionTransform == rhs.blurRegionTransform &&
-            lhs.stretchEffect == rhs.stretchEffect;
+            lhs.stretchEffect == rhs.stretchEffect && lhs.whitePointNits == rhs.whitePointNits;
 }
-
-// Defining PrintTo helps with Google Tests.
 
 static inline void PrintTo(const Buffer& settings, ::std::ostream* os) {
     *os << "Buffer {";
-    *os << "\n    .buffer = " << settings.buffer.get();
+    *os << "\n    .buffer = " << settings.buffer.get() << " "
+        << (settings.buffer.get() ? decodePixelFormat(settings.buffer->getPixelFormat()).c_str()
+                                  : "");
     *os << "\n    .fence = " << settings.fence.get();
     *os << "\n    .textureName = " << settings.textureName;
     *os << "\n    .useTextureFiltering = " << settings.useTextureFiltering;
-    *os << "\n    .textureTransform = " << settings.textureTransform;
+    *os << "\n    .textureTransform = ";
+    PrintMatrix(settings.textureTransform, os);
     *os << "\n    .usePremultipliedAlpha = " << settings.usePremultipliedAlpha;
     *os << "\n    .isOpaque = " << settings.isOpaque;
     *os << "\n    .isY410BT2020 = " << settings.isY410BT2020;
@@ -243,8 +256,10 @@ static inline void PrintTo(const Geometry& settings, ::std::ostream* os) {
     *os << "Geometry {";
     *os << "\n    .boundaries = ";
     PrintTo(settings.boundaries, os);
-    *os << "\n    .positionTransform = " << settings.positionTransform;
-    *os << "\n    .roundedCornersRadius = " << settings.roundedCornersRadius;
+    *os << "\n    .positionTransform = ";
+    PrintMatrix(settings.positionTransform, os);
+    *os << "\n    .roundedCornersRadiusX = " << settings.roundedCornersRadius.x;
+    *os << "\n    .roundedCornersRadiusY = " << settings.roundedCornersRadius.y;
     *os << "\n    .roundedCornersCrop = ";
     PrintTo(settings.roundedCornersCrop, os);
     *os << "\n}";
@@ -252,10 +267,14 @@ static inline void PrintTo(const Geometry& settings, ::std::ostream* os) {
 
 static inline void PrintTo(const PixelSource& settings, ::std::ostream* os) {
     *os << "PixelSource {";
-    *os << "\n    .buffer = ";
-    PrintTo(settings.buffer, os);
-    *os << "\n    .solidColor = " << settings.solidColor;
-    *os << "\n}";
+    if (settings.buffer.buffer) {
+        *os << "\n    .buffer = ";
+        PrintTo(settings.buffer, os);
+        *os << "\n}";
+    } else {
+        *os << "\n    .solidColor = " << settings.solidColor;
+        *os << "\n}";
+    }
 }
 
 static inline void PrintTo(const ShadowSettings& settings, ::std::ostream* os) {
@@ -295,18 +314,29 @@ static inline void PrintTo(const LayerSettings& settings, ::std::ostream* os) {
     *os << "\n    .alpha = " << settings.alpha;
     *os << "\n    .sourceDataspace = ";
     PrintTo(settings.sourceDataspace, os);
-    *os << "\n    .colorTransform = " << settings.colorTransform;
+    *os << "\n    .colorTransform = ";
+    PrintMatrix(settings.colorTransform, os);
     *os << "\n    .disableBlending = " << settings.disableBlending;
     *os << "\n    .skipContentDraw = " << settings.skipContentDraw;
-    *os << "\n    .backgroundBlurRadius = " << settings.backgroundBlurRadius;
-    for (auto blurRegion : settings.blurRegions) {
-        *os << "\n";
-        PrintTo(blurRegion, os);
+    if (settings.shadow != ShadowSettings()) {
+        *os << "\n    .shadow = ";
+        PrintTo(settings.shadow, os);
     }
-    *os << "\n    .shadow = ";
-    PrintTo(settings.shadow, os);
-    *os << "\n    .stretchEffect = ";
-    PrintTo(settings.stretchEffect, os);
+    *os << "\n    .backgroundBlurRadius = " << settings.backgroundBlurRadius;
+    if (settings.blurRegions.size()) {
+        *os << "\n    .blurRegions =";
+        for (auto blurRegion : settings.blurRegions) {
+            *os << "\n";
+            PrintTo(blurRegion, os);
+        }
+    }
+    *os << "\n    .blurRegionTransform = ";
+    PrintMatrix(settings.blurRegionTransform, os);
+    if (settings.stretchEffect != StretchEffect()) {
+        *os << "\n    .stretchEffect = ";
+        PrintTo(settings.stretchEffect, os);
+    }
+    *os << "\n    .whitePointNits = " << settings.whitePointNits;
     *os << "\n}";
 }
 

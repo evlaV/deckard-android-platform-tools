@@ -61,7 +61,7 @@ struct DozeNotSupportedVariant {
 struct EventThreadBaseSupportedVariant {
     static void setupVsyncAndEventThreadNoCallExpectations(DisplayTransactionTest* test) {
         // The callback should not be notified to toggle VSYNC.
-        EXPECT_CALL(test->mSchedulerCallback, setVsyncEnabled(_)).Times(0);
+        EXPECT_CALL(test->mFlinger.mockSchedulerCallback(), setVsyncEnabled(_)).Times(0);
 
         // The event thread should not be notified.
         EXPECT_CALL(*test->mEventThread, onScreenReleased()).Times(0);
@@ -88,7 +88,7 @@ struct EventThreadNotSupportedVariant : public EventThreadBaseSupportedVariant {
 struct EventThreadIsSupportedVariant : public EventThreadBaseSupportedVariant {
     static void setupAcquireAndEnableVsyncCallExpectations(DisplayTransactionTest* test) {
         // The callback should be notified to enable VSYNC.
-        EXPECT_CALL(test->mSchedulerCallback, setVsyncEnabled(true)).Times(1);
+        EXPECT_CALL(test->mFlinger.mockSchedulerCallback(), setVsyncEnabled(true)).Times(1);
 
         // The event thread should be notified that the screen was acquired.
         EXPECT_CALL(*test->mEventThread, onScreenAcquired()).Times(1);
@@ -96,7 +96,7 @@ struct EventThreadIsSupportedVariant : public EventThreadBaseSupportedVariant {
 
     static void setupReleaseAndDisableVsyncCallExpectations(DisplayTransactionTest* test) {
         // The callback should be notified to disable VSYNC.
-        EXPECT_CALL(test->mSchedulerCallback, setVsyncEnabled(false)).Times(1);
+        EXPECT_CALL(test->mFlinger.mockSchedulerCallback(), setVsyncEnabled(false)).Times(1);
 
         // The event thread should not be notified that the screen was released.
         EXPECT_CALL(*test->mEventThread, onScreenReleased()).Times(1);
@@ -273,7 +273,7 @@ struct DisplayPowerCase {
     }
 
     static void setupRepaintEverythingCallExpectations(DisplayTransactionTest* test) {
-        EXPECT_CALL(*test->mMessageQueue, invalidate()).Times(1);
+        EXPECT_CALL(*test->mFlinger.scheduler(), scheduleFrame()).Times(1);
     }
 
     static void setupSurfaceInterceptorCallExpectations(DisplayTransactionTest* test,
@@ -323,6 +323,9 @@ class SetPowerModeInternalTest : public DisplayTransactionTest {
 public:
     template <typename Case>
     void transitionDisplayCommon();
+
+    template <bool kBoot>
+    sp<DisplayDevice> activeDisplayTest();
 };
 
 template <PowerMode PowerMode>
@@ -406,7 +409,7 @@ TEST_F(SetPowerModeInternalTest, setPowerModeInternalDoesNothingIfVirtualDisplay
     display.inject();
 
     // The display is set to PowerMode::ON
-    getDisplayDevice(display.token())->setPowerMode(PowerMode::ON);
+    display.mutableDisplayDevice()->setPowerMode(PowerMode::ON);
 
     // --------------------------------------------------------------------
     // Invocation
@@ -497,6 +500,88 @@ TEST_F(SetPowerModeInternalTest, transitionsDisplayFromOnToDozeSuspendExternalDi
 
 TEST_F(SetPowerModeInternalTest, transitionsDisplayFromOnToUnknownExternalDisplay) {
     transitionDisplayCommon<ExternalDisplayPowerCase<TransitionOnToUnknownVariant>>();
+}
+
+template <bool kBoot>
+sp<DisplayDevice> SetPowerModeInternalTest::activeDisplayTest() {
+    using Case = SimplePrimaryDisplayCase;
+
+    // --------------------------------------------------------------------
+    // Preconditions
+
+    // Inject a primary display.
+    Case::Display::injectHwcDisplay(this);
+    auto injector = Case::Display::makeFakeExistingDisplayInjector(this);
+    injector.setPowerMode(kBoot ? std::nullopt : std::make_optional(PowerMode::OFF));
+
+    const auto display = injector.inject();
+    EXPECT_EQ(display->getDisplayToken(), mFlinger.mutableActiveDisplayToken());
+
+    using PowerCase = PrimaryDisplayPowerCase<TransitionOffToOnVariant>;
+    TransitionOffToOnVariant::template setupCallExpectations<PowerCase>(this);
+
+    constexpr size_t kTimes = kBoot ? 1 : 0;
+    EXPECT_CALL(*mRenderEngine, onActiveDisplaySizeChanged(display->getSize())).Times(kTimes);
+    EXPECT_CALL(*mEventThread, onModeChanged(display->getActiveMode())).Times(kTimes);
+
+    if constexpr (kBoot) {
+        mFlinger.mutableActiveDisplayToken() = nullptr;
+    }
+
+    // --------------------------------------------------------------------
+    // Invocation
+
+    mFlinger.setPowerModeInternal(display, PowerMode::ON);
+
+    // --------------------------------------------------------------------
+    // Postconditions
+
+    // The primary display should be the active display.
+    EXPECT_EQ(display->getDisplayToken(), mFlinger.mutableActiveDisplayToken());
+
+    Mock::VerifyAndClearExpectations(mComposer);
+    Mock::VerifyAndClearExpectations(mRenderEngine);
+    Mock::VerifyAndClearExpectations(mEventThread);
+    Mock::VerifyAndClearExpectations(mVsyncController);
+    Mock::VerifyAndClearExpectations(mVSyncTracker);
+    Mock::VerifyAndClearExpectations(mFlinger.scheduler());
+    Mock::VerifyAndClearExpectations(&mFlinger.mockSchedulerCallback());
+
+    return display;
+}
+
+TEST_F(SetPowerModeInternalTest, activeDisplayBoot) {
+    constexpr bool kBoot = true;
+    activeDisplayTest<kBoot>();
+}
+
+TEST_F(SetPowerModeInternalTest, activeDisplaySingle) {
+    constexpr bool kBoot = false;
+    activeDisplayTest<kBoot>();
+}
+
+TEST_F(SetPowerModeInternalTest, activeDisplayDual) {
+    constexpr bool kBoot = false;
+    const auto innerDisplay = activeDisplayTest<kBoot>();
+
+    // Inject a powered-off outer display.
+    const auto outerDisplay = mFakeDisplayInjector.injectInternalDisplay(
+            [&](FakeDisplayDeviceInjector& injector) { injector.setPowerMode(PowerMode::OFF); },
+            {.displayId = PhysicalDisplayId::fromPort(254u),
+             .hwcDisplayId = 1,
+             .isPrimary = false});
+
+    EXPECT_EQ(innerDisplay->getDisplayToken(), mFlinger.mutableActiveDisplayToken());
+
+    mFlinger.setPowerModeInternal(innerDisplay, PowerMode::OFF);
+    mFlinger.setPowerModeInternal(outerDisplay, PowerMode::ON);
+
+    EXPECT_EQ(outerDisplay->getDisplayToken(), mFlinger.mutableActiveDisplayToken());
+
+    mFlinger.setPowerModeInternal(outerDisplay, PowerMode::OFF);
+    mFlinger.setPowerModeInternal(innerDisplay, PowerMode::ON);
+
+    EXPECT_EQ(innerDisplay->getDisplayToken(), mFlinger.mutableActiveDisplayToken());
 }
 
 } // namespace

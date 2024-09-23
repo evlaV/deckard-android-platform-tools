@@ -44,6 +44,7 @@ class TrustyKeymaster {
     void GenerateKey(const GenerateKeyRequest& request, GenerateKeyResponse* response);
     void GenerateRkpKey(const GenerateRkpKeyRequest& request, GenerateRkpKeyResponse* response);
     void GenerateCsr(const GenerateCsrRequest& request, GenerateCsrResponse* response);
+    void GenerateCsrV2(const GenerateCsrV2Request& request, GenerateCsrV2Response* response);
     void GetKeyCharacteristics(const GetKeyCharacteristicsRequest& request,
                                GetKeyCharacteristicsResponse* response);
     void ImportKey(const ImportKeyRequest& request, ImportKeyResponse* response);
@@ -54,6 +55,8 @@ class TrustyKeymaster {
     void UpgradeKey(const UpgradeKeyRequest& request, UpgradeKeyResponse* response);
     void DeleteKey(const DeleteKeyRequest& request, DeleteKeyResponse* response);
     void DeleteAllKeys(const DeleteAllKeysRequest& request, DeleteAllKeysResponse* response);
+    void DestroyAttestationIds(const DestroyAttestationIdsRequest& request,
+                               DestroyAttestationIdsResponse* response);
     void BeginOperation(const BeginOperationRequest& request, BeginOperationResponse* response);
     void UpdateOperation(const UpdateOperationRequest& request, UpdateOperationResponse* response);
     void FinishOperation(const FinishOperationRequest& request, FinishOperationResponse* response);
@@ -67,6 +70,7 @@ class TrustyKeymaster {
     ConfigureVendorPatchlevelResponse ConfigureVendorPatchlevel(
             const ConfigureVendorPatchlevelRequest& request);
     GetRootOfTrustResponse GetRootOfTrust(const GetRootOfTrustRequest& request);
+    GetHwInfoResponse GetHwInfo();
 
     uint32_t message_version() const { return message_version_; }
 

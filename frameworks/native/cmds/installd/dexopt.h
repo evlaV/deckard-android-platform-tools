@@ -18,6 +18,7 @@
 #define DEXOPT_H_
 
 #include "installd_constants.h"
+#include "unique_file.h"
 
 #include <sys/types.h>
 
@@ -88,20 +89,17 @@ bool create_profile_snapshot(int32_t app_id,
                              const std::string& profile_name,
                              const std::string& classpath);
 
-bool dump_profiles(int32_t uid,
-                   const std::string& pkgname,
-                   const std::string& profile_name,
-                   const std::string& code_path);
+bool dump_profiles(int32_t uid, const std::string& pkgname, const std::string& profile_name,
+                   const std::string& code_path, bool dump_classes_and_methods);
 
 bool copy_system_profile(const std::string& system_profile,
                          uid_t packageUid,
                          const std::string& pkgname,
                          const std::string& profile_name);
 
-// Prepare the app profile for the given code path:
-//  - create the current profile using profile_name
-//  - merge the profile from the dex metadata file (if present) into
-//    the reference profile.
+// Prepares the app profile for the package at the given path:
+// - Creates the current profile for the given user ID, unless the user ID is `USER_NULL`.
+// - Merges the profile from the dex metadata file (if present) into the reference profile.
 bool prepare_app_profile(const std::string& package_name,
                          userid_t user_id,
                          appid_t app_id,
@@ -152,6 +150,16 @@ const char* select_execution_binary(
         bool is_debug_runtime,
         bool is_release,
         bool is_debuggable_build);
+
+// Returns `ODEX_NOT_FOUND` if the optimized artifacts are not found, or `ODEX_IS_PUBLIC` if the
+// optimized artifacts are accessible by all apps, or `ODEX_IS_PRIVATE` if the optimized artifacts
+// are only accessible by this app, or -1 if failed to get the visibility of the optimized
+// artifacts.
+int get_odex_visibility(const char* apk_path, const char* instruction_set, const char* oat_dir);
+
+UniqueFile maybe_open_reference_profile(const std::string& pkgname, const std::string& dex_path,
+                                        const char* profile_name, bool profile_guided,
+                                        bool is_public, int uid, bool is_secondary_dex);
 
 }  // namespace installd
 }  // namespace android

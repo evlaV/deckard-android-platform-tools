@@ -30,7 +30,6 @@ SOURCES := $(foreach source, $(SOURCES), system/core/libutils/$(source))
 SOURCES += system/incremental_delivery/incfs/util/map_ptr.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 
-CXXFLAGS += -std=gnu++2a
 CPPFLAGS += \
   -Isystem/core/cutils/include \
   -Isystem/core/include \
@@ -39,7 +38,6 @@ CPPFLAGS += \
   -Isystem/incremental_delivery/incfs/util/include \
   -Isystem/libbase/include \
   -Isystem/logging/liblog/include \
-  -Isystem/unwinding/libbacktrace/include \
 
 LDFLAGS += \
   -Ldebian/out/system \

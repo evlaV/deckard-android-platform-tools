@@ -21,13 +21,13 @@ OBJECTS_C = $(SOURCES_C:.c=.o)
 SOURCES_CXX = $(filter %.cpp,$(SOURCES))
 OBJECTS_CXX = $(SOURCES_CXX:.cpp=.o)
 
-CXXFLAGS += -std=gnu++2a
 CPPFLAGS += \
   -D_GNU_SOURCE \
   -D_LARGEFILE64_SOURCE \
   -DFEC_NO_KLOG \
   -DSQUASHFS_NO_KLOG \
   -I/usr/include/android \
+  -I/usr/include/squashfuse \
   -Isystem/core/libcutils/include \
   -Isystem/core/libsparse/include \
   -Isystem/extras/ext4_utils/include \

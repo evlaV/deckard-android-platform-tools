@@ -32,6 +32,8 @@
 #include <android-base/logging.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <fs_mgr.h>
+#include <libdm/dm.h>
 #include <private/android_filesystem_config.h>
 #include <selinux/android.h>
 #include <selinux/selinux.h>
@@ -112,17 +114,14 @@ static bool FindVbdDevicePrefix(const std::string& path, std::string* result) {
 // the supplied buffer with the dm module's instantiated name.
 // If it doesn't start with a virtual block device, or there is some
 // error, return false.
-static bool FindDmDevice(const std::string& path, std::string* name, std::string* uuid) {
-    if (!StartsWith(path, "/devices/virtual/block/dm-")) return false;
+static bool FindDmDevice(const Uevent& uevent, std::string* name, std::string* uuid) {
+    if (!StartsWith(uevent.path, "/devices/virtual/block/dm-")) return false;
+    if (uevent.action == "remove") return false;  // Avoid error spam from ioctl
 
-    if (!ReadFileToString("/sys" + path + "/dm/name", name)) {
-        return false;
-    }
-    ReadFileToString("/sys" + path + "/dm/uuid", uuid);
+    dev_t dev = makedev(uevent.major, uevent.minor);
 
-    *name = android::base::Trim(*name);
-    *uuid = android::base::Trim(*uuid);
-    return true;
+    auto& dm = android::dm::DeviceMapper::Instance();
+    return dm.GetDeviceNameAndUuid(dev, name, uuid);
 }
 
 Permissions::Permissions(const std::string& name, mode_t perm, uid_t uid, gid_t gid,
@@ -205,8 +204,8 @@ std::string DeviceHandler::GetPartitionNameForDevice(const std::string& query_de
                 partition_map.emplace_back(map_pieces[0], map_pieces[1]);
             }
         };
-        ImportKernelCmdline(parser);
-        ImportBootconfig(parser);
+        android::fs_mgr::ImportKernelCmdline(parser);
+        android::fs_mgr::ImportBootconfig(parser);
         return partition_map;
     }();
 
@@ -392,7 +391,7 @@ std::vector<std::string> DeviceHandler::GetBlockDeviceSymlinks(const Uevent& uev
         type = "pci";
     } else if (FindVbdDevicePrefix(uevent.path, &device)) {
         type = "vbd";
-    } else if (FindDmDevice(uevent.path, &partition, &uuid)) {
+    } else if (FindDmDevice(uevent, &partition, &uuid)) {
         std::vector<std::string> symlinks = {"/dev/block/mapper/" + partition};
         if (!uuid.empty()) {
             symlinks.emplace_back("/dev/block/mapper/by-uuid/" + uuid);
@@ -429,6 +428,12 @@ std::vector<std::string> DeviceHandler::GetBlockDeviceSymlinks(const Uevent& uev
         if (!partition_name.empty()) {
             links.emplace_back("/dev/block/by-name/" + partition_name);
         }
+    }
+
+    std::string model;
+    if (ReadFileToString("/sys/class/block/" + uevent.device_name + "/queue/zoned", &model) &&
+        !StartsWith(model, "none")) {
+        links.emplace_back("/dev/block/by-name/zoned_device");
     }
 
     auto last_slash = uevent.path.rfind('/');
@@ -470,7 +475,11 @@ void DeviceHandler::HandleDevice(const std::string& action, const std::string& d
         MakeDevice(devpath, block, major, minor, links);
     }
 
-    // We don't have full device-mapper information until a change event is fired.
+    // Handle device-mapper nodes.
+    // On kernels <= 5.10, the "add" event is fired on DM_DEV_CREATE, but does not contain name
+    // information until DM_TABLE_LOAD - thus, we wait for a "change" event.
+    // On kernels >= 5.15, the "add" event is fired on DM_TABLE_LOAD, followed by a "change"
+    // event.
     if (action == "add" || (action == "change" && StartsWith(devpath, "/dev/block/dm-"))) {
         for (const auto& link : links) {
             if (!mkdir_recursive(Dirname(link), 0755)) {
@@ -560,6 +569,8 @@ void DeviceHandler::HandleUevent(const Uevent& uevent) {
         return;
     } else if (uevent.subsystem == "misc" && StartsWith(uevent.device_name, "dm-user/")) {
         devpath = "/dev/dm-user/" + uevent.device_name.substr(8);
+    } else if (uevent.subsystem == "misc" && uevent.device_name == "vfio/vfio") {
+        devpath = "/dev/" + uevent.device_name;
     } else {
         devpath = "/dev/" + Basename(uevent.path);
     }

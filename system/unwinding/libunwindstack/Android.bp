@@ -39,6 +39,9 @@ cc_defaults {
         "-Wall",
         "-Werror",
         "-Wextra",
+        "-Wno-deprecated-volatile",
+        // Disable this warning, it doesn't provide any useful data.
+        "-Wno-reorder-init-list"
     ],
 
     target: {
@@ -54,6 +57,7 @@ cc_defaults {
 libunwindstack_common_src_files = [
     "AndroidUnwinder.cpp",
     "ArmExidx.cpp",
+    "Demangle.cpp",
     "DexFiles.cpp",
     "DwarfCfa.cpp",
     "DwarfEhFrameWithHdr.cpp",
@@ -75,8 +79,7 @@ libunwindstack_common_src_files = [
     "RegsArm64.cpp",
     "RegsX86.cpp",
     "RegsX86_64.cpp",
-    "RegsMips.cpp",
-    "RegsMips64.cpp",
+    "RegsRiscv64.cpp",
     "Symbols.cpp",
     "ThreadEntry.cpp",
     "ThreadUnwinder.cpp",
@@ -122,6 +125,10 @@ cc_defaults {
         "libprocinfo",
     ],
 
+    whole_static_libs: [
+        "librustc_demangle_static",
+    ],
+
     shared_libs: [
         "libbase",
         "liblog",
@@ -131,6 +138,7 @@ cc_defaults {
 
 cc_library {
     name: "libunwindstack",
+    ramdisk_available: true,
     vendor_available: true,
     product_available: true,
     recovery_available: true,
@@ -148,7 +156,6 @@ cc_library {
     ],
     cflags: ["-DDEXFILE_SUPPORT"],
     static_libs: ["libdexfile_support"],
-    runtime_libs: ["libdexfile"], // libdexfile_support dependency
 
     target: {
         vendor: {
@@ -175,11 +182,23 @@ cc_library {
             exclude_static_libs: ["libdexfile_support"],
             exclude_runtime_libs: ["libdexfile"],
         },
+        ramdisk: {
+            cflags: ["-UDEXFILE_SUPPORT"],
+            exclude_srcs: ["DexFile.cpp"],
+            exclude_static_libs: ["libdexfile_support"],
+            exclude_runtime_libs: ["libdexfile"],
+        },
         native_bridge: {
             cflags: ["-UDEXFILE_SUPPORT"],
             exclude_srcs: ["DexFile.cpp"],
             exclude_static_libs: ["libdexfile_support"],
             exclude_runtime_libs: ["libdexfile"],
+        },
+        android: {
+            runtime_libs: ["libdexfile"], // libdexfile_support dependency
+        },
+        linux: {
+            runtime_libs: ["libdexfile"], // libdexfile_support dependency
         },
     },
 
@@ -213,6 +232,7 @@ cc_library_static {
         "//external/gwp_asan",
         "//system/core/debuggerd",
         "//system/core/init",
+        "//system/core/libutils",
         "//system/unwinding/libbacktrace",
     ],
     apex_available: [
@@ -231,10 +251,10 @@ cc_library {
     shared_libs: [
         "libbase",
         "libunwindstack",
-        "libprocinfo",
     ],
     whole_static_libs: [
         "libc++fs",
+        "libprocinfo",
         "libz",
     ],
     srcs: [
@@ -271,6 +291,7 @@ cc_defaults {
         "tests/AndroidUnwinderTest.cpp",
         "tests/ArmExidxDecodeTest.cpp",
         "tests/ArmExidxExtractTest.cpp",
+        "tests/DemangleTest.cpp",
         "tests/DexFileTest.cpp",
         "tests/DexFilesTest.cpp",
         "tests/DwarfCfaLogTest.cpp",
@@ -343,7 +364,6 @@ cc_defaults {
     static_libs: [
         "libdexfile_support",
         "libgmock",
-        "libprocinfo",
         "libunwindstack_utils",
     ],
 
@@ -361,6 +381,7 @@ cc_defaults {
         "offline_files/apk_rorx_unreadable_arm64/*",
         "offline_files/apk_rx_arm64/*",
         "offline_files/apk_rx_unreadable_arm64/*",
+        "offline_files/apk_soname_at_end_arm64/*",
         "offline_files/art_quick_osr_stub_arm/*",
         "offline_files/bad_eh_frame_hdr_arm64/*",
         "offline_files/debug_frame_first_x86/*",
@@ -460,9 +481,9 @@ cc_defaults {
     defaults: ["libunwindstack_flags"],
 
     shared_libs: [
-        "libunwindstack_stdout_log",
         "libbase",
         "liblzma",
+        "libunwindstack_stdout_log",
     ],
     target: {
         // Always disable optimizations for host to make it easier to debug.
@@ -506,8 +527,8 @@ cc_binary {
     name: "unwind_for_offline",
     defaults: ["libunwindstack_tools"],
     static_libs: [
-        "libunwindstack_utils",
         "libc++fs",
+        "libunwindstack_utils",
     ],
 
     srcs: [
@@ -575,8 +596,8 @@ cc_benchmark {
     ],
 
     static_libs: [
-        "libunwindstack_utils",
         "libprocinfo",
+        "libunwindstack_utils",
     ],
 
     target: {

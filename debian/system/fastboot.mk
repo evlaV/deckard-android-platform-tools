@@ -1,20 +1,28 @@
 NAME = fastboot
 
+# system/core/fastboot/Android.bp
 fastboot_SOURCES = \
   bootimg_utils.cpp \
-  fastboot.cpp \
   fastboot_driver.cpp \
+  fastboot.cpp \
+  filesystem.cpp \
   fs.cpp \
   main.cpp \
   socket.cpp \
+  storage.cpp \
+  super_flash_helper.cpp \
   tcp.cpp \
   udp.cpp \
-  usb_linux.cpp \
   util.cpp \
   vendor_boot_img_utils.cpp \
+  task.cpp \
+  \
+  usb_linux.cpp \
 
+# system/core/fs_mgr/liblp/Android.bp
 fs_mgr_liblp_SOURCES := \
   builder.cpp \
+  super_layout_builder.cpp \
   images.cpp \
   partition_opener.cpp \
   property_fetcher.cpp \
@@ -27,7 +35,7 @@ SOURCES := \
   $(foreach source, $(fs_mgr_liblp_SOURCES), system/core/fs_mgr/liblp/$(source))
 OBJECTS = $(SOURCES:.cpp=.o)
 
-CXXFLAGS += -std=gnu++2a -fpermissive
+CXXFLAGS += -fpermissive
 CPPFLAGS += \
   -D_FILE_OFFSET_BITS=64 \
   -DPLATFORM_TOOLS_VERSION='"$(PLATFORM_TOOLS_VERSION)"' \

@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -97,6 +98,7 @@ struct Block {
     const char& operator[](size_t idx) const { return data()[idx]; }
 
     bool operator==(const Block& rhs) const {
+        static_assert(std::is_standard_layout<decltype(data())>());
         return size() == rhs.size() && memcmp(data(), rhs.data(), size()) == 0;
     }
 
@@ -230,6 +232,7 @@ struct IOVector {
 
         size_t offset = 0;
         iterate_blocks([&offset, &result](const char* data, size_t len) {
+            static_assert(std::is_standard_layout<decltype(result)>());
             memcpy(&result[offset], data, len);
             offset += len;
         });
@@ -307,12 +310,12 @@ struct weak_ptr {
     }
 
     T* get() const {
-        check_main_thread();
+        fdevent_check_looper();
         return ptr_;
     }
 
     void reset(T* ptr = nullptr) {
-        check_main_thread();
+        fdevent_check_looper();
 
         if (ptr == ptr_) {
             return;
@@ -338,7 +341,7 @@ template <typename T>
 struct enable_weak_from_this {
     ~enable_weak_from_this() {
         if (!weak_ptrs_.empty()) {
-            check_main_thread();
+            fdevent_check_looper();
             for (auto& weak : weak_ptrs_) {
                 weak->ptr_ = nullptr;
             }
@@ -349,7 +352,7 @@ struct enable_weak_from_this {
     weak_ptr<T> weak() { return weak_ptr<T>(static_cast<T*>(this)); }
 
     void schedule_deletion() {
-        fdevent_run_on_main_thread([this]() { delete static_cast<T*>(this); });
+        fdevent_run_on_looper([this]() { delete static_cast<T*>(this); });
     }
 
   private:

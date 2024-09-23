@@ -26,11 +26,19 @@
 #include <android-base/unique_fd.h>
 #include <cutils/iosched_policy.h>
 
+#include "interprocess_fifo.h"
 #include "mount_namespace.h"
 #include "result.h"
 
 namespace android {
 namespace init {
+
+// Constants used by Service::Start() for communication between parent and child.
+enum ServiceCode : uint8_t {
+    kActivatingCgroupsFailed,
+    kCgroupsActivated,
+    kSetSidFinished,
+};
 
 class Descriptor {
   public:
@@ -54,6 +62,7 @@ struct SocketDescriptor {
     int perm = 0;
     std::string context;
     bool passcred = false;
+    bool listen = false;
     bool persist = false;
 
     // Create() creates the named unix domain socket in /dev/socket and returns a Descriptor object.
@@ -82,13 +91,20 @@ struct ProcessAttributes {
     IoSchedClass ioprio_class;
     int ioprio_pri;
     std::vector<std::pair<int, rlimit>> rlimits;
-    uid_t uid;
+    std::optional<uid_t> parsed_uid;
     gid_t gid;
     std::vector<gid_t> supp_gids;
     int priority;
     bool stdio_to_kmsg;
+
+    uid_t uid() const { return parsed_uid.value_or(0); }
 };
-Result<void> SetProcessAttributes(const ProcessAttributes& attr);
+
+inline bool RequiresConsole(const ProcessAttributes& attr) {
+    return !attr.console.empty();
+}
+
+Result<void> SetProcessAttributes(const ProcessAttributes& attr, InterprocessFifo setsid_finished);
 
 Result<void> WritePidToFiles(std::vector<std::string>* files);
 

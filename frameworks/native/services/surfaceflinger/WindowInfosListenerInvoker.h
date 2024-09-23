@@ -20,8 +20,8 @@
 #include <android/gui/IWindowInfosListener.h>
 #include <android/gui/IWindowInfosReportedListener.h>
 #include <binder/IBinder.h>
+#include <ftl/small_map.h>
 #include <utils/Mutex.h>
-#include <unordered_map>
 
 namespace android {
 
@@ -29,29 +29,32 @@ class SurfaceFlinger;
 
 class WindowInfosListenerInvoker : public IBinder::DeathRecipient {
 public:
-    WindowInfosListenerInvoker(const sp<SurfaceFlinger>& sf);
-    void addWindowInfosListener(const sp<gui::IWindowInfosListener>& windowInfosListener);
+    explicit WindowInfosListenerInvoker(SurfaceFlinger&);
+
+    void addWindowInfosListener(sp<gui::IWindowInfosListener>);
     void removeWindowInfosListener(const sp<gui::IWindowInfosListener>& windowInfosListener);
 
-    void windowInfosChanged(const std::vector<gui::WindowInfo>& windowInfos, bool shouldSync);
+    void windowInfosChanged(std::vector<gui::WindowInfo>, std::vector<gui::DisplayInfo>,
+                            bool shouldSync, bool forceImmediateCall);
 
 protected:
     void binderDied(const wp<IBinder>& who) override;
 
 private:
-    void windowInfosReported();
+    struct WindowInfosReportedListener;
+    void windowInfosReported(bool shouldSync);
 
-    struct WpHash {
-        size_t operator()(const wp<IBinder>& p) const {
-            return std::hash<IBinder*>()(p.unsafe_get());
-        }
-    };
-
-    const sp<SurfaceFlinger> mSf;
+    SurfaceFlinger& mFlinger;
     std::mutex mListenersMutex;
-    std::unordered_map<wp<IBinder>, const sp<gui::IWindowInfosListener>, WpHash>
+
+    static constexpr size_t kStaticCapacity = 3;
+    ftl::SmallMap<wp<IBinder>, const sp<gui::IWindowInfosListener>, kStaticCapacity>
             mWindowInfosListeners GUARDED_BY(mListenersMutex);
-    sp<gui::IWindowInfosReportedListener> mWindowInfosReportedListener;
-    std::atomic<size_t> mCallbacksPending{0};
+
+    std::mutex mMessagesMutex;
+    uint32_t mActiveMessageCount GUARDED_BY(mMessagesMutex) = 0;
+    std::function<void(bool)> mWindowInfosChangedDelayed GUARDED_BY(mMessagesMutex);
+    bool mShouldSyncDelayed;
 };
+
 } // namespace android

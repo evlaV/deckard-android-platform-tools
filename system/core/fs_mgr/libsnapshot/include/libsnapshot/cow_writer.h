@@ -1,24 +1,31 @@
-// Copyright (C) 2019 The Android Open Source Project
+// copyright (c) 2019 the android open source project
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// licensed under the apache license, version 2.0 (the "license");
+// you may not use this file except in compliance with the license.
+// you may obtain a copy of the license at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//      http://www.apache.org/licenses/license-2.0
 //
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// unless required by applicable law or agreed to in writing, software
+// distributed under the license is distributed on an "as is" basis,
+// without warranties or conditions of any kind, either express or implied.
+// see the license for the specific language governing permissions and
+// limitations under the license.
 
 #pragma once
 
+#include <libsnapshot/cow_compress.h>
+
 #include <stdint.h>
 
+#include <condition_variable>
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <queue>
 #include <string>
+#include <vector>
 
 #include <android-base/unique_fd.h>
 #include <libsnapshot/cow_format.h>
@@ -41,35 +48,42 @@ struct CowOptions {
 
     // Preset the number of merged ops. Only useful for testing.
     uint64_t num_merge_ops = 0;
+
+    // Number of threads for compression
+    int num_compress_threads = 0;
+
+    // Batch write cluster ops
+    bool batch_write = false;
 };
 
 // Interface for writing to a snapuserd COW. All operations are ordered; merges
 // will occur in the sequence they were added to the COW.
 class ICowWriter {
   public:
-    explicit ICowWriter(const CowOptions& options) : options_(options) {}
+    using FileDescriptor = chromeos_update_engine::FileDescriptor;
 
     virtual ~ICowWriter() {}
 
     // Encode an operation that copies the contents of |old_block| to the
-    // location of |new_block|.
-    bool AddCopy(uint64_t new_block, uint64_t old_block);
+    // location of |new_block|. 'num_blocks' is the number of contiguous
+    // COPY operations from |old_block| to |new_block|.
+    virtual bool AddCopy(uint64_t new_block, uint64_t old_block, uint64_t num_blocks = 1) = 0;
 
     // Encode a sequence of raw blocks. |size| must be a multiple of the block size.
-    bool AddRawBlocks(uint64_t new_block_start, const void* data, size_t size);
+    virtual bool AddRawBlocks(uint64_t new_block_start, const void* data, size_t size) = 0;
 
     // Add a sequence of xor'd blocks. |size| must be a multiple of the block size.
-    bool AddXorBlocks(uint32_t new_block_start, const void* data, size_t size, uint32_t old_block,
-                      uint16_t offset);
+    virtual bool AddXorBlocks(uint32_t new_block_start, const void* data, size_t size,
+                              uint32_t old_block, uint16_t offset) = 0;
 
     // Encode a sequence of zeroed blocks. |size| must be a multiple of the block size.
-    bool AddZeroBlocks(uint64_t new_block_start, uint64_t num_blocks);
+    virtual bool AddZeroBlocks(uint64_t new_block_start, uint64_t num_blocks) = 0;
 
     // Add a label to the op sequence.
-    bool AddLabel(uint64_t label);
+    virtual bool AddLabel(uint64_t label) = 0;
 
     // Add sequence data for op merging. Data is a list of the destination block numbers.
-    bool AddSequenceData(size_t num_ops, const uint32_t* data);
+    virtual bool AddSequenceData(size_t num_ops, const uint32_t* data) = 0;
 
     // Flush all pending writes. This must be called before closing the writer
     // to ensure that the correct headers and footers are written.
@@ -78,97 +92,64 @@ class ICowWriter {
     // Return number of bytes the cow image occupies on disk.
     virtual uint64_t GetCowSize() = 0;
 
-    // Returns true if AddCopy() operations are supported.
-    virtual bool SupportsCopyOperation() const { return true; }
+    virtual uint32_t GetBlockSize() const = 0;
+    virtual std::optional<uint32_t> GetMaxBlocks() const = 0;
 
-    const CowOptions& options() { return options_; }
+    // Open an ICowReader for this writer. The reader will be a snapshot of the
+    // current operations in the writer; new writes after OpenReader() will not
+    // be reflected.
+    virtual std::unique_ptr<ICowReader> OpenReader() = 0;
 
-  protected:
-    virtual bool EmitCopy(uint64_t new_block, uint64_t old_block) = 0;
-    virtual bool EmitRawBlocks(uint64_t new_block_start, const void* data, size_t size) = 0;
-    virtual bool EmitXorBlocks(uint32_t new_block_start, const void* data, size_t size,
-                               uint32_t old_block, uint16_t offset) = 0;
-    virtual bool EmitZeroBlocks(uint64_t new_block_start, uint64_t num_blocks) = 0;
-    virtual bool EmitLabel(uint64_t label) = 0;
-    virtual bool EmitSequenceData(size_t num_ops, const uint32_t* data) = 0;
-
-    bool ValidateNewBlock(uint64_t new_block);
-
-  protected:
-    CowOptions options_;
+    // Open a file descriptor. This allows reading and seeing through the cow
+    // as if it were a normal file. The optional source_device must be a valid
+    // path if the CowReader contains any copy or xor operations.
+    virtual std::unique_ptr<FileDescriptor> OpenFileDescriptor(
+            const std::optional<std::string>& source_device) = 0;
 };
 
-class CowWriter : public ICowWriter {
+class CompressWorker {
   public:
-    explicit CowWriter(const CowOptions& options);
+    CompressWorker(std::unique_ptr<ICompressor>&& compressor, uint32_t block_size);
+    bool RunThread();
+    void EnqueueCompressBlocks(const void* buffer, size_t num_blocks);
+    bool GetCompressedBuffers(std::vector<std::basic_string<uint8_t>>* compressed_buf);
+    void Finalize();
+    static uint32_t GetDefaultCompressionLevel(CowCompressionAlgorithm compression);
 
-    // Set up the writer.
-    // The file starts from the beginning.
-    //
-    // If fd is < 0, the CowWriter will be opened against /dev/null. This is for
-    // computing COW sizes without using storage space.
-    bool Initialize(android::base::unique_fd&& fd);
-    bool Initialize(android::base::borrowed_fd fd);
-    // Set up a writer, assuming that the given label is the last valid label.
-    // This will result in dropping any labels that occur after the given on, and will fail
-    // if the given label does not appear.
-    bool InitializeAppend(android::base::unique_fd&&, uint64_t label);
-    bool InitializeAppend(android::base::borrowed_fd fd, uint64_t label);
-
-    bool Finalize() override;
-
-    uint64_t GetCowSize() override;
-
-    uint32_t GetCowVersion() { return header_.major_version; }
-
-  protected:
-    virtual bool EmitCopy(uint64_t new_block, uint64_t old_block) override;
-    virtual bool EmitRawBlocks(uint64_t new_block_start, const void* data, size_t size) override;
-    virtual bool EmitXorBlocks(uint32_t new_block_start, const void* data, size_t size,
-                               uint32_t old_block, uint16_t offset) override;
-    virtual bool EmitZeroBlocks(uint64_t new_block_start, uint64_t num_blocks) override;
-    virtual bool EmitLabel(uint64_t label) override;
-    virtual bool EmitSequenceData(size_t num_ops, const uint32_t* data) override;
+    static bool CompressBlocks(ICompressor* compressor, size_t block_size, const void* buffer,
+                               size_t num_blocks,
+                               std::vector<std::basic_string<uint8_t>>* compressed_data);
 
   private:
-    bool EmitCluster();
-    bool EmitClusterIfNeeded();
-    bool EmitBlocks(uint64_t new_block_start, const void* data, size_t size, uint64_t old_block,
-                    uint16_t offset, uint8_t type);
-    void SetupHeaders();
-    bool ParseOptions();
-    bool OpenForWrite();
-    bool OpenForAppend(uint64_t label);
-    bool GetDataPos(uint64_t* pos);
-    bool WriteRawData(const void* data, size_t size);
-    bool WriteOperation(const CowOperation& op, const void* data = nullptr, size_t size = 0);
-    void AddOperation(const CowOperation& op);
-    std::basic_string<uint8_t> Compress(const void* data, size_t length);
-    void InitPos();
+    struct CompressWork {
+        const void* buffer;
+        size_t num_blocks;
+        bool compression_status = false;
+        std::vector<std::basic_string<uint8_t>> compressed_data;
+    };
 
-    bool SetFd(android::base::borrowed_fd fd);
-    bool Sync();
-    bool Truncate(off_t length);
+    std::unique_ptr<ICompressor> compressor_;
+    uint32_t block_size_;
 
-  private:
-    android::base::unique_fd owned_fd_;
-    android::base::borrowed_fd fd_;
-    CowHeader header_{};
-    CowFooter footer_{};
-    CowCompressionAlgorithm compression_ = kCowCompressNone;
-    uint64_t next_op_pos_ = 0;
-    uint64_t next_data_pos_ = 0;
-    uint32_t cluster_size_ = 0;
-    uint32_t current_cluster_size_ = 0;
-    uint64_t current_data_size_ = 0;
-    bool is_dev_null_ = false;
-    bool merge_in_progress_ = false;
-    bool is_block_device_ = false;
+    std::queue<CompressWork> work_queue_;
+    std::queue<CompressWork> compressed_queue_;
+    std::mutex lock_;
+    std::condition_variable cv_;
+    bool stopped_ = false;
 
-    // :TODO: this is not efficient, but stringstream ubsan aborts because some
-    // bytes overflow a signed char.
-    std::basic_string<uint8_t> ops_;
+    bool CompressBlocks(const void* buffer, size_t num_blocks,
+                        std::vector<std::basic_string<uint8_t>>* compressed_data);
 };
+
+// Create an ICowWriter not backed by any file. This is useful for estimating
+// the final size of a cow file.
+std::unique_ptr<ICowWriter> CreateCowEstimator(uint32_t version, const CowOptions& options);
+
+// Create an ICowWriter of the given version and options. If a label is given,
+// the writer is opened in append mode.
+std::unique_ptr<ICowWriter> CreateCowWriter(uint32_t version, const CowOptions& options,
+                                            android::base::unique_fd&& fd,
+                                            std::optional<uint64_t> label = {});
 
 }  // namespace snapshot
 }  // namespace android

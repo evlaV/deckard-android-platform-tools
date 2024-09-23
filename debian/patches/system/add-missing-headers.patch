@@ -1,21 +1,12 @@
+Description: add missing headers
 Forwarded: not-needed
---- a/system/core/libutils/String8.cpp
-+++ b/system/core/libutils/String8.cpp
-@@ -26,6 +26,7 @@
- #include <ctype.h>
+--- a/system/core/fastboot/fastboot_driver_interface.h
++++ b/system/core/fastboot/fastboot_driver_interface.h
+@@ -17,6 +17,7 @@
  
  #include <string>
-+#include <limits>
  
- #include "SharedBuffer.h"
++#include <stdint.h>
+ #include "android-base/unique_fd.h"
  
---- a/system/libziparchive/zip_archive_stream_entry.cc
-+++ b/system/libziparchive/zip_archive_stream_entry.cc
-@@ -23,6 +23,7 @@
- #include <sys/types.h>
- #include <unistd.h>
- 
-+#include <limits>
- #include <memory>
- #include <vector>
- 
+ class Transport;

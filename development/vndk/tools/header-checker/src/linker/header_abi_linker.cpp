@@ -72,8 +72,10 @@ static llvm::cl::opt<std::string> version_script(
     llvm::cl::cat(header_linker_category));
 
 static llvm::cl::list<std::string> excluded_symbol_versions(
-    "exclude-symbol-version", llvm::cl::Optional,
-    llvm::cl::cat(header_linker_category));
+    "exclude-symbol-version",
+    llvm::cl::desc("Specify the glob patterns of the version blocks to be "
+                   "excluded."),
+    llvm::cl::Optional, llvm::cl::cat(header_linker_category));
 
 static llvm::cl::list<std::string> excluded_symbol_tags(
     "exclude-symbol-tag", llvm::cl::Optional,
@@ -432,7 +434,7 @@ bool HeaderAbiLinker::ReadExportedSymbolsFromVersionScript() {
 
   repr::VersionScriptParser parser;
   parser.SetArch(arch_);
-  parser.SetApiLevel(api_level.getValue());
+  parser.SetApiLevel(api_level.value());
   for (auto &&version : excluded_symbol_versions_) {
     parser.AddExcludedSymbolVersion(version);
   }
