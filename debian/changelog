@@ -1,3 +1,47 @@
+android-platform-tools (34.0.5-4) unstable; urgency=medium
+
+  * Upload to unstable.
+  * Revert "d/tests/control & d/rules: Add tests for adbd"
+    Tentatively for testing migration.
+
+ -- Roger Shimizu <rosh@debian.org>  Sun, 22 Dec 2024 23:05:31 -0800
+
+android-platform-tools (34.0.5-4~exp2) experimental; urgency=medium
+
+  * Simplify adb/adbd makefiles.
+    - Remove debian/system/libadbd.mk.
+    - Put common part of adb.mk and adbd.mk into libadb.mk.
+    - Leave diff part only in adb.mk and adbd.mk.
+
+ -- Roger Shimizu <rosh@debian.org>  Sun, 22 Dec 2024 21:56:34 -0800
+
+android-platform-tools (34.0.5-4~exp1) experimental; urgency=medium
+
+  [ Julien Massot ]
+  * debian: build adbd package.
+    While this requires a few patches in order to actually build on
+    non-Android systems, `adbd` can be a useful tool for embedded
+    developement and probably other use cases.
+    As it was previously shipped as `android-tools-adbd` (up until upstream
+    version 5.1.1), we also need to conflict with and replace this package
+    with the new one.
+    Package `adbd` built from this commit has been successfully tested on
+    amd64 computers (using network transport) and arm64 devices (PinePhone
+    Pro, using USB transport).
+
+  [ Roger Shimizu ]
+  * debian/tests/control & debian/rules: Add tests for adbd.
+
+ -- Roger Shimizu <rosh@debian.org>  Fri, 04 Oct 2024 01:42:45 -0700
+
+android-platform-tools (34.0.5-3) unstable; urgency=medium
+
+  * debian/control: B-D 7zip (>= 22.01+dfsg-9)
+  * debian/rules: Remove -lto from linking option.
+  * debian/include: Revert Add chrono header for gcc-13.
+
+ -- Roger Shimizu <rosh@debian.org>  Sun, 29 Sep 2024 21:35:57 -0700
+
 android-platform-tools (34.0.5-2~bpo12+1) bookworm-backports; urgency=medium
 
   * Rebuild for bookworm-backports.
