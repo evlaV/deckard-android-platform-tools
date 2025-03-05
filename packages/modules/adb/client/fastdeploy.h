@@ -18,7 +18,57 @@
 
 #include "adb_unique_fd.h"
 
+// ==========================================================================
+// The generated protobuf header below includes sysdeps.h, which in turn does
+//
+// #undef foo
+// #define foo ___xxx_foo
+//
+// I believe this is to guard against the unintentional use of native
+// open/write/etc calls instead of the <system>_open etc that are defined
+// on a per platform basis.
+//
+// However it also includes /usr/include/google/protobuf/io/coded_stream.h
+// which in recent versions includes some headers from abseil which contain
+// calls to basic_ostream::write - which these #defines mask out, breaking
+// the build.
+//
+// We should remove the leaky guard defines and reinstate them after the
+// affected header(s) have been included.
+#undef open
+#undef shutdown
+#undef close
+#undef read
+#undef pread
+#undef write
+#undef pwrite
+#undef lseek
+#undef unlink
+#undef creat
+#undef isatty
+#undef accept
+#undef setsockopt
+#undef socketpair
+#undef poll
+#undef mkdir
 #include "fastdeploy/proto/ApkEntry.pb.h"
+#define open       ___xxx_open
+#define shutdown   ___xxx_shutdown
+#define close      ___xxx_close
+#define read       ___xxx_read
+#define pread      ___xxx_pread
+#define write      ___xxx_write
+#define pwrite     ___xxx_pwrite
+#define lseek      ___xxx_lseek
+#define unlink     ___xxx_unlink
+#define creat      ___xxx_creat
+#define isatty     ___xxx_isatty
+#define accept     ___xxx_accept
+#define setsockopt ___xxx_setsockopt
+#define socketpair ___xxx_socketpair
+#define poll       ___xxx_poll
+#define mkdir      ___xxx_mkdir
+// ==========================================================================
 
 #include <optional>
 #include <string>
