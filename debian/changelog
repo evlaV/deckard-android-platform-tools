@@ -1,3 +1,57 @@
+android-platform-tools (34.0.5-10) unstable; urgency=medium
+
+  * man: Use packages/modules/adb/docs/user/adb.1.md
+  * Revert: Try to add alpha sh4 for adb/fastboot, due to no clang support.
+
+ -- Roger Shimizu <rosh@debian.org>  Wed, 26 Mar 2025 00:43:12 -0700
+
+android-platform-tools (34.0.5-9) unstable; urgency=medium
+
+  * Upload to unstable.
+  * debian/control:
+    - Limit android-sdk-platform-tools Suggests to ARCHs exists.
+
+ -- Roger Shimizu <rosh@debian.org>  Sun, 23 Mar 2025 21:12:23 -0700
+
+android-platform-tools (34.0.5-9~exp1) experimental; urgency=medium
+
+  * Try to add alpha sh4 for adb/fastboot.
+
+ -- Roger Shimizu <rosh@debian.org>  Sat, 22 Mar 2025 01:52:31 -0700
+
+android-platform-tools (34.0.5-8) unstable; urgency=medium
+
+  * debian/control:
+    - Add missing Replaces to android-platform-system-core-headers
+      (Closes: #1100892).
+
+ -- Roger Shimizu <rosh@debian.org>  Fri, 21 Mar 2025 00:46:04 -0700
+
+android-platform-tools (34.0.5-7) unstable; urgency=medium
+
+  * Upload to unstable.
+
+ -- Roger Shimizu <rosh@debian.org>  Thu, 20 Mar 2025 23:10:42 -0700
+
+android-platform-tools (34.0.5-7~exp1) experimental; urgency=medium
+
+  * Add loong64 for adb/fastboot.
+
+ -- Roger Shimizu <rosh@debian.org>  Mon, 17 Mar 2025 22:24:26 -0700
+
+android-platform-tools (34.0.5-6) unstable; urgency=medium
+
+  * Fix the autopkgtest.
+
+ -- Roger Shimizu <rosh@debian.org>  Sat, 28 Dec 2024 00:27:41 -0800
+
+android-platform-tools (34.0.5-5) unstable; urgency=medium
+
+  * Revert "Revert "d/tests/control & d/rules: Add tests for adbd""
+    Now there's adbd in testing, so we can have this test.
+
+ -- Roger Shimizu <rosh@debian.org>  Thu, 26 Dec 2024 01:23:20 -0800
+
 android-platform-tools (34.0.5-4~bpo12+1) bookworm-backports; urgency=medium
 
   * Rebuild for bookworm-backports.
