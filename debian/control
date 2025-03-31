@@ -20,7 +20,7 @@ Build-Depends-Arch:
  libprotobuf-dev (>= 3.12) [amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64],
  libsquashfuse-dev [amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64],
  libsystemd-dev [amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64],
- libusb-1.0-0-dev [amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64],
+ libusb-1.0-0-dev (>= 2:1.0.28) [amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64],
  libzstd-dev [amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64],
  lld [amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el],
  pandoc [amd64 i386 armel armhf arm64 ia64 loong64 mipsel mips64el ppc64el s390x ppc64 riscv64],

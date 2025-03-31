@@ -5,6 +5,8 @@ android-platform-tools (35.0.2-1~exp1) UNRELEASED; urgency=medium
     - Refresh patches.
     - Add patch to support MIPS for Android-V.
     - Amend patch to keep local "debian" version.
+  * debian/control: Add B-D: libusb-1.0-0-dev (>= 2:1.0.28)
+    which supports USB SuperSpeed+ Capability.
 
  -- Roger Shimizu <rosh@debian.org>  Sun, 30 Mar 2025 21:28:22 -0700
 
