@@ -1,4 +1,4 @@
-android-platform-tools (35.0.2-1~exp1) UNRELEASED; urgency=medium
+android-platform-tools (35.0.2-1~exp1) experimental; urgency=medium
 
   * New upstream release 35.0.2
   * debian/patches:
@@ -8,8 +8,9 @@ android-platform-tools (35.0.2-1~exp1) UNRELEASED; urgency=medium
   * debian/control: Add B-D: libusb-1.0-0-dev (>= 2:1.0.28)
     which supports USB SuperSpeed+ Capability.
   * debian/adb.mk: Add dummy function 'using_bonjour' to dummy.cpp
+  * Add debian/gbp.conf
 
- -- Roger Shimizu <rosh@debian.org>  Sun, 30 Mar 2025 21:28:22 -0700
+ -- Roger Shimizu <rosh@debian.org>  Sun, 30 Mar 2025 23:03:17 -0700
 
 android-platform-tools (34.0.5-11) unstable; urgency=medium
 
