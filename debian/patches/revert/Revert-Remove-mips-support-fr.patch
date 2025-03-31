@@ -25,7 +25,7 @@ Forwarded: not-needed
 @@ -75,6 +79,10 @@ Regs* Regs::RemoteGet(pid_t pid, ErrorCode* error_code) {
      return RegsArm64::Read(buffer.data());
    case sizeof(riscv64_user_regs):
-     return RegsRiscv64::Read(buffer.data());
+     return RegsRiscv64::Read(buffer.data(), pid);
 +  case sizeof(mips_user_regs):
 +    return RegsMips::Read(buffer.data());
 +  case sizeof(mips64_user_regs):

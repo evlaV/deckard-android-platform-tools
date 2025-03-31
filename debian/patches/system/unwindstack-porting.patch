@@ -9,5 +9,5 @@ Forwarded: not-needed
 -#elif defined(__i386__) || defined(__x86_64__)
 +#else
  
- extern "C" void AsmGetRegs(void* regs);
- 
+ // Do not change this, some libraries depend on this function existing on
+ // these architectures.

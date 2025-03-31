@@ -33,7 +33,7 @@ Forwarded: not-needed
 -        }
      }
  
-     if (do_sync_push(apk_file, apk_dest.c_str(), false, CompressionType::Any, false)) {
+     if (do_sync_push(apk_file, apk_dest.c_str(), false, CompressionType::Any, false, false)) {
 @@ -457,7 +439,6 @@
          std::vector<const char*> argv, bool* use_fastdeploy,
          FastDeploy_AgentUpdateStrategy* agent_update_strategy) {

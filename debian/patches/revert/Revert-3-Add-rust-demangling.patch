@@ -14,18 +14,7 @@ Forwarded: not-needed
      "DexFiles.cpp",
      "DwarfCfa.cpp",
      "DwarfEhFrameWithHdr.cpp",
-@@ -124,10 +123,6 @@ cc_defaults {
-         "libprocinfo",
-     ],
- 
--    whole_static_libs: [
--        "librustc_demangle_static",
--    ],
--
-     shared_libs: [
-         "libbase",
-         "liblog",
-@@ -278,7 +273,6 @@ cc_defaults {
+@@ -314,7 +313,6 @@ cc_defaults {
          "tests/AndroidUnwinderTest.cpp",
          "tests/ArmExidxDecodeTest.cpp",
          "tests/ArmExidxExtractTest.cpp",
