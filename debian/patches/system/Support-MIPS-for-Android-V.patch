@@ -1,0 +1,100 @@
+From: Roger Shimizu <rosh@debian.org>
+Date: Sun, 30 Mar 2025 21:46:16 -0700
+Subject: Support MIPS for Android-V
+
+Created this patch based on the upstream commits below:
+* [26ef69a] Use a shared_ptr for Elf memory objects.
+* [a9a7fad] Make Regs*::Read parameter const.
+---
+ system/unwinding/libunwindstack/RegsMips.cpp                  | 11 +++++------
+ system/unwinding/libunwindstack/RegsMips64.cpp                |  9 ++++-----
+ .../unwinding/libunwindstack/include/unwindstack/RegsMips.h   |  2 +-
+ .../unwinding/libunwindstack/include/unwindstack/RegsMips64.h |  2 +-
+ 4 files changed, 11 insertions(+), 13 deletions(-)
+
+diff --git a/system/unwinding/libunwindstack/RegsMips.cpp b/system/unwinding/libunwindstack/RegsMips.cpp
+index ab84691..5c1c9bf 100644
+--- a/system/unwinding/libunwindstack/RegsMips.cpp
++++ b/system/unwinding/libunwindstack/RegsMips.cpp
+@@ -98,8 +98,8 @@ void RegsMips::IterateRegisters(std::function<void(const char*, uint64_t)> fn) {
+   fn("pc", regs_[MIPS_REG_PC]);
+ }
+ 
+-Regs* RegsMips::Read(void* remote_data) {
+-  mips_user_regs* user = reinterpret_cast<mips_user_regs*>(remote_data);
++Regs* RegsMips::Read(const void* remote_data) {
++  const mips_user_regs* user = reinterpret_cast<const mips_user_regs*>(remote_data);
+   RegsMips* regs = new RegsMips();
+   uint32_t* reg_data = reinterpret_cast<uint32_t*>(regs->RawData());
+ 
+@@ -122,12 +122,11 @@ Regs* RegsMips::CreateFromUcontext(void* ucontext) {
+ }
+ 
+ bool RegsMips::StepIfSignalHandler(uint64_t elf_offset, Elf* elf, Memory* process_memory) {
+-  uint64_t data;
+-  uint64_t offset = 0;
+-  Memory* elf_memory = elf->memory();
+   // Read from elf memory since it is usually more expensive to read from
+   // process memory.
+-  if (!elf_memory->ReadFully(elf_offset, &data, sizeof(data))) {
++  uint64_t data;
++  uint64_t offset = 0;
++  if (!elf->memory()->ReadFully(elf_offset, &data, sizeof(data))) {
+     return false;
+   }
+ 
+diff --git a/system/unwinding/libunwindstack/RegsMips64.cpp b/system/unwinding/libunwindstack/RegsMips64.cpp
+index 7f600d3..bbd3edd 100644
+--- a/system/unwinding/libunwindstack/RegsMips64.cpp
++++ b/system/unwinding/libunwindstack/RegsMips64.cpp
+@@ -98,8 +98,8 @@ void RegsMips64::IterateRegisters(std::function<void(const char*, uint64_t)> fn)
+   fn("pc", regs_[MIPS64_REG_PC]);
+ }
+ 
+-Regs* RegsMips64::Read(void* remote_data) {
+-  mips64_user_regs* user = reinterpret_cast<mips64_user_regs*>(remote_data);
++Regs* RegsMips64::Read(const void* remote_data) {
++  const mips64_user_regs* user = reinterpret_cast<const mips64_user_regs*>(remote_data);
+   RegsMips64* regs = new RegsMips64();
+   uint64_t* reg_data = reinterpret_cast<uint64_t*>(regs->RawData());
+ 
+@@ -120,11 +120,10 @@ Regs* RegsMips64::CreateFromUcontext(void* ucontext) {
+ }
+ 
+ bool RegsMips64::StepIfSignalHandler(uint64_t elf_offset, Elf* elf, Memory* process_memory) {
+-  uint64_t data;
+-  Memory* elf_memory = elf->memory();
+   // Read from elf memory since it is usually more expensive to read from
+   // process memory.
+-  if (!elf_memory->Read(elf_offset, &data, sizeof(data))) {
++  uint64_t data;
++  if (!elf->memory()->Read(elf_offset, &data, sizeof(data))) {
+     return false;
+   }
+ 
+diff --git a/system/unwinding/libunwindstack/include/unwindstack/RegsMips.h b/system/unwinding/libunwindstack/include/unwindstack/RegsMips.h
+index 61e4dbf..e246d57 100644
+--- a/system/unwinding/libunwindstack/include/unwindstack/RegsMips.h
++++ b/system/unwinding/libunwindstack/include/unwindstack/RegsMips.h
+@@ -49,7 +49,7 @@ class RegsMips : public RegsImpl<uint32_t> {
+ 
+   Regs* Clone() override final;
+ 
+-  static Regs* Read(void* data);
++  static Regs* Read(const void* data);
+ 
+   static Regs* CreateFromUcontext(void* ucontext);
+ };
+diff --git a/system/unwinding/libunwindstack/include/unwindstack/RegsMips64.h b/system/unwinding/libunwindstack/include/unwindstack/RegsMips64.h
+index 012a8f0..bd54b51 100644
+--- a/system/unwinding/libunwindstack/include/unwindstack/RegsMips64.h
++++ b/system/unwinding/libunwindstack/include/unwindstack/RegsMips64.h
+@@ -49,7 +49,7 @@ class RegsMips64 : public RegsImpl<uint64_t> {
+ 
+   Regs* Clone() override final;
+ 
+-  static Regs* Read(void* data);
++  static Regs* Read(const void* data);
+ 
+   static Regs* CreateFromUcontext(void* ucontext);
+ };

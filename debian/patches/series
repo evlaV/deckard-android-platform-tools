@@ -18,6 +18,7 @@ system/stub-out-fastdeploy.patch
 system/Implement-const_iterator-operator.patch
 system/Drop-gki-dependency-from-mkbootimg.patch
 system/add-missing-headers.patch
+system/Support-MIPS-for-Android-V.patch
 development/typos.patch
 adbd/adbd-allow-usb-on-linux.patch
 adbd/adbd-allow-notifying-systemd.patch
