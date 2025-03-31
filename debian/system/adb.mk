@@ -25,7 +25,13 @@ ADB_SRC_FILES = \
   client/incremental_server.cpp \
   client/incremental_utils.cpp \
   shell_service_protocol.cpp \
-#  adb_mdns.cpp \
+  \
+  proto/adb_host.pb.cc \
+  proto/adb_known_hosts.pb.cc \
+  proto/app_processes.pb.cc \
+  proto/key_type.pb.cc \
+  proto/pairing.pb.cc \
+#  fastdeploy/proto/ApkEntry.pb.cc \
 #  client/fastdeploy.cpp \
 
 # packages/modules/adb/Android.bp

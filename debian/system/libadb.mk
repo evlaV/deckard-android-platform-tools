@@ -8,6 +8,7 @@ LIBADB_SRC_FILES := \
   sysdeps/env.cpp \
   sysdeps/errno.cpp \
   \
+  libs/adbconnection/common.cpp \
   proto/adb_known_hosts.pb.cc \
   proto/app_processes.pb.cc \
   proto/key_type.pb.cc \
@@ -84,6 +85,7 @@ CPPFLAGS += \
   -DANDROID_BASE_UNIQUE_FD_DISABLE_IMPLICIT_CONVERSION=1 \
   -Ipackages/modules/adb \
   -Ipackages/modules/adb/crypto/include \
+  -Ipackages/modules/adb/libs/adbconnection/include \
   -Ipackages/modules/adb/pairing_auth/include \
   -Ipackages/modules/adb/pairing_connection/include \
   -Ipackages/modules/adb/proto \

@@ -14,6 +14,7 @@ SOURCES = \
   posix_strerror_r.cpp \
   process.cpp \
   properties.cpp \
+  result.cpp \
   stringprintf.cpp \
   strings.cpp \
   threads.cpp \
