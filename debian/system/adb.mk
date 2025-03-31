@@ -133,3 +133,4 @@ debian/out/system/dummy.cpp:
 	echo 'std::optional<MdnsInfo> mdns_get_connect_service_info(const std::string& name) {return std::nullopt;}' >> $@
 	echo 'std::optional<MdnsInfo> mdns_get_pairing_service_info(const std::string& name) {return std::nullopt;}' >> $@
 	echo 'bool adb_secure_connect_by_service_name(const std::string& instance_name) {return false;}' >> $@
+	echo 'bool using_bonjour(void) {return true;}' >> $@
