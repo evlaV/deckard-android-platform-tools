@@ -21,6 +21,15 @@ Forwarded: not-needed
              GetOSVersion().c_str());
  }
  
+@@ -1339,7 +1339,7 @@ HostRequestResult handle_host_request(std::string_view service, TransportType ty
+         status.set_mdns_backend_forced(getenv("ADB_MDNS_OPENSCREEN") != nullptr);
+ 
+         status.set_version(std::string(PLATFORM_TOOLS_VERSION));
+-        status.set_build(android::build::GetBuildNumber());
++        status.set_build("debian");
+         status.set_executable_absolute_path(android::base::GetExecutablePath());
+         status.set_log_absolute_path(GetLogFilePath());
+         status.set_os(GetOSVersion());
 --- a/system/core/fastboot/fastboot.cpp
 +++ b/system/core/fastboot/fastboot.cpp
 @@ -64,11 +64,9 @@

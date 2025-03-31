@@ -4,6 +4,7 @@ android-platform-tools (35.0.2-1~exp1) UNRELEASED; urgency=medium
   * debian/patches:
     - Refresh patches.
     - Add patch to support MIPS for Android-V.
+    - Amend patch to keep local "debian" version.
 
  -- Roger Shimizu <rosh@debian.org>  Sun, 30 Mar 2025 21:28:22 -0700
 
