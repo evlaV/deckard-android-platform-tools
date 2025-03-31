@@ -98,7 +98,7 @@ bool ProcessTracer::Resume() {
 }
 
 bool ProcessTracer::Detach(pid_t tid) {
-  if (tid != pid_ && tids_.find(tid) == tids_.end()) {
+  if (tid != pid_ && !tids_.contains(tid)) {
     fprintf(stderr, "Tid %d does not belong to proc %d.\n", tid, pid_);
     return false;
   }
@@ -119,7 +119,7 @@ bool ProcessTracer::Detach(pid_t tid) {
 }
 
 bool ProcessTracer::Attach(pid_t tid) {
-  if (tid != pid_ && tids_.find(tid) == tids_.end()) {
+  if (tid != pid_ && !tids_.contains(tid)) {
     fprintf(stderr, "Tid %d does not belong to proc %d.\n", tid, pid_);
     return false;
   }

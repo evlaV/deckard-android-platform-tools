@@ -18,7 +18,7 @@
 
 #include <stdint.h>
 
-#include <vector>
+#include <memory>
 
 #include <unwindstack/DwarfSection.h>
 
@@ -27,7 +27,7 @@ namespace unwindstack {
 template <typename AddressType>
 class DwarfDebugFrame : public DwarfSectionImpl<AddressType> {
  public:
-  DwarfDebugFrame(Memory* memory) : DwarfSectionImpl<AddressType>(memory) {
+  DwarfDebugFrame(std::shared_ptr<Memory>& memory) : DwarfSectionImpl<AddressType>(memory) {
     this->cie32_value_ = static_cast<uint32_t>(-1);
     this->cie64_value_ = static_cast<uint64_t>(-1);
   }

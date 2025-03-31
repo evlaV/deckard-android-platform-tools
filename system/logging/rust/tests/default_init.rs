@@ -1,3 +1,7 @@
+//! Do not put multiple tests in this file. Tests in the same file run in the
+//! same executable, so if there are several tests in one file, only one test
+//! will successfully be able to initialize the logger.
+
 #[test]
 fn default_init() {
     assert!(logger::init(Default::default()));

@@ -15,9 +15,13 @@
 #include "utility.h"
 
 #include <sys/resource.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 #include <android-base/file.h>
+#include <processgroup/processgroup.h>
+
+#include <private/android_filesystem_config.h>
 
 namespace android {
 namespace snapshot {
@@ -30,6 +34,31 @@ bool SetThreadPriority([[maybe_unused]] int priority) {
 #else
     return true;
 #endif
+}
+
+bool SetProfiles([[maybe_unused]] std::initializer_list<std::string_view> profiles) {
+#ifdef __ANDROID__
+    if (setgid(AID_SYSTEM)) {
+        return false;
+    }
+    return SetTaskProfiles(gettid(), profiles);
+#else
+    return true;
+#endif
+}
+
+bool KernelSupportsIoUring() {
+    struct utsname uts {};
+    unsigned int major, minor;
+
+    uname(&uts);
+    if (sscanf(uts.release, "%u.%u", &major, &minor) != 2) {
+        return false;
+    }
+
+    // We will only support kernels from 5.6 onwards as IOSQE_ASYNC flag and
+    // IO_URING_OP_READ/WRITE opcodes were introduced only on 5.6 kernel
+    return major > 5 || (major == 5 && minor >= 6);
 }
 
 }  // namespace snapshot

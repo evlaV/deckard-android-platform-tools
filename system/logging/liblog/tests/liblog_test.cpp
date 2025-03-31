@@ -46,6 +46,8 @@
 #include <private/android_filesystem_config.h>
 #include <private/android_logger.h>
 
+#include "test_utils.h"
+
 using android::base::make_scope_guard;
 
 // #define ENABLE_FLAKY_TESTS
@@ -70,12 +72,6 @@ struct ListCloser {
   void operator()(struct logger_list* list) { android_logger_list_close(list); }
 };
 
-// Devices can set a system property indicating a slower device, giving a
-// multiplier to use for timeouts.  If the device has set this property, we use it.
-static unsigned int getAlarmSeconds(unsigned int seconds) {
-  return seconds * android::base::GetIntProperty("ro.hw_timeout_multiplier", 1);
-}
-
 // This function is meant to be used for most log tests, it does the following:
 // 1) Open the log_buffer with a blocking reader
 // 2) Write the messages via write_messages
@@ -90,7 +86,7 @@ static void RunLogTests(log_id_t log_buffer, FWrite write_messages, FCheck check
   pid_t pid = getpid();
 
   auto logger_list = std::unique_ptr<struct logger_list, ListCloser>{
-      android_logger_list_open(log_buffer, 0, 1000, pid)};
+      android_logger_list_open(log_buffer, 0, INT_MAX, pid)};
   ASSERT_TRUE(logger_list);
 
   write_messages();
@@ -111,7 +107,7 @@ static void RunLogTests(log_id_t log_buffer, FWrite write_messages, FCheck check
   }
 
   auto logger_list_non_block = std::unique_ptr<struct logger_list, ListCloser>{
-      android_logger_list_open(log_buffer, ANDROID_LOG_NONBLOCK, 1000, pid)};
+      android_logger_list_open(log_buffer, ANDROID_LOG_NONBLOCK, INT_MAX, pid)};
   ASSERT_TRUE(logger_list_non_block);
 
   size_t count = 0;
@@ -571,7 +567,7 @@ TEST(liblog, android_logger_list_read__cpu_signal) {
 
   v += pid & 0xFFFF;
 
-  ASSERT_TRUE(NULL != (logger_list = android_logger_list_open(LOG_ID_EVENTS, 0, 1000, pid)));
+  ASSERT_TRUE(NULL != (logger_list = android_logger_list_open(LOG_ID_EVENTS, 0, INT_MAX, pid)));
 
   int count = 0;
 
@@ -724,7 +720,7 @@ TEST(liblog, android_logger_list_read__cpu_thread) {
 
   v += pid & 0xFFFF;
 
-  ASSERT_TRUE(NULL != (logger_list = android_logger_list_open(LOG_ID_EVENTS, 0, 1000, pid)));
+  ASSERT_TRUE(NULL != (logger_list = android_logger_list_open(LOG_ID_EVENTS, 0, INT_MAX, pid)));
 
   int count = 0;
 
@@ -1534,7 +1530,7 @@ static int count_matching_ts(log_time ts) {
   pid_t pid = getpid();
 
   struct logger_list* logger_list =
-      android_logger_list_open(LOG_ID_EVENTS, ANDROID_LOG_NONBLOCK, 1000, pid);
+      android_logger_list_open(LOG_ID_EVENTS, ANDROID_LOG_NONBLOCK, INT_MAX, pid);
 
   int count = 0;
   if (logger_list == NULL) return count;
@@ -1623,108 +1619,56 @@ TEST(liblog, enoent) {
 
 // Below this point we run risks of setuid(AID_SYSTEM) which may affect others.
 
-#ifdef ENABLE_FLAKY_TESTS
 // Do not retest properties, and cannot log into LOG_ID_SECURITY
 TEST(liblog, __security) {
 #ifdef __ANDROID__
   static const char persist_key[] = "persist.logd.security";
-  static const char readonly_key[] = "ro.organization_owned";
-  // A silly default value that can never be in readonly_key so
-  // that it can be determined the property is not set.
-  static const char nothing_val[] = "_NOTHING_TO_SEE_HERE_";
   char persist[PROP_VALUE_MAX];
   char persist_hold[PROP_VALUE_MAX];
-  char readonly[PROP_VALUE_MAX];
 
-  // First part of this test requires the test itself to have the appropriate
-  // permissions. If we do not have them, we can not override them, so we
-  // bail rather than give a failing grade.
   property_get(persist_key, persist, "");
   fprintf(stderr, "INFO: getprop %s -> %s\n", persist_key, persist);
   strncpy(persist_hold, persist, PROP_VALUE_MAX);
-  property_get(readonly_key, readonly, nothing_val);
-  fprintf(stderr, "INFO: getprop %s -> %s\n", readonly_key, readonly);
-
-  if (!strcmp(readonly, nothing_val)) {
-    // Lets check if we can set the value (we should not be allowed to do so)
-    EXPECT_FALSE(__android_log_security());
-    fprintf(stderr, "WARNING: setting ro.organization_owned to a domain\n");
-    static const char domain[] = "com.google.android.SecOps.DeviceOwner";
-    EXPECT_NE(0, property_set(readonly_key, domain));
-    useconds_t total_time = 0;
-    static const useconds_t seconds = 1000000;
-    static const useconds_t max_time = 5 * seconds;  // not going to happen
-    static const useconds_t rest = 20 * 1000;
-    for (; total_time < max_time; total_time += rest) {
-      usleep(rest);  // property system does not guarantee performance.
-      property_get(readonly_key, readonly, nothing_val);
-      if (!strcmp(readonly, domain)) {
-        if (total_time > rest) {
-          fprintf(stderr, "INFO: took %u.%06u seconds to set property\n",
-                  (unsigned)(total_time / seconds),
-                  (unsigned)(total_time % seconds));
-        }
-        break;
-      }
-    }
-    EXPECT_STRNE(domain, readonly);
-  }
-
-  if (!strcasecmp(readonly, "false") || !readonly[0] ||
-      !strcmp(readonly, nothing_val)) {
-    // not enough permissions to run tests surrounding persist.logd.security
-    EXPECT_FALSE(__android_log_security());
-    return;
-  }
 
   if (!strcasecmp(persist, "true")) {
     EXPECT_TRUE(__android_log_security());
   } else {
     EXPECT_FALSE(__android_log_security());
   }
-  property_set(persist_key, "TRUE");
-  property_get(persist_key, persist, "");
+
   uid_t uid = getuid();
   gid_t gid = getgid();
   bool perm = (gid == AID_ROOT) || (uid == AID_ROOT);
-  EXPECT_STREQ(perm ? "TRUE" : persist_hold, persist);
-  if (!strcasecmp(persist, "true")) {
-    EXPECT_TRUE(__android_log_security());
-  } else {
-    EXPECT_FALSE(__android_log_security());
+  if (!perm) {
+    GTEST_LOG_(INFO) << "Not enough permissions to change properties.\n";
+    return;
   }
+
+  property_set(persist_key, "TRUE");
+  property_get(persist_key, persist, "");
+  EXPECT_STREQ("TRUE", persist);
+  EXPECT_TRUE(__android_log_security());
+
   property_set(persist_key, "FALSE");
   property_get(persist_key, persist, "");
-  EXPECT_STREQ(perm ? "FALSE" : persist_hold, persist);
-  if (!strcasecmp(persist, "true")) {
-    EXPECT_TRUE(__android_log_security());
-  } else {
-    EXPECT_FALSE(__android_log_security());
-  }
+  EXPECT_STREQ("FALSE", persist);
+  EXPECT_FALSE(__android_log_security());
+
   property_set(persist_key, "true");
   property_get(persist_key, persist, "");
-  EXPECT_STREQ(perm ? "true" : persist_hold, persist);
-  if (!strcasecmp(persist, "true")) {
-    EXPECT_TRUE(__android_log_security());
-  } else {
-    EXPECT_FALSE(__android_log_security());
-  }
+  EXPECT_STREQ("true", persist);
+  EXPECT_TRUE(__android_log_security());
+
   property_set(persist_key, "false");
   property_get(persist_key, persist, "");
-  EXPECT_STREQ(perm ? "false" : persist_hold, persist);
-  if (!strcasecmp(persist, "true")) {
-    EXPECT_TRUE(__android_log_security());
-  } else {
-    EXPECT_FALSE(__android_log_security());
-  }
+  EXPECT_STREQ("false", persist);
+  EXPECT_FALSE(__android_log_security());
+
   property_set(persist_key, "");
   property_get(persist_key, persist, "");
-  EXPECT_STREQ(perm ? "" : persist_hold, persist);
-  if (!strcasecmp(persist, "true")) {
-    EXPECT_TRUE(__android_log_security());
-  } else {
-    EXPECT_FALSE(__android_log_security());
-  }
+  EXPECT_STREQ("", persist);
+  EXPECT_FALSE(__android_log_security());
+
   property_set(persist_key, persist_hold);
   property_get(persist_key, persist, "");
   EXPECT_STREQ(persist_hold, persist);
@@ -1733,6 +1677,7 @@ TEST(liblog, __security) {
 #endif
 }
 
+#ifdef ENABLE_FLAKY_TESTS
 TEST(liblog, __security_buffer) {
 #ifdef __ANDROID__
   struct logger_list* logger_list;
@@ -1824,7 +1769,7 @@ TEST(liblog, __security_buffer) {
   pid_t pid = getpid();
 
   ASSERT_TRUE(NULL != (logger_list = android_logger_list_open(LOG_ID_SECURITY, ANDROID_LOG_NONBLOCK,
-                                                              1000, pid)));
+                                                              INT_MAX, pid)));
 
   log_time ts(CLOCK_MONOTONIC);
 

@@ -23,6 +23,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <string>
+
 #include <unwindstack/Elf.h>
 #include <unwindstack/Log.h>
 #include <unwindstack/Memory.h>
@@ -56,7 +58,8 @@ int main(int argc, char** argv) {
     }
   }
 
-  unwindstack::Elf elf(unwindstack::Memory::CreateFileMemory(argv[1], 0).release());
+  auto elf_memory = unwindstack::Memory::CreateFileMemory(argv[1], 0);
+  unwindstack::Elf elf(elf_memory);
   if (!elf.Init() || !elf.valid()) {
     printf("%s is not a valid elf file.\n", argv[1]);
     return 1;

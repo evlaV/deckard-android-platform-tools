@@ -16,7 +16,8 @@
 
 #pragma once
 
-#include <android-base/unique_fd.h>
+#include <binder/Common.h>
+#include <binder/unique_fd.h>
 #include <utils/Errors.h>
 #include <utils/RefBase.h>
 #include <utils/String16.h>
@@ -48,8 +49,7 @@ class IShellCallback;
  * (method calls, property get and set) is down through a low-level
  * protocol implemented on top of the transact() API.
  */
-class [[clang::lto_visibility_public]] IBinder : public virtual RefBase
-{
+class [[clang::lto_visibility_public]] LIBBINDER_EXPORTED IBinder : public virtual RefBase {
 public:
     enum {
         FIRST_CALL_TRANSACTION = 0x00000001,
@@ -102,6 +102,10 @@ public:
      */
     virtual const String16& getInterfaceDescriptor() const = 0;
 
+    /**
+     * Last known alive status, from last call. May be arbitrarily stale.
+     * May be incorrect if a service returns an incorrect status code.
+     */
     virtual bool            isBinderAlive() const = 0;
     virtual status_t        pingBinder() = 0;
     virtual status_t        dump(int fd, const Vector<String16>& args) = 0;
@@ -175,7 +179,7 @@ public:
      *
      * On death of @a keepAliveBinder, the RpcServer shuts down.
      */
-    [[nodiscard]] status_t setRpcClientDebug(android::base::unique_fd socketFd,
+    [[nodiscard]] status_t setRpcClientDebug(binder::unique_fd socketFd,
                                              const sp<IBinder>& keepAliveBinder);
 
     // NOLINTNEXTLINE(google-default-arguments)

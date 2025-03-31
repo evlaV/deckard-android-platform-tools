@@ -107,14 +107,6 @@ static void DropPrivs(bool klogd, bool auditd) {
     }
 }
 
-// GetBoolProperty that defaults to true if `ro.debuggable == true && ro.config.low_rawm == false`.
-static bool GetBoolPropertyEngSvelteDefault(const std::string& name) {
-    bool default_value =
-            GetBoolProperty("ro.debuggable", false) && !GetBoolProperty("ro.config.low_ram", false);
-
-    return GetBoolProperty(name, default_value);
-}
-
 static void readDmesg(LogAudit* al, LogKlog* kl) {
     if (!al && !kl) {
         return;
@@ -219,7 +211,9 @@ int main(int argc, char* argv[]) {
     }
 
     int fdPmesg = -1;
-    bool klogd = GetBoolPropertyEngSvelteDefault("ro.logd.kernel");
+    bool klogd_default =
+            GetBoolProperty("ro.debuggable", false) && !GetBoolProperty("ro.config.low_ram", false);
+    bool klogd = GetBoolProperty("ro.logd.kernel", klogd_default);
     if (klogd) {
         SetProperty("ro.logd.kernel", "true");
         static const char proc_kmsg[] = "/proc/kmsg";
@@ -242,8 +236,7 @@ int main(int argc, char* argv[]) {
 
     std::string buffer_type = GetProperty("logd.buffer_type", "serialized");
 
-    LogStatistics log_statistics(GetBoolPropertyEngSvelteDefault("logd.statistics"),
-                                 buffer_type == "serialized");
+    LogStatistics log_statistics(false, buffer_type == "serialized");
 
     // Serves the purpose of managing the last logs times read on a socket connection, and as a
     // reader lock on a range of log entries.

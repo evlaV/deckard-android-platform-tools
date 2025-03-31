@@ -30,7 +30,7 @@ FlashTask::FlashTask(const std::string& slot, const std::string& pname, const st
                      const bool apply_vbmeta, const FlashingPlan* fp)
     : pname_(pname), fname_(fname), slot_(slot), apply_vbmeta_(apply_vbmeta), fp_(fp) {}
 
-bool FlashTask::IsDynamicParitition(const ImageSource* source, const FlashTask* task) {
+bool FlashTask::IsDynamicPartition(const ImageSource* source, const FlashTask* task) {
     std::vector<char> contents;
     if (!source->ReadFile("super_empty.img", &contents)) {
         return false;
@@ -41,7 +41,7 @@ bool FlashTask::IsDynamicParitition(const ImageSource* source, const FlashTask* 
 
 void FlashTask::Run() {
     auto flash = [&](const std::string& partition) {
-        if (should_flash_in_userspace(fp_->source, partition) && !is_userspace_fastboot() &&
+        if (should_flash_in_userspace(fp_->source.get(), partition) && !is_userspace_fastboot() &&
             !fp_->force_flash) {
             die("The partition you are trying to flash is dynamic, and "
                 "should be flashed via fastbootd. Please run:\n"
@@ -152,7 +152,7 @@ bool OptimizedFlashSuperTask::CanOptimize(const ImageSource* source,
             continue;
         }
         auto flash_task = tasks[i + 2]->AsFlashTask();
-        if (!FlashTask::IsDynamicParitition(source, flash_task)) {
+        if (!FlashTask::IsDynamicPartition(source, flash_task)) {
             continue;
         }
         return true;
@@ -174,7 +174,7 @@ std::unique_ptr<OptimizedFlashSuperTask> OptimizedFlashSuperTask::Initialize(
         LOG(VERBOSE) << "Cannot optimize flashing super for all slots";
         return nullptr;
     }
-    if (!CanOptimize(fp->source, tasks)) {
+    if (!CanOptimize(fp->source.get(), tasks)) {
         return nullptr;
     }
 
@@ -224,7 +224,7 @@ std::unique_ptr<OptimizedFlashSuperTask> OptimizedFlashSuperTask::Initialize(
     auto remove_if_callback = [&](const auto& task) -> bool {
         if (auto flash_task = task->AsFlashTask()) {
             return helper->WillFlash(flash_task->GetPartitionAndSlot());
-        } else if (auto update_super_task = task->AsUpdateSuperTask()) {
+        } else if (task->AsUpdateSuperTask()) {
             return true;
         } else if (auto reboot_task = task->AsRebootTask()) {
             if (reboot_task->GetTarget() == "fastboot") {

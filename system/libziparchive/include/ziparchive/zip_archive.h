@@ -89,6 +89,9 @@ struct ZipEntryCommon {
   uint16_t gpbf;
   // Whether this entry is believed to be text or binary (for zipinfo).
   bool is_text;
+
+  // extra field size
+  uint16_t extra_field_size;
 };
 
 struct ZipEntry64;

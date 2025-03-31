@@ -14,12 +14,17 @@
  * limitations under the License.
  */
 
+#include <elf.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/ptrace.h>
+#include <sys/uio.h>
 
 #include <functional>
+#include <vector>
 
 #include <unwindstack/Elf.h>
+#include <unwindstack/Log.h>
 #include <unwindstack/MachineRiscv64.h>
 #include <unwindstack/MapInfo.h>
 #include <unwindstack/Memory.h>
@@ -29,8 +34,43 @@
 
 namespace unwindstack {
 
+uint64_t RegsRiscv64::GetVlenbFromLocal() {
+#if defined(__riscv)
+  uint64_t vlenb;
+  asm volatile("csrr %0, 0xc22\n" : "=r"(vlenb)::);
+  return vlenb;
+#else
+  Log::Fatal("%s:%d: On non-riscv device, attempt to get vlenb locally.", __FILE__, __LINE__);
+#endif
+}
+
+#if defined(__riscv)
+uint64_t RegsRiscv64::GetVlenbFromRemote(pid_t) {
+  // All riscv cores in a cpu are required to have the same vlenb value.
+  // Note: If a device exists with multiple cpus, but all of the cpus do not
+  // have the same vlenb, then this method will need to be modified.
+  return GetVlenbFromLocal();
+}
+#else
+uint64_t RegsRiscv64::GetVlenbFromRemote(pid_t pid) {
+  if (pid == 0) {
+    Log::Fatal("%s:%d: Attempt to get vlenb remotely from non-riscv device without pid.", __FILE__,
+               __LINE__);
+  }
+
+  // We only care about the state values, no need to get anything else.
+  struct riscv64_v_regset_state regs;
+  struct iovec io = {.iov_base = &regs, .iov_len = sizeof(regs)};
+  if (ptrace(PTRACE_GETREGSET, pid, NT_RISCV_VECTOR, reinterpret_cast<void*>(&io)) == -1) {
+    Log::Error("Failed to get vlenb from target process %d: %d", pid, errno);
+    return 0;
+  }
+  return regs.vlenb;
+}
+#endif
+
 RegsRiscv64::RegsRiscv64()
-    : RegsImpl<uint64_t>(RISCV64_REG_MAX, Location(LOCATION_REGISTER, RISCV64_REG_RA)) {}
+    : RegsImpl<uint64_t>(RISCV64_REG_COUNT, Location(LOCATION_REGISTER, RISCV64_REG_RA)) {}
 
 ArchEnum RegsRiscv64::Arch() {
   return ARCH_RISCV64;
@@ -95,14 +135,15 @@ void RegsRiscv64::IterateRegisters(std::function<void(const char*, uint64_t)> fn
   fn("a5", regs_[RISCV64_REG_A5]);
   fn("a6", regs_[RISCV64_REG_A6]);
   fn("a7", regs_[RISCV64_REG_A7]);
+  fn("vlenb", regs_[RISCV64_REG_VLENB]);
 }
 
-Regs* RegsRiscv64::Read(void* remote_data) {
-  riscv64_user_regs* user = reinterpret_cast<riscv64_user_regs*>(remote_data);
+Regs* RegsRiscv64::Read(const void* remote_data, pid_t pid) {
+  const riscv64_user_regs* user = reinterpret_cast<const riscv64_user_regs*>(remote_data);
 
   RegsRiscv64* regs = new RegsRiscv64();
-  memcpy(regs->RawData(), &user->regs[0], RISCV64_REG_MAX * sizeof(uint64_t));
-  // uint64_t* reg_data = reinterpret_cast<uint64_t*>(regs->RawData());
+  memcpy(regs->RawData(), &user->regs[0], RISCV64_REG_REAL_COUNT * sizeof(uint64_t));
+  regs->regs_[RISCV64_REG_VLENB] = GetVlenbFromRemote(pid);
   return regs;
 }
 
@@ -111,16 +152,21 @@ Regs* RegsRiscv64::CreateFromUcontext(void* ucontext) {
 
   RegsRiscv64* regs = new RegsRiscv64();
   memcpy(regs->RawData(), &riscv64_ucontext->uc_mcontext.__gregs[0],
-         RISCV64_REG_MAX * sizeof(uint64_t));
+         RISCV64_REG_REAL_COUNT * sizeof(uint64_t));
+
+  // TODO: Until b/323045700 is fixed, this code temporarily assumes
+  // this function will only be called on the same core an unwind occurs.
+  // If not, the vlenb value might be wrong.
+  uint64_t* raw_data = reinterpret_cast<uint64_t*>(regs->RawData());
+  raw_data[RISCV64_REG_VLENB] = GetVlenbFromLocal();
   return regs;
 }
 
 bool RegsRiscv64::StepIfSignalHandler(uint64_t elf_offset, Elf* elf, Memory* process_memory) {
-  uint64_t data;
-  Memory* elf_memory = elf->memory();
   // Read from elf memory since it is usually more expensive to read from
   // process memory.
-  if (!elf_memory->ReadFully(elf_offset, &data, sizeof(data))) {
+  uint64_t data;
+  if (!elf->memory()->ReadFully(elf_offset, &data, sizeof(data))) {
     return false;
   }
   // Look for the kernel sigreturn function.
@@ -135,7 +181,7 @@ bool RegsRiscv64::StepIfSignalHandler(uint64_t elf_offset, Elf* elf, Memory* pro
 
   // SP + sizeof(siginfo_t) + uc_mcontext offset + PC offset.
   if (!process_memory->ReadFully(regs_[RISCV64_REG_SP] + 0x80 + 0xb0 + 0x00, regs_.data(),
-                                 sizeof(uint64_t) * (RISCV64_REG_MAX))) {
+                                 sizeof(uint64_t) * (RISCV64_REG_REAL_COUNT))) {
     return false;
   }
   return true;
@@ -143,6 +189,17 @@ bool RegsRiscv64::StepIfSignalHandler(uint64_t elf_offset, Elf* elf, Memory* pro
 
 Regs* RegsRiscv64::Clone() {
   return new RegsRiscv64(*this);
+}
+
+uint16_t RegsRiscv64::Convert(uint16_t reg) {
+  if (reg == 0x1c22) {
+    return RISCV64_REG_VLENB;
+  }
+  if (reg == RISCV64_REG_VLENB) {
+    // It should never be valid for the register to be vlenb naturally.
+    return total_regs();
+  }
+  return reg;
 }
 
 }  // namespace unwindstack

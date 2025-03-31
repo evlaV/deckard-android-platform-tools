@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 
+#include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/unique_fd.h>
 #include <gflags/gflags.h>
@@ -38,11 +39,13 @@ DEFINE_bool(show_merged, false,
 DEFINE_bool(verify_merge_sequence, false, "Verify merge order sequencing");
 DEFINE_bool(show_merge_sequence, false, "Show merge order sequence");
 DEFINE_bool(show_raw_ops, false, "Show raw ops directly from the underlying parser");
+DEFINE_string(extract_to, "", "Extract the COW contents to the given file");
 
 namespace android {
 namespace snapshot {
 
 using android::base::borrowed_fd;
+using android::base::unique_fd;
 
 void MyLogger(android::base::LogId, android::base::LogSeverity severity, const char*, const char*,
               unsigned int, const char* message) {
@@ -53,7 +56,7 @@ void MyLogger(android::base::LogId, android::base::LogSeverity severity, const c
     }
 }
 
-static void ShowBad(CowReader& reader, const struct CowOperation* op) {
+static void ShowBad(CowReader& reader, const CowOperation* op) {
     size_t count;
     auto buffer = std::make_unique<uint8_t[]>(op->data_length);
 
@@ -71,15 +74,16 @@ static void ShowBad(CowReader& reader, const struct CowOperation* op) {
     }
 }
 
-static bool ShowRawOpStreamV2(borrowed_fd fd, const CowHeader& header) {
+static bool ShowRawOpStreamV2(borrowed_fd fd, const CowHeaderV3& header) {
     CowParserV2 parser;
     if (!parser.Parse(fd, header)) {
         LOG(ERROR) << "v2 parser failed";
         return false;
     }
-    for (const auto& op : *parser.ops()) {
+    for (const auto& op : *parser.get_v2ops()) {
         std::cout << op << "\n";
-        if (auto iter = parser.data_loc()->find(op.new_block); iter != parser.data_loc()->end()) {
+        if (auto iter = parser.xor_data_loc()->find(op.new_block);
+            iter != parser.xor_data_loc()->end()) {
             std::cout << "    data loc: " << iter->second << "\n";
         }
     }
@@ -87,7 +91,7 @@ static bool ShowRawOpStreamV2(borrowed_fd fd, const CowHeader& header) {
 }
 
 static bool ShowRawOpStream(borrowed_fd fd) {
-    CowHeader header;
+    CowHeaderV3 header;
     if (!ReadCowHeader(fd, &header)) {
         LOG(ERROR) << "parse header failed";
         return false;
@@ -104,10 +108,19 @@ static bool ShowRawOpStream(borrowed_fd fd) {
 }
 
 static bool Inspect(const std::string& path) {
-    android::base::unique_fd fd(open(path.c_str(), O_RDONLY));
+    unique_fd fd(open(path.c_str(), O_RDONLY));
     if (fd < 0) {
         PLOG(ERROR) << "open failed: " << path;
         return false;
+    }
+
+    unique_fd extract_to;
+    if (!FLAGS_extract_to.empty()) {
+        extract_to.reset(open(FLAGS_extract_to.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0664));
+        if (extract_to < 0) {
+            PLOG(ERROR) << "could not open " << FLAGS_extract_to << " for writing";
+            return false;
+        }
     }
 
     CowReader reader;
@@ -186,15 +199,26 @@ static bool Inspect(const std::string& path) {
 
         if (!FLAGS_silent && FLAGS_show_ops) std::cout << *op << "\n";
 
-        if (FLAGS_decompress && op->type == kCowReplaceOp && op->compression != kCowCompressNone) {
+        if ((FLAGS_decompress || extract_to >= 0) && op->type() == kCowReplaceOp) {
             if (reader.ReadData(op, buffer.data(), buffer.size()) < 0) {
                 std::cerr << "Failed to decompress for :" << *op << "\n";
                 success = false;
                 if (FLAGS_show_bad_data) ShowBad(reader, op);
             }
+            if (extract_to >= 0) {
+                off_t offset = uint64_t(op->new_block) * header.block_size;
+                if (!android::base::WriteFullyAtOffset(extract_to, buffer.data(), buffer.size(),
+                                                       offset)) {
+                    PLOG(ERROR) << "failed to write block " << op->new_block;
+                    return false;
+                }
+            }
+        } else if (extract_to >= 0 && !IsMetadataOp(*op) && op->type() != kCowZeroOp) {
+            PLOG(ERROR) << "Cannot extract op yet: " << *op;
+            return false;
         }
 
-        if (op->type == kCowSequenceOp && FLAGS_show_merge_sequence) {
+        if (op->type() == kCowSequenceOp && FLAGS_show_merge_sequence) {
             size_t read;
             std::vector<uint32_t> merge_op_blocks;
             size_t seq_len = op->data_length / sizeof(uint32_t);
@@ -212,13 +236,13 @@ static bool Inspect(const std::string& path) {
             }
         }
 
-        if (op->type == kCowCopyOp) {
+        if (op->type() == kCowCopyOp) {
             copy_ops++;
-        } else if (op->type == kCowReplaceOp) {
+        } else if (op->type() == kCowReplaceOp) {
             replace_ops++;
-        } else if (op->type == kCowZeroOp) {
+        } else if (op->type() == kCowZeroOp) {
             zero_ops++;
-        } else if (op->type == kCowXorOp) {
+        } else if (op->type() == kCowXorOp) {
             xor_ops++;
         }
 

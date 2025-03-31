@@ -18,6 +18,8 @@
 
 #include <stdint.h>
 
+#include <memory>
+
 namespace unwindstack {
 
 // Forward declarations.
@@ -25,7 +27,7 @@ class Memory;
 
 class DwarfMemory {
  public:
-  DwarfMemory(Memory* memory) : memory_(memory) {}
+  DwarfMemory(std::shared_ptr<Memory>& memory) : memory_(memory) {}
   virtual ~DwarfMemory() = default;
 
   bool ReadBytes(void* dst, size_t num_bytes);
@@ -61,7 +63,7 @@ class DwarfMemory {
   void clear_text_offset() { text_offset_ = static_cast<uint64_t>(-1); }
 
  private:
-  Memory* memory_;
+  std::shared_ptr<Memory> memory_;
   uint64_t cur_offset_ = 0;
 
   int64_t pc_offset_ = INT64_MAX;

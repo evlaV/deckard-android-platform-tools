@@ -43,14 +43,14 @@ void SimpleLogBuffer::Init() {
 }
 
 std::list<LogBufferElement>::iterator SimpleLogBuffer::GetOldest(log_id_t log_id) {
-    auto it = logs().begin();
+    auto it = logs_.begin();
     if (oldest_[log_id]) {
         it = *oldest_[log_id];
     }
-    while (it != logs().end() && it->log_id() != log_id) {
+    while (it != logs_.end() && it->log_id() != log_id) {
         it++;
     }
-    if (it != logs().end()) {
+    if (it != logs_.end()) {
         oldest_[log_id] = it;
     }
     return it;
@@ -290,7 +290,7 @@ std::list<LogBufferElement>::iterator SimpleLogBuffer::Erase(
 
     log_id_for_each(i) {
         if (oldest_is_it[i]) {
-            if (__predict_false(it == logs().end())) {
+            if (__predict_false(it == logs_.end())) {
                 oldest_[i] = std::nullopt;
             } else {
                 oldest_[i] = it;  // Store the next iterator even if it does not correspond to

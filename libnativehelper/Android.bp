@@ -14,6 +14,7 @@
 
 package {
     default_applicable_licenses: ["libnativehelper_license"],
+    default_team: "trendy_team_art_mainline",
 }
 
 // Added automatically by a large-scale-change
@@ -98,22 +99,21 @@ cc_library_headers {
         "com.android.art",
         "com.android.art.debug",
     ],
-    min_sdk_version: "S",
+    min_sdk_version: "S", // 31
 }
 
-cc_library_shared {
-    name: "libnativehelper",
+// This library contains code that is compatible with
+// both ART and JVM. All code specific to ART should go
+// inside libnativehelper directly.
+cc_library_static {
+    name: "libnativehelper_any_vm",
     defaults: ["libnativehelper_defaults"],
-    bootstrap: false,
     host_supported: true,
     srcs: [
         "DlHelp.c",
         "ExpandableString.c",
         "JNIHelp.c",
-        "JNIPlatformHelp.c",
-        "JniConstants.c",
         "JniInvocation.c",
-        "file_descriptor_jni.c",
     ],
     export_include_dirs: [
         "header_only_include",
@@ -122,6 +122,32 @@ cc_library_shared {
         "include_platform",
         "include_platform_header_only",
     ],
+    visibility: ["//frameworks/base/libs/nativehelper_jvm"],
+    stl: "none",
+    apex_available: [
+        "com.android.art",
+        "com.android.art.debug",
+    ],
+    min_sdk_version: "S", // 31
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
+}
+
+cc_library_shared {
+    name: "libnativehelper",
+    defaults: ["libnativehelper_defaults"],
+    bootstrap: false,
+    host_supported: true,
+    srcs: [
+        "JNIPlatformHelp.c",
+        "JniConstants.c",
+        "file_descriptor_jni.c",
+    ],
+    whole_static_libs: ["libnativehelper_any_vm"],
+    export_static_lib_headers: ["libnativehelper_any_vm"],
     stl: "none",
     stubs: {
         symbol_file: "libnativehelper.map.txt",
@@ -132,7 +158,7 @@ cc_library_shared {
         "com.android.art",
         "com.android.art.debug",
     ],
-    min_sdk_version: "S",
+    min_sdk_version: "S", // 31
 }
 
 // Lazy loading version of libnativehelper that can be used by code
@@ -159,56 +185,37 @@ cc_library_static {
     },
 }
 
-//
-// NDK-only build for the target (device), using libc++.
+// NDK-only build for the target (device).
 // - Relies only on NDK exposed functionality.
 // - This doesn't include JniInvocation.
-//
-
+// - This library is less than 20 KB - it is recommended that callers link it statically.
+// - Used to link libc++ (hence the name) but no longer does.
 cc_library {
     name: "libnativehelper_compat_libc++",
     defaults: ["libnativehelper_defaults"],
-    header_libs: ["jni_headers"],
+    host_supported: true,
     cflags: ["-Werror"],
+
+    header_libs: ["jni_headers"],
     export_header_lib_headers: ["jni_headers"],
     export_include_dirs: [
         "header_only_include",
         "include",
     ],
-    host_supported: true,
     local_include_dirs: [
-        "header_only_include",
         "include_platform_header_only",
     ],
     srcs: [
         "ExpandableString.c",
         "JNIHelp.c",
     ],
+
     min_sdk_version: "29",
     sdk_version: "19",
     stl: "none",
     apex_available: [
+        "//apex_available:anyapex",
         "//apex_available:platform",
-        "com.android.art",
-        "com.android.art.debug",
-        "com.android.extservices",
-        "com.android.tethering",
-    ],
-    visibility: [
-        "//art:__subpackages__",
-        "//cts:__subpackages__",
-        "//external/perfetto:__subpackages__",
-        "//frameworks/base/packages/Connectivity/tests/integration:__pkg__",
-        "//frameworks/base/packages/ConnectivityT:__subpackages__", // TODO: remove after code move
-        "//frameworks/base/packages/Tethering:__subpackages__",
-        "//frameworks/libs/net/common/native/bpfmapjni",
-        "//frameworks/libs/net/common/native/bpfutiljni",
-        "//libcore:__subpackages__",
-        "//packages/modules/Connectivity:__subpackages__",
-        "//packages/modules/ExtServices:__subpackages__",
-        "//packages/modules/NetworkStack:__subpackages__",
-        "//packages/modules/Permission/tests/cts:__subpackages__",
-        ":__subpackages__",
     ],
 }
 

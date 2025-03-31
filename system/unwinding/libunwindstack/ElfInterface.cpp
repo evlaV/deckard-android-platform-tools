@@ -21,10 +21,14 @@
 #include <string>
 #include <utility>
 
+#include <zlib.h>
+#include <zstd.h>
+
 #include <unwindstack/DwarfError.h>
 #include <unwindstack/DwarfSection.h>
 #include <unwindstack/ElfInterface.h>
 #include <unwindstack/Log.h>
+#include <unwindstack/Memory.h>
 #include <unwindstack/Regs.h>
 
 #include "DwarfDebugFrame.h"
@@ -75,13 +79,13 @@ bool ElfInterface::GetTextRange(uint64_t* addr, uint64_t* size) {
   return false;
 }
 
-std::unique_ptr<Memory> ElfInterface::CreateGnuDebugdataMemory() {
+std::shared_ptr<Memory> ElfInterface::CreateGnuDebugdataMemory() {
   if (gnu_debugdata_offset_ == 0 || gnu_debugdata_size_ == 0) {
     return nullptr;
   }
 
-  auto decompressed =
-      std::make_unique<MemoryXz>(memory_, gnu_debugdata_offset_, gnu_debugdata_size_, GetSoname());
+  auto decompressed = std::make_shared<MemoryXz>(memory_.get(), gnu_debugdata_offset_,
+                                                 gnu_debugdata_size_, GetSoname());
   if (!decompressed || !decompressed->Init()) {
     gnu_debugdata_offset_ = 0;
     gnu_debugdata_size_ = 0;
@@ -90,41 +94,98 @@ std::unique_ptr<Memory> ElfInterface::CreateGnuDebugdataMemory() {
   return decompressed;
 }
 
+static bool ZlibDecompress(uint8_t* compressed_data, size_t compressed_size, MemoryBuffer* memory) {
+  z_stream stream;
+  stream.zalloc = Z_NULL;
+  stream.zfree = Z_NULL;
+  stream.opaque = Z_NULL;
+  if (inflateInit(&stream) != Z_OK) {
+    return false;
+  }
+  stream.next_in = compressed_data;
+  stream.avail_in = compressed_size;
+  stream.next_out = memory->Data();
+  stream.avail_out = memory->Size();
+  int ret = inflate(&stream, Z_FINISH);
+  if (inflateEnd(&stream) != Z_OK) {
+    return false;
+  }
+  return ret == Z_STREAM_END;
+}
+
+static bool ZstdDecompress(uint8_t* compressed_data, size_t compressed_size, MemoryBuffer* memory) {
+  size_t decompress_size =
+      ZSTD_decompress(memory->Data(), memory->Size(), compressed_data, compressed_size);
+  return memory->Size() == decompress_size;
+}
+
+template <typename ChdrType>
+std::shared_ptr<Memory> CreateMemoryFromCompressedSection(SectionInfo& info,
+                                                          std::shared_ptr<Memory>& elf_memory) {
+  if (info.size < sizeof(ChdrType)) {
+    return nullptr;
+  }
+
+  uint8_t* compressed_data = elf_memory->GetPtr(info.offset);
+  std::vector<uint8_t> compressed;
+  if (compressed_data == nullptr || elf_memory->GetPtr(info.offset + info.size - 1) == nullptr) {
+    compressed.resize(info.size);
+    if (!elf_memory->ReadFully(info.offset, compressed.data(), info.size)) {
+      return nullptr;
+    }
+    compressed_data = compressed.data();
+  }
+
+  ChdrType* chdr = reinterpret_cast<ChdrType*>(compressed_data);
+  std::shared_ptr<MemoryBuffer> memory(new MemoryBuffer(chdr->ch_size, info.offset));
+
+  bool ret = false;
+  if (chdr->ch_type == ELFCOMPRESS_ZLIB) {
+    ret = ZlibDecompress(&compressed_data[sizeof(ChdrType)], info.size - sizeof(ChdrType),
+                         memory.get());
+  } else if (chdr->ch_type == ELFCOMPRESS_ZSTD) {
+    ret = ZstdDecompress(&compressed_data[sizeof(ChdrType)], info.size - sizeof(ChdrType),
+                         memory.get());
+  }
+  if (!ret) {
+    return nullptr;
+  }
+  // Set the section info to match the uncompressed section data.
+  info.size = chdr->ch_size;
+  info.flags &= ~SHF_COMPRESSED;
+  return memory;
+}
+
 template <typename ElfTypes>
 void ElfInterfaceImpl<ElfTypes>::InitHeaders() {
-  if (eh_frame_hdr_offset_ != 0) {
+  if (eh_frame_hdr_info_.offset != 0) {
     DwarfEhFrameWithHdr<AddressType>* eh_frame_hdr = new DwarfEhFrameWithHdr<AddressType>(memory_);
     eh_frame_.reset(eh_frame_hdr);
-    if (!eh_frame_hdr->EhFrameInit(eh_frame_offset_, eh_frame_size_, eh_frame_section_bias_) ||
-        !eh_frame_->Init(eh_frame_hdr_offset_, eh_frame_hdr_size_, eh_frame_hdr_section_bias_)) {
+    if (!eh_frame_hdr->EhFrameInit(eh_frame_info_) || !eh_frame_->Init(eh_frame_hdr_info_)) {
+      eh_frame_hdr_info_ = {};
       eh_frame_.reset(nullptr);
     }
   }
 
-  if (eh_frame_.get() == nullptr && eh_frame_offset_ != 0) {
+  if (eh_frame_.get() == nullptr && eh_frame_info_.offset != 0) {
     // If there is an eh_frame section without an eh_frame_hdr section,
     // or using the frame hdr object failed to init.
     eh_frame_.reset(new DwarfEhFrame<AddressType>(memory_));
-    if (!eh_frame_->Init(eh_frame_offset_, eh_frame_size_, eh_frame_section_bias_)) {
+    if (!eh_frame_->Init(eh_frame_info_)) {
+      eh_frame_info_ = {};
       eh_frame_.reset(nullptr);
     }
   }
 
-  if (eh_frame_.get() == nullptr) {
-    eh_frame_hdr_offset_ = 0;
-    eh_frame_hdr_section_bias_ = 0;
-    eh_frame_hdr_size_ = static_cast<uint64_t>(-1);
-    eh_frame_offset_ = 0;
-    eh_frame_section_bias_ = 0;
-    eh_frame_size_ = static_cast<uint64_t>(-1);
-  }
-
-  if (debug_frame_offset_ != 0) {
-    debug_frame_.reset(new DwarfDebugFrame<AddressType>(memory_));
-    if (!debug_frame_->Init(debug_frame_offset_, debug_frame_size_, debug_frame_section_bias_)) {
+  if (debug_frame_info_.offset != 0) {
+    std::shared_ptr<Memory> debug_memory = memory_;
+    if (debug_frame_info_.flags & SHF_COMPRESSED) {
+      debug_memory = CreateMemoryFromCompressedSection<ChdrType>(debug_frame_info_, memory_);
+    }
+    debug_frame_.reset(new DwarfDebugFrame<AddressType>(debug_memory));
+    if (!debug_frame_->Init(debug_frame_info_)) {
       debug_frame_.reset(nullptr);
-      debug_frame_offset_ = 0;
-      debug_frame_size_ = static_cast<uint64_t>(-1);
+      debug_frame_info_ = {};
     }
   }
 }
@@ -196,9 +257,11 @@ void ElfInterfaceImpl<ElfTypes>::ReadProgramHeaders(const EhdrType& ehdr, int64_
 
     case PT_GNU_EH_FRAME:
       // This is really the pointer to the .eh_frame_hdr section.
-      eh_frame_hdr_offset_ = phdr.p_offset;
-      eh_frame_hdr_section_bias_ = static_cast<uint64_t>(phdr.p_vaddr) - phdr.p_offset;
-      eh_frame_hdr_size_ = phdr.p_memsz;
+      eh_frame_hdr_info_ = {
+          .offset = phdr.p_offset,
+          .size = phdr.p_memsz,
+          .flags = phdr.p_flags,
+          .bias = static_cast<int64_t>(static_cast<uint64_t>(phdr.p_vaddr) - phdr.p_offset)};
       break;
 
     case PT_DYNAMIC:
@@ -316,20 +379,26 @@ void ElfInterfaceImpl<ElfTypes>::ReadSectionHeaders(const EhdrType& ehdr) {
         std::string name;
         if (memory_->ReadString(sec_offset + shdr.sh_name, &name, sec_size - shdr.sh_name)) {
           if (name == ".debug_frame") {
-            debug_frame_offset_ = shdr.sh_offset;
-            debug_frame_size_ = shdr.sh_size;
-            debug_frame_section_bias_ = static_cast<uint64_t>(shdr.sh_addr) - shdr.sh_offset;
+            debug_frame_info_ = {
+                .offset = shdr.sh_offset,
+                .size = shdr.sh_size,
+                .flags = shdr.sh_flags,
+                .bias = static_cast<int64_t>(static_cast<uint64_t>(shdr.sh_addr) - shdr.sh_offset)};
           } else if (name == ".gnu_debugdata") {
             gnu_debugdata_offset_ = shdr.sh_offset;
             gnu_debugdata_size_ = shdr.sh_size;
           } else if (name == ".eh_frame") {
-            eh_frame_offset_ = shdr.sh_offset;
-            eh_frame_section_bias_ = static_cast<uint64_t>(shdr.sh_addr) - shdr.sh_offset;
-            eh_frame_size_ = shdr.sh_size;
-          } else if (eh_frame_hdr_offset_ == 0 && name == ".eh_frame_hdr") {
-            eh_frame_hdr_offset_ = shdr.sh_offset;
-            eh_frame_hdr_section_bias_ = static_cast<uint64_t>(shdr.sh_addr) - shdr.sh_offset;
-            eh_frame_hdr_size_ = shdr.sh_size;
+            eh_frame_info_ = {
+                .offset = shdr.sh_offset,
+                .size = shdr.sh_size,
+                .flags = shdr.sh_flags,
+                .bias = static_cast<int64_t>(static_cast<uint64_t>(shdr.sh_addr) - shdr.sh_offset)};
+          } else if (eh_frame_hdr_info_.offset == 0 && name == ".eh_frame_hdr") {
+            eh_frame_hdr_info_ = {
+                .offset = shdr.sh_offset,
+                .size = shdr.sh_size,
+                .flags = shdr.sh_flags,
+                .bias = static_cast<int64_t>(static_cast<uint64_t>(shdr.sh_addr) - shdr.sh_offset)};
           } else if (name == ".data") {
             data_offset_ = shdr.sh_offset;
             data_vaddr_start_ = shdr.sh_addr;
@@ -424,7 +493,7 @@ bool ElfInterfaceImpl<ElfTypes>::GetFunctionName(uint64_t addr, SharedString* na
   }
 
   for (const auto symbol : symbols_) {
-    if (symbol->template GetName<SymType>(addr, memory_, name, func_offset)) {
+    if (symbol->template GetName<SymType>(addr, memory_.get(), name, func_offset)) {
       return true;
     }
   }
@@ -439,7 +508,7 @@ bool ElfInterfaceImpl<ElfTypes>::GetGlobalVariable(const std::string& name,
   }
 
   for (const auto symbol : symbols_) {
-    if (symbol->template GetGlobal<SymType>(memory_, name, memory_address)) {
+    if (symbol->template GetGlobal<SymType>(memory_.get(), name, memory_address)) {
       return true;
     }
   }

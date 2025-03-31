@@ -74,8 +74,8 @@ void RegsX86::IterateRegisters(std::function<void(const char*, uint64_t)> fn) {
   fn("eip", regs_[X86_REG_EIP]);
 }
 
-Regs* RegsX86::Read(void* user_data) {
-  x86_user_regs* user = reinterpret_cast<x86_user_regs*>(user_data);
+Regs* RegsX86::Read(const void* user_data) {
+  const x86_user_regs* user = reinterpret_cast<const x86_user_regs*>(user_data);
 
   RegsX86* regs = new RegsX86();
   (*regs)[X86_REG_EAX] = user->eax;
@@ -113,11 +113,10 @@ Regs* RegsX86::CreateFromUcontext(void* ucontext) {
 }
 
 bool RegsX86::StepIfSignalHandler(uint64_t elf_offset, Elf* elf, Memory* process_memory) {
-  uint64_t data;
-  Memory* elf_memory = elf->memory();
   // Read from elf memory since it is usually more expensive to read from
   // process memory.
-  if (!elf_memory->ReadFully(elf_offset, &data, sizeof(data))) {
+  uint64_t data;
+  if (!elf->memory()->ReadFully(elf_offset, &data, sizeof(data))) {
     return false;
   }
 

@@ -104,28 +104,28 @@ TEST(Expected, testMoveConstructible) {
 }
 
 TEST(Expected, testCopyConstructibleFromConvertibleType) {
-  exp_double e = 3.3f;
+  exp_double e = 3.3;
   exp_int e2 = e;
 
   EXPECT_TRUE(e.has_value());
   EXPECT_TRUE(e2.has_value());
-  EXPECT_EQ(3.3f, e.value());
+  EXPECT_EQ(3.3, e.value());
   EXPECT_EQ(3, e2.value());
 }
 
 TEST(Expected, testMoveConstructibleFromConvertibleType) {
-  exp_double e = 3.3f;
+  exp_double e = 3.3;
   exp_int e2 = std::move(e);
 
   EXPECT_TRUE(e.has_value());
   EXPECT_TRUE(e2.has_value());
-  EXPECT_EQ(3.3f, e.value());
+  EXPECT_EQ(3.3, e.value());
   EXPECT_EQ(3, e2.value());
 }
 
 TEST(Expected, testConstructibleFromValue) {
   exp_int e = 3;
-  exp_double e2 = 5.5f;
+  exp_double e2 = 5.5;
   exp_string e3 = std::string("hello");
   exp_complex e4 = T(10, 20);
   exp_void e5 = {};
@@ -136,7 +136,7 @@ TEST(Expected, testConstructibleFromValue) {
   EXPECT_TRUE(e4.has_value());
   EXPECT_TRUE(e5.has_value());
   EXPECT_EQ(3, e.value());
-  EXPECT_EQ(5.5f, e2.value());
+  EXPECT_EQ(5.5, e2.value());
   EXPECT_EQ("hello", e3.value());
   EXPECT_EQ(T(10,20), e4.value());
 }
@@ -151,7 +151,7 @@ TEST(Expected, testConstructibleFromMovedValue) {
 }
 
 TEST(Expected, testConstructibleFromConvertibleValue) {
-  exp_int e = 3.3f; // double to int
+  exp_int e = 3.3;         // double to int
   exp_string e2 = "hello"; // char* to std::string
   EXPECT_TRUE(e.has_value());
   EXPECT_EQ(3, e.value());
@@ -164,7 +164,7 @@ TEST(Expected, testConstructibleFromUnexpected) {
   exp_int::unexpected_type unexp = unexpected(10);
   exp_int e = unexp;
 
-  exp_double::unexpected_type unexp2 = unexpected(10.5f);
+  exp_double::unexpected_type unexp2 = unexpected(10.5);
   exp_double e2 = unexp2;
 
   exp_string::unexpected_type unexp3 = unexpected(std::string("error"));
@@ -178,14 +178,14 @@ TEST(Expected, testConstructibleFromUnexpected) {
   EXPECT_FALSE(e3.has_value());
   EXPECT_FALSE(e4.has_value());
   EXPECT_EQ(10, e.error());
-  EXPECT_EQ(10.5f, e2.error());
+  EXPECT_EQ(10.5, e2.error());
   EXPECT_EQ("error", e3.error());
   EXPECT_EQ(10, e4.error());
 }
 
 TEST(Expected, testMoveConstructibleFromUnexpected) {
   exp_int e = unexpected(10);
-  exp_double e2 = unexpected(10.5f);
+  exp_double e2 = unexpected(10.5);
   exp_string e3 = unexpected(std::string("error"));
   exp_void e4 = unexpected(10);
 
@@ -194,7 +194,7 @@ TEST(Expected, testMoveConstructibleFromUnexpected) {
   EXPECT_FALSE(e3.has_value());
   EXPECT_FALSE(e4.has_value());
   EXPECT_EQ(10, e.error());
-  EXPECT_EQ(10.5f, e2.error());
+  EXPECT_EQ(10.5, e2.error());
   EXPECT_EQ("error", e3.error());
   EXPECT_EQ(10, e4.error());
 }
@@ -259,9 +259,9 @@ TEST(Expected, testAssignableFromValue) {
   e = 20;
   EXPECT_EQ(20, e.value());
 
-  exp_double e2 = 3.5f;
-  e2 = 10.5f;
-  EXPECT_EQ(10.5f, e2.value());
+  exp_double e2 = 3.5;
+  e2 = 10.5;
+  EXPECT_EQ(10.5, e2.value());
 
   exp_string e3 = "hello";
   e3 = "world";
@@ -279,10 +279,10 @@ TEST(Expected, testAssignableFromUnexpected) {
   EXPECT_FALSE(e.has_value());
   EXPECT_EQ(30, e.error());
 
-  exp_double e2 = 3.5f;
-  e2 = unexpected(10.5f);
+  exp_double e2 = 3.5;
+  e2 = unexpected(10.5);
   EXPECT_FALSE(e2.has_value());
-  EXPECT_EQ(10.5f, e2.error());
+  EXPECT_EQ(10.5, e2.error());
 
   exp_string e3 = "hello";
   e3 = unexpected("world");
@@ -323,11 +323,11 @@ TEST(Expected, testEmplace) {
     T(int a, double b) noexcept : a(a), b(b) {}
   };
   expected<T, int> exp;
-  T& t = exp.emplace(3, 10.5f);
+  T& t = exp.emplace(3, 10.5);
 
   EXPECT_TRUE(exp.has_value());
   EXPECT_EQ(3, t.a);
-  EXPECT_EQ(10.5f, t.b);
+  EXPECT_EQ(10.5, t.b);
   EXPECT_EQ(3, exp.value().a);
   EXPECT_EQ(10.5, exp.value().b);
 
@@ -337,10 +337,14 @@ TEST(Expected, testEmplace) {
   EXPECT_TRUE(e.has_value());
 }
 
+// For the swap tests, call swap using an unqualified identifier, which should
+// find the namespace-scope android::base::swap() function using
+// argument-dependent lookup. The usual idiom for swapping an arbitrary C++ type
+// is `using std::swap; swap(...);`.
 TEST(Expected, testSwapExpectedExpected) {
   exp_int e = 10;
   exp_int e2 = 20;
-  e.swap(e2);
+  swap(e, e2);
 
   EXPECT_TRUE(e.has_value());
   EXPECT_TRUE(e2.has_value());
@@ -349,7 +353,7 @@ TEST(Expected, testSwapExpectedExpected) {
 
   exp_void e3;
   exp_void e4;
-  e3.swap(e4);
+  swap(e3, e4);
 
   EXPECT_TRUE(e3.has_value());
   EXPECT_TRUE(e4.has_value());
@@ -358,7 +362,7 @@ TEST(Expected, testSwapExpectedExpected) {
 TEST(Expected, testSwapUnexpectedUnexpected) {
   exp_int e = unexpected(10);
   exp_int e2 = unexpected(20);
-  e.swap(e2);
+  swap(e, e2);
   EXPECT_FALSE(e.has_value());
   EXPECT_FALSE(e2.has_value());
   EXPECT_EQ(20, e.error());
@@ -366,7 +370,7 @@ TEST(Expected, testSwapUnexpectedUnexpected) {
 
   exp_void e3 = unexpected(10);
   exp_void e4 = unexpected(20);
-  e3.swap(e4);
+  swap(e3, e4);
   EXPECT_FALSE(e3.has_value());
   EXPECT_FALSE(e4.has_value());
   EXPECT_EQ(20, e3.error());
@@ -376,7 +380,7 @@ TEST(Expected, testSwapUnexpectedUnexpected) {
 TEST(Expected, testSwapExpectedUnepected) {
   exp_int e = 10;
   exp_int e2 = unexpected(30);
-  e.swap(e2);
+  swap(e, e2);
   EXPECT_FALSE(e.has_value());
   EXPECT_TRUE(e2.has_value());
   EXPECT_EQ(30, e.error());
@@ -384,10 +388,39 @@ TEST(Expected, testSwapExpectedUnepected) {
 
   exp_void e3;
   exp_void e4 = unexpected(10);
-  e3.swap(e4);
+  swap(e3, e4);
   EXPECT_FALSE(e3.has_value());
   EXPECT_TRUE(e4.has_value());
   EXPECT_EQ(10, e3.error());
+}
+
+TEST(Expected, testNonswappable) {
+  struct NoSwap {
+    NoSwap(int val) : val(val) {}
+    NoSwap(const NoSwap& other) : val(other.val) {}
+    NoSwap(NoSwap&& other) : val(other.val) {}
+    int val;
+  };
+
+  // NoSwap has no namespace-scope swap function, and because it lacks a
+  // move assignment operator, std::swap is also not defined for it.
+  static_assert(!std::is_move_assignable_v<NoSwap>);
+  static_assert(!std::is_swappable_v<NoSwap>);
+
+  // A non-swappable type may still be used in the expected class.
+  expected<NoSwap, int> e1(NoSwap(3));
+  EXPECT_EQ(3, e1.value().val);
+  expected<int, NoSwap> e2(unexpected(NoSwap(5)));
+  EXPECT_EQ(5, e2.error().val);
+  expected<void, NoSwap> e3(unexpected(NoSwap(7)));
+  EXPECT_EQ(7, e3.error().val);
+
+  static_assert(!std::is_move_assignable_v<decltype(e1)>);
+  static_assert(!std::is_move_assignable_v<decltype(e2)>);
+  static_assert(!std::is_move_assignable_v<decltype(e3)>);
+  static_assert(!std::is_swappable_v<decltype(e1)>);
+  static_assert(!std::is_swappable_v<decltype(e2)>);
+  static_assert(!std::is_swappable_v<decltype(e3)>);
 }
 
 TEST(Expected, testDereference) {
@@ -397,13 +430,13 @@ TEST(Expected, testDereference) {
     T() {}
     T(int a, double b) : a(a), b(b) {}
   };
-  expected<T, int> exp = T(3, 10.5f);
+  expected<T, int> exp = T(3, 10.5);
 
   EXPECT_EQ(3, exp->a);
-  EXPECT_EQ(10.5f, exp->b);
+  EXPECT_EQ(10.5, exp->b);
 
   EXPECT_EQ(3, (*exp).a);
-  EXPECT_EQ(10.5f, (*exp).b);
+  EXPECT_EQ(10.5, (*exp).b);
 }
 
 TEST(Expected, testTest) {
@@ -501,14 +534,14 @@ TEST(Expected, testDifferentErrors) {
 
 TEST(Expected, testCompareWithSameError) {
   exp_int e = unexpected(10);
-  exp_int::unexpected_type error = 10;
+  exp_int::unexpected_type error{10};
   EXPECT_TRUE(e == error);
   EXPECT_TRUE(error == e);
   EXPECT_FALSE(e != error);
   EXPECT_FALSE(error != e);
 
   exp_void e2 = unexpected(10);
-  exp_void::unexpected_type error2 = 10;
+  exp_void::unexpected_type error2{10};
   EXPECT_TRUE(e2 == error2);
   EXPECT_TRUE(error2 == e2);
   EXPECT_FALSE(e2 != error2);
@@ -517,14 +550,14 @@ TEST(Expected, testCompareWithSameError) {
 
 TEST(Expected, testCompareWithDifferentError) {
   exp_int e = unexpected(10);
-  exp_int::unexpected_type error = 20;
+  exp_int::unexpected_type error{20};
   EXPECT_FALSE(e == error);
   EXPECT_FALSE(error == e);
   EXPECT_TRUE(e != error);
   EXPECT_TRUE(error != e);
 
   exp_void e2 = unexpected(10);
-  exp_void::unexpected_type error2 = 20;
+  exp_void::unexpected_type error2{20};
   EXPECT_FALSE(e2 == error2);
   EXPECT_FALSE(error2 == e2);
   EXPECT_TRUE(e2 != error2);
@@ -659,7 +692,7 @@ size_t ConstructorTracker::move_assignment_called = 0;
 typedef expected<ConstructorTracker, int> exp_track;
 
 TEST(Expected, testNumberOfCopies) {
-  // default constructor
+  // ordinary constructor
   ConstructorTracker::Reset();
   exp_track e("hello");
   EXPECT_EQ(1U, ConstructorTracker::constructor_called);
@@ -732,12 +765,82 @@ TEST(Expected, testNumberOfCopies) {
   ConstructorTracker::Reset();
   exp_track e10 = "hello";
   exp_track e11 = "world";
-  std::swap(e10, e11);
+  swap(e10, e11);
   EXPECT_EQ(2U, ConstructorTracker::constructor_called);
   EXPECT_EQ(0U, ConstructorTracker::copy_constructor_called);
   EXPECT_EQ(1U, ConstructorTracker::move_constructor_called);
   EXPECT_EQ(0U, ConstructorTracker::copy_assignment_called);
   EXPECT_EQ(2U, ConstructorTracker::move_assignment_called);
+}
+
+TEST(Expected, testCopiesWithDifferentValueOrErrorTypes) {
+  ConstructorTracker::Reset();
+  // copy success value
+  expected<std::string, int> e1 = "hello";
+  expected<ConstructorTracker, int> e2 = e1;
+  // move success value
+  expected<std::string, int> e3 = "hello";
+  expected<ConstructorTracker, int> e4 = std::move(e3);
+  // copy error value
+  expected<int, std::string> e5 = unexpected("hello");
+  expected<int, ConstructorTracker> e6 = e5;
+  // move error value
+  expected<int, std::string> e7 = unexpected("hello");
+  expected<int, ConstructorTracker> e8 = std::move(e7);
+
+  EXPECT_EQ(4U, ConstructorTracker::constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::copy_constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::move_constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::copy_assignment_called);
+  EXPECT_EQ(0U, ConstructorTracker::move_assignment_called);
+}
+
+// Constructing an expected type from a different expected type where either the
+// value or the error type is ConstructorTracker in both expected types.
+TEST(Expected, testCopyOrMoveTrackerAcrossExpectedConversion) {
+  struct IntObj {
+    IntObj(int) {}
+  };
+
+  // same value type, copy
+  ConstructorTracker::Reset();
+  expected<ConstructorTracker, int> e1 = std::string("hello");
+  expected<ConstructorTracker, IntObj> e2 = e1;
+  EXPECT_EQ(1U, ConstructorTracker::constructor_called);
+  EXPECT_EQ(1U, ConstructorTracker::copy_constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::move_constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::copy_assignment_called);
+  EXPECT_EQ(0U, ConstructorTracker::move_assignment_called);
+
+  // same value type, move
+  ConstructorTracker::Reset();
+  expected<ConstructorTracker, int> e3 = std::string("hello");
+  expected<ConstructorTracker, IntObj> e4 = std::move(e3);
+  EXPECT_EQ(1U, ConstructorTracker::constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::copy_constructor_called);
+  EXPECT_EQ(1U, ConstructorTracker::move_constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::copy_assignment_called);
+  EXPECT_EQ(0U, ConstructorTracker::move_assignment_called);
+
+  // same error type, copy
+  ConstructorTracker::Reset();
+  expected<int, ConstructorTracker> e5 = unexpected(std::string("hello"));
+  expected<IntObj, ConstructorTracker> e6 = e5;
+  EXPECT_EQ(1U, ConstructorTracker::constructor_called);
+  EXPECT_EQ(1U, ConstructorTracker::copy_constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::move_constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::copy_assignment_called);
+  EXPECT_EQ(0U, ConstructorTracker::move_assignment_called);
+
+  // same error type, move
+  ConstructorTracker::Reset();
+  expected<int, ConstructorTracker> e7 = unexpected(std::string("hello"));
+  expected<IntObj, ConstructorTracker> e8 = std::move(e7);
+  EXPECT_EQ(1U, ConstructorTracker::constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::copy_constructor_called);
+  EXPECT_EQ(1U, ConstructorTracker::move_constructor_called);
+  EXPECT_EQ(0U, ConstructorTracker::copy_assignment_called);
+  EXPECT_EQ(0U, ConstructorTracker::move_assignment_called);
 }
 
 TEST(Expected, testNoCopyOnReturn) {
@@ -812,7 +915,7 @@ constexpr bool equals(const char* a, const char* b) {
 }
 
 TEST(Expected, testConstexpr) {
-  // Compliation error will occur if these expressions can't be
+  // Compilation error will occur if these expressions can't be
   // evaluated at compile time
   constexpr exp_int e(3);
   constexpr exp_int::unexpected_type err(3);
@@ -828,11 +931,13 @@ TEST(Expected, testConstexpr) {
   static_assert(exp_int(i).value() == 4);
   // copy construct from unexpected
   static_assert(exp_int(err).error() == 3);
-  // move costruct from unexpected
+  // move construct from unexpected
   static_assert(exp_int(unexpected(3)).error() == 3);
   // observers
   static_assert(*exp_int(3) == 3);
   static_assert(exp_int(3).has_value() == true);
+  static_assert(static_cast<bool>(exp_int(3)));
+  static_assert(!static_cast<bool>(exp_int(err)));
   static_assert(exp_int(3).value_or(4) == 3);
 
   typedef expected<const char*, int> exp_s;
@@ -873,4 +978,88 @@ TEST(Expected, testWithMoveOnlyType) {
   EXPECT_TRUE(e.has_value());
   EXPECT_TRUE(e2.has_value());
   EXPECT_EQ(3, *(e2.value()));
+}
+
+// Verify that operator bool doesn't cause surprising behavior when converting
+// between expected types. See wg21.link/LWG3836.
+TEST(Expected, testExpectedConversionWithBoolType) {
+  expected<bool, int> e1{false};
+  expected<bool, long> e2{e1};
+  EXPECT_TRUE(e1.has_value());
+  EXPECT_TRUE(e2.has_value());
+  EXPECT_FALSE(e1.value());
+  EXPECT_FALSE(e2.value());
+
+  expected<bool, int> e3{unexpected{17}};
+  expected<bool, long> e4{e3};
+  EXPECT_FALSE(e3.has_value());
+  EXPECT_FALSE(e4.has_value());
+  EXPECT_EQ(17, e3.error());
+  EXPECT_EQ(17, e4.error());
+}
+
+TEST(Expected, testConversionToClassWithExplicitCtor) {
+  struct IntObj {
+    explicit IntObj(int val) : val(val) {}
+    int val;
+  };
+
+  expected<int, int> e1(3);
+  expected<IntObj, int> e2(e1);
+  EXPECT_TRUE(e2.has_value());
+  EXPECT_EQ(3, e2.value().val);
+
+  expected<int, int> e3(unexpected(4));
+  expected<int, IntObj> e4(e3);
+  EXPECT_FALSE(e4.has_value());
+  EXPECT_EQ(4, e4.error().val);
+}
+
+TEST(Expected, testNoexcept) {
+  struct Foo {
+    Foo(int) noexcept {}
+  };
+  struct Bar {
+    Bar(Foo) noexcept {}
+  };
+  expected<Foo, Foo> e1{3};
+  expected<Foo, Foo> e2{4};
+  expected<Bar, Bar> e3{e1};
+  Foo foo{5};
+  static_assert(noexcept(expected<Foo, Foo>(e1)));
+  static_assert(noexcept(expected<Foo, Foo>(std::move(e1))));
+  static_assert(noexcept(expected<Foo, Foo>(foo)));
+  static_assert(noexcept(expected<Foo, Foo>(std::move(foo))));
+  static_assert(noexcept(expected<Foo, Foo>(unexpected(Foo(5)))));
+  static_assert(noexcept(expected<Bar, Bar>(e1)));
+  static_assert(noexcept(expected<Bar, Bar>(std::move(e1))));
+  static_assert(noexcept(expected<Bar, Bar>(foo)));
+  static_assert(noexcept(expected<Bar, Bar>(std::move(foo))));
+  static_assert(noexcept(expected<Bar, Bar>(unexpected(Bar(foo)))));
+  static_assert(noexcept(e2 = e1));
+  static_assert(noexcept(e2 = std::move(e1)));
+  static_assert(noexcept(e3 = e1));
+  static_assert(noexcept(e3 = std::move(e1)));
+  static_assert(noexcept(e1 = Foo(5)));
+  static_assert(noexcept(e3 = Foo(5)));
+
+  // std::string's move constructor is noexcept, but copying a string can throw
+  // bad_alloc.
+  expected<Foo, std::string> e11{11};
+  expected<Foo, std::string> e12{12};
+  expected<Bar, std::string> e13{e11};
+  std::string err = "hello";
+  static_assert(!noexcept(expected<Foo, std::string>(e11)));
+  static_assert(noexcept(expected<Foo, std::string>(std::move(e11))));
+  static_assert(noexcept(expected<Foo, std::string>(foo)));
+  static_assert(noexcept(expected<Foo, std::string>(std::move(foo))));
+  static_assert(noexcept(expected<Foo, std::string>(unexpected(std::move(err)))));
+  static_assert(!noexcept(expected<Bar, std::string>(e11)));
+  static_assert(noexcept(expected<Bar, std::string>(std::move(e11))));
+  static_assert(noexcept(expected<Bar, std::string>(foo)));
+  static_assert(noexcept(expected<Bar, std::string>(std::move(foo))));
+  static_assert(!noexcept(e12 = e11));
+  static_assert(noexcept(e12 = std::move(e11)));
+  static_assert(!noexcept(e13 = e11));
+  static_assert(noexcept(e13 = std::move(e11)));
 }

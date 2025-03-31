@@ -19,8 +19,7 @@
 #include <optional>
 #include <ostream>
 #include <unordered_set>
-
-#include <compositionengine/FenceResult.h>
+#include "ui/LayerStack.h"
 
 // TODO(b/129481165): remove the #pragma below and fix conversion issues
 #pragma clang diagnostic push
@@ -33,12 +32,17 @@
 #pragma clang diagnostic pop // ignored "-Wconversion -Wextra"
 
 #include <ftl/future.h>
+#include <ui/FenceResult.h>
 #include <utils/RefBase.h>
 #include <utils/Timers.h>
 
 namespace android {
 
 class Fence;
+
+namespace gui {
+struct LayerMetadata;
+}
 
 namespace compositionengine {
 
@@ -54,31 +58,8 @@ public:
     // Called before composition starts. Should return true if this layer has
     // pending updates which would require an extra display refresh cycle to
     // process.
-    virtual bool onPreComposition(nsecs_t refreshStartTime) = 0;
-
-    // Used with latchCompositionState()
-    enum class StateSubset {
-        // Gets the basic geometry (bounds, transparent region, visibility,
-        // transforms, alpha) for the layer, for computing visibility and
-        // coverage.
-        BasicGeometry,
-
-        // Gets the full geometry (crops, buffer transforms, metadata) and
-        // content (buffer or color) state for the layer.
-        GeometryAndContent,
-
-        // Gets the per frame content (buffer or color) state for the layer.
-        Content,
-
-        // Gets the cursor state for the layer.
-        Cursor,
-    };
-
-    // Prepares the output-independent composition state for the layer. The
-    // StateSubset argument selects what portion of the state is actually needed
-    // by the CompositionEngine code, since computing everything may be
-    // expensive.
-    virtual void prepareCompositionState(StateSubset) = 0;
+    virtual bool onPreComposition(nsecs_t refreshStartTime,
+                                  bool updatingOutputGeometryThisFrame) = 0;
 
     struct ClientCompositionTargetSettings {
         enum class BlurSetting {
@@ -116,7 +97,7 @@ public:
         const bool isSecure;
 
         // If set to true, the target buffer has protected content support.
-        const bool supportsProtectedContent;
+        const bool isProtected;
 
         // Viewport of the target being rendered to. This is used to determine
         // the shadow light position.
@@ -138,6 +119,9 @@ public:
 
         // Requested white point of the layer in nits
         const float whitePointNits;
+
+        // True if layers with 170M dataspace should be overridden to sRGB.
+        const bool treat170mAsSrgb;
     };
 
     // A superset of LayerSettings required by RenderEngine to compose a layer
@@ -150,14 +134,14 @@ public:
         uint64_t frameNumber = 0;
     };
 
-    // Returns the z-ordered list of LayerSettings to pass to RenderEngine::drawLayers. The list
-    // may contain shadows casted by the layer or the content of the layer itself.  If the layer
-    // does not render then an empty list will be returned.
-    virtual std::vector<LayerSettings> prepareClientCompositionList(
-            ClientCompositionTargetSettings&) = 0;
+    // Returns the LayerSettings to pass to RenderEngine::drawLayers. The state may contain shadows
+    // casted by the layer or the content of the layer itself. If the layer does not render then an
+    // empty optional will be returned.
+    virtual std::optional<LayerSettings> prepareClientComposition(
+            ClientCompositionTargetSettings&) const = 0;
 
     // Called after the layer is displayed to update the presentation fence
-    virtual void onLayerDisplayed(ftl::SharedFuture<FenceResult>) = 0;
+    virtual void onLayerDisplayed(ftl::SharedFuture<FenceResult>, ui::LayerStack layerStack) = 0;
 
     // Gets some kind of identifier for the layer for debug purposes.
     virtual const char* getDebugName() const = 0;
@@ -168,6 +152,8 @@ public:
     // Whether the layer should be rendered with rounded corners.
     virtual bool hasRoundedCorners() const = 0;
     virtual void setWasClientComposed(const sp<Fence>&) {}
+    virtual const gui::LayerMetadata* getMetadata() const = 0;
+    virtual const gui::LayerMetadata* getRelativeMetadata() const = 0;
 };
 
 // TODO(b/121291683): Specialize std::hash<> for sp<T> so these and others can
@@ -181,8 +167,7 @@ using LayerFESet = std::unordered_set<sp<LayerFE>, LayerFESpHash>;
 static inline bool operator==(const LayerFE::ClientCompositionTargetSettings& lhs,
                               const LayerFE::ClientCompositionTargetSettings& rhs) {
     return lhs.clip.hasSameRects(rhs.clip) && lhs.needsFiltering == rhs.needsFiltering &&
-            lhs.isSecure == rhs.isSecure &&
-            lhs.supportsProtectedContent == rhs.supportsProtectedContent &&
+            lhs.isSecure == rhs.isSecure && lhs.isProtected == rhs.isProtected &&
             lhs.viewport == rhs.viewport && lhs.dataspace == rhs.dataspace &&
             lhs.realContentIsVisible == rhs.realContentIsVisible &&
             lhs.clearContent == rhs.clearContent;
@@ -203,7 +188,7 @@ static inline void PrintTo(const LayerFE::ClientCompositionTargetSettings& setti
     PrintTo(settings.clip, os);
     *os << "\n    .needsFiltering = " << settings.needsFiltering;
     *os << "\n    .isSecure = " << settings.isSecure;
-    *os << "\n    .supportsProtectedContent = " << settings.supportsProtectedContent;
+    *os << "\n    .isProtected = " << settings.isProtected;
     *os << "\n    .viewport = ";
     PrintTo(settings.viewport, os);
     *os << "\n    .dataspace = ";

@@ -147,7 +147,8 @@ public:
 
     bool hasProtectedLayers() const;
 
-    bool hasSolidColorLayers() const;
+    // True if any layer in this cached set has CachingHint::Disabled
+    bool cachingHintExcludesLayers() const;
 
 private:
     const NonBufferHash mFingerprint;

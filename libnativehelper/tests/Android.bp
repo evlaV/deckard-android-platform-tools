@@ -1,6 +1,7 @@
 // Build the unit tests.
 
 package {
+    default_team: "trendy_team_art_mainline",
     // http://go/android-license-faq
     // A large-scale-change added 'default_applicable_licenses' to import
     // the below license kinds from "libnativehelper_license":
@@ -9,7 +10,7 @@ package {
 }
 
 cc_defaults {
-    name: "libnativehelper_test_defaults",
+    name: "libnativehelper_common_test_defaults",
     cflags: [
         // Base set of cflags used by all things ART.
         "-fno-rtti",
@@ -51,16 +52,21 @@ cc_defaults {
         // Enable thread annotations for std::mutex, etc.
         "-D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS",
     ],
+    tidy: true,
+}
+
+cc_defaults {
+    name: "libnativehelper_unit_test_defaults",
+    defaults: ["libnativehelper_common_test_defaults"],
     host_supported: true,
     test_options: {
         unit_test: true,
     },
-    tidy: true,
 }
 
 cc_test {
     name: "libnativehelper_tests",
-    defaults: ["libnativehelper_test_defaults"],
+    defaults: ["libnativehelper_unit_test_defaults"],
     test_suites: ["general-tests"],
     srcs: [
         "scoped_local_frame_test.cpp",
@@ -74,7 +80,7 @@ cc_test {
 
 cc_test {
     name: "libnativehelper_lazy_tests",
-    defaults: ["libnativehelper_test_defaults"],
+    defaults: ["libnativehelper_unit_test_defaults"],
     test_suites: ["general-tests"],
     srcs: ["libnativehelper_lazy_test.cpp"],
     shared_libs: ["liblog"],
@@ -91,8 +97,7 @@ cc_test {
 cc_test {
     name: "libnativehelper_internal_tests",
     defaults: [
-        "art_module_source_build_defaults",
-        "libnativehelper_test_defaults",
+        "libnativehelper_unit_test_defaults",
     ],
     srcs: [
         "ExpandableString_test.cpp",
@@ -100,4 +105,40 @@ cc_test {
     ],
     bootstrap: true,
     shared_libs: ["libnativehelper"],
+}
+
+cc_library {
+    name: "libnativehelper_internal_tests_jni",
+    defaults: [
+        "libnativehelper_common_test_defaults",
+    ],
+    host_supported: false,
+    srcs: [
+        "libnativehelper_test.cpp",
+    ],
+    shared_libs: [
+        "libnativehelper",
+        "liblog",
+    ],
+    static_libs: [
+        "libbase",
+        "libgmock",
+        "libnativetesthelper_jni",
+    ],
+}
+
+android_test {
+    name: "LibnativehelperInternalTestCases",
+    srcs: [
+        "src/**/*.java",
+    ],
+    jni_libs: [
+        "libnativehelper_internal_tests_jni",
+    ],
+    static_libs: [
+        "ctstestrunner-axt",
+        "nativetesthelper",
+    ],
+    manifest: "AndroidManifest.xml",
+    test_suites: ["general-tests"],
 }

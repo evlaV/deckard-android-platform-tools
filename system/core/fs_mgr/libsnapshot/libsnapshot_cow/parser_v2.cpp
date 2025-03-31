@@ -18,41 +18,14 @@
 #include <android-base/file.h>
 #include <android-base/logging.h>
 
+#include <libsnapshot/cow_format.h>
+
 namespace android {
 namespace snapshot {
 
 using android::base::borrowed_fd;
 
-bool ReadCowHeader(android::base::borrowed_fd fd, CowHeader* header) {
-    if (lseek(fd.get(), 0, SEEK_SET) < 0) {
-        PLOG(ERROR) << "lseek header failed";
-        return false;
-    }
-
-    memset(header, 0, sizeof(*header));
-
-    if (!android::base::ReadFully(fd, &header->prefix, sizeof(header->prefix))) {
-        return false;
-    }
-    if (header->prefix.magic != kCowMagicNumber) {
-        LOG(ERROR) << "Header Magic corrupted. Magic: " << header->prefix.magic
-                   << "Expected: " << kCowMagicNumber;
-        return false;
-    }
-    if (header->prefix.header_size > sizeof(CowHeader)) {
-        LOG(ERROR) << "Unknown CowHeader size (got " << header->prefix.header_size
-                   << " bytes, expected at most " << sizeof(CowHeader) << " bytes)";
-        return false;
-    }
-
-    if (lseek(fd.get(), 0, SEEK_SET) < 0) {
-        PLOG(ERROR) << "lseek header failed";
-        return false;
-    }
-    return android::base::ReadFully(fd, header, header->prefix.header_size);
-}
-
-bool CowParserV2::Parse(borrowed_fd fd, const CowHeader& header, std::optional<uint64_t> label) {
+bool CowParserV2::Parse(borrowed_fd fd, const CowHeaderV3& header, std::optional<uint64_t> label) {
     auto pos = lseek(fd.get(), 0, SEEK_END);
     if (pos < 0) {
         PLOG(ERROR) << "lseek end failed";
@@ -66,18 +39,9 @@ bool CowParserV2::Parse(borrowed_fd fd, const CowHeader& header, std::optional<u
                    << sizeof(CowFooter);
         return false;
     }
-    if (header_.op_size != sizeof(CowOperation)) {
+    if (header_.op_size != sizeof(CowOperationV2)) {
         LOG(ERROR) << "Operation size unknown, read " << header_.op_size << ", expected "
-                   << sizeof(CowOperation);
-        return false;
-    }
-    if (header_.cluster_ops == 1) {
-        LOG(ERROR) << "Clusters must contain at least two operations to function.";
-        return false;
-    }
-    if (header_.op_size != sizeof(CowOperation)) {
-        LOG(ERROR) << "Operation size unknown, read " << header_.op_size << ", expected "
-                   << sizeof(CowOperation);
+                   << sizeof(CowOperationV2);
         return false;
     }
     if (header_.cluster_ops == 1) {
@@ -85,8 +49,7 @@ bool CowParserV2::Parse(borrowed_fd fd, const CowHeader& header, std::optional<u
         return false;
     }
 
-    if ((header_.prefix.major_version > kCowVersionMajor) ||
-        (header_.prefix.minor_version != kCowVersionMinor)) {
+    if (header_.prefix.major_version > 2 || header_.prefix.minor_version != 0) {
         LOG(ERROR) << "Header version mismatch, "
                    << "major version: " << header_.prefix.major_version
                    << ", expected: " << kCowVersionMajor
@@ -100,7 +63,7 @@ bool CowParserV2::Parse(borrowed_fd fd, const CowHeader& header, std::optional<u
 
 bool CowParserV2::ParseOps(borrowed_fd fd, std::optional<uint64_t> label) {
     uint64_t pos;
-    auto data_loc = std::make_shared<std::unordered_map<uint64_t, uint64_t>>();
+    auto xor_data_loc = std::make_shared<std::unordered_map<uint64_t, uint64_t>>();
 
     // Skip the scratch space
     if (header_.prefix.major_version >= 2 && (header_.buffer_size > 0)) {
@@ -123,23 +86,23 @@ bool CowParserV2::ParseOps(borrowed_fd fd, std::optional<uint64_t> label) {
     uint64_t data_pos = 0;
 
     if (header_.cluster_ops) {
-        data_pos = pos + header_.cluster_ops * sizeof(CowOperation);
+        data_pos = pos + header_.cluster_ops * sizeof(CowOperationV2);
     } else {
-        data_pos = pos + sizeof(CowOperation);
+        data_pos = pos + sizeof(CowOperationV2);
     }
 
-    auto ops_buffer = std::make_shared<std::vector<CowOperation>>();
+    auto ops_buffer = std::make_shared<std::vector<CowOperationV2>>();
     uint64_t current_op_num = 0;
     uint64_t cluster_ops = header_.cluster_ops ?: 1;
     bool done = false;
 
     // Alternating op clusters and data
     while (!done) {
-        uint64_t to_add = std::min(cluster_ops, (fd_size_ - pos) / sizeof(CowOperation));
+        uint64_t to_add = std::min(cluster_ops, (fd_size_ - pos) / sizeof(CowOperationV2));
         if (to_add == 0) break;
         ops_buffer->resize(current_op_num + to_add);
         if (!android::base::ReadFully(fd, &ops_buffer->data()[current_op_num],
-                                      to_add * sizeof(CowOperation))) {
+                                      to_add * sizeof(CowOperationV2))) {
             PLOG(ERROR) << "read op failed";
             return false;
         }
@@ -148,9 +111,9 @@ bool CowParserV2::ParseOps(borrowed_fd fd, std::optional<uint64_t> label) {
             auto& current_op = ops_buffer->data()[current_op_num];
             current_op_num++;
             if (current_op.type == kCowXorOp) {
-                data_loc->insert({current_op.new_block, data_pos});
+                xor_data_loc->insert({current_op.new_block, data_pos});
             }
-            pos += sizeof(CowOperation) + GetNextOpOffset(current_op, header_.cluster_ops);
+            pos += sizeof(CowOperationV2) + GetNextOpOffset(current_op, header_.cluster_ops);
             data_pos += current_op.data_length + GetNextDataOffset(current_op, header_.cluster_ops);
 
             if (current_op.type == kCowClusterOp) {
@@ -222,15 +185,59 @@ bool CowParserV2::ParseOps(borrowed_fd fd, std::optional<uint64_t> label) {
                        << ops_buffer->size();
             return false;
         }
-        if (ops_buffer->size() * sizeof(CowOperation) != footer_->op.ops_size) {
+        if (ops_buffer->size() * sizeof(CowOperationV2) != footer_->op.ops_size) {
             LOG(ERROR) << "ops size does not match ";
             return false;
         }
     }
 
-    ops_ = ops_buffer;
-    ops_->shrink_to_fit();
-    data_loc_ = data_loc;
+    v2_ops_ = ops_buffer;
+    v2_ops_->shrink_to_fit();
+    xor_data_loc_ = xor_data_loc;
+    return true;
+}
+
+bool CowParserV2::Translate(TranslatedCowOps* out) {
+    out->ops = std::make_shared<std::vector<CowOperationV3>>(v2_ops_->size());
+
+    // Translate the operation buffer from on disk to in memory
+    for (size_t i = 0; i < out->ops->size(); i++) {
+        const auto& v2_op = v2_ops_->at(i);
+
+        auto& new_op = out->ops->at(i);
+        new_op.set_type(v2_op.type);
+        // v2 ops always have 4k compression
+        new_op.set_compression_bits(0);
+        new_op.data_length = v2_op.data_length;
+
+        if (v2_op.new_block > std::numeric_limits<uint32_t>::max()) {
+            LOG(ERROR) << "Out-of-range new block in COW op: " << v2_op;
+            return false;
+        }
+        new_op.new_block = v2_op.new_block;
+
+        uint64_t source_info = v2_op.source;
+        if (new_op.type() != kCowLabelOp) {
+            source_info &= kCowOpSourceInfoDataMask;
+            if (source_info != v2_op.source) {
+                LOG(ERROR) << "Out-of-range source value in COW op: " << v2_op;
+                return false;
+            }
+        }
+        if (v2_op.compression != kCowCompressNone) {
+            if (header_.compression_algorithm == kCowCompressNone) {
+                header_.compression_algorithm = v2_op.compression;
+            } else if (header_.compression_algorithm != v2_op.compression) {
+                LOG(ERROR) << "COW has mixed compression types which is not supported;"
+                           << " previously saw " << header_.compression_algorithm << ", got "
+                           << v2_op.compression << ", op: " << v2_op;
+                return false;
+            }
+        }
+        new_op.set_source(source_info);
+    }
+
+    out->header = header_;
     return true;
 }
 

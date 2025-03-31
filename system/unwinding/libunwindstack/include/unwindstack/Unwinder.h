@@ -85,7 +85,7 @@ class Unwinder {
   static std::string FormatFrame(ArchEnum arch, const FrameData& frame,
                                  bool display_build_id = true);
 
-  void SetArch(ArchEnum arch) { arch_ = arch; };
+  void SetArch(ArchEnum arch) { arch_ = arch; }
 
   void SetJitDebug(JitDebug* jit_debug);
 

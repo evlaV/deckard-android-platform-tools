@@ -190,7 +190,7 @@ class MapInfo {
   // Otherwise, this function only returns the name of the map.
   std::string GetFullName();
 
-  Memory* CreateMemory(const std::shared_ptr<Memory>& process_memory);
+  std::shared_ptr<Memory> CreateMemory(const std::shared_ptr<Memory>& process_memory);
 
   bool GetFunctionName(uint64_t addr, SharedString* name, uint64_t* func_offset);
 
@@ -203,7 +203,11 @@ class MapInfo {
   // Returns the printable version of the build id (hex dump of raw data).
   std::string GetPrintableBuildID();
 
-  inline bool IsBlank() { return offset() == 0 && flags() == 0 && name().empty(); }
+  // A blank map can have no name, or be a kernel named map [page size compat]
+  // that should be skipped.
+  inline bool IsBlank() {
+    return offset() == 0 && flags() == 0 && (name().empty() || name() == "[page size compat]");
+  }
 
   // Returns elf_fields_. It will create the object if it is null.
   ElfFields& GetElfFields();
@@ -212,7 +216,7 @@ class MapInfo {
   MapInfo(const MapInfo&) = delete;
   void operator=(const MapInfo&) = delete;
 
-  Memory* GetFileMemory();
+  std::shared_ptr<Memory> CreateFileMemory();
   bool InitFileMemoryFromPreviousReadOnlyMap(MemoryFileAtOffset* memory);
 
   // Protect the creation of the elf object.

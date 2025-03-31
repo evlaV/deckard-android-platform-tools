@@ -15,7 +15,6 @@
 #ifndef HEADER_CHECKER_REPR_JSON_IR_READER_H_
 #define HEADER_CHECKER_REPR_JSON_IR_READER_H_
 
-#include "repr/ir_dumper.h"
 #include "repr/ir_reader.h"
 #include "repr/ir_representation.h"
 
@@ -51,6 +50,9 @@ class JsonObjectRef {
 
   // Default to "".
   std::string GetString(const std::string &key) const;
+
+  std::string GetString(const std::string &key,
+                        const std::string &default_value) const;
 
   // Default to {}.
   JsonObjectRef GetObject(const std::string &key) const;
@@ -116,8 +118,8 @@ template <> std::string JsonArrayRef<std::string>::Iterator::operator*() const;
 
 class JsonIRReader : public IRReader {
  public:
-  JsonIRReader(const std::set<std::string> *exported_headers)
-      : IRReader(exported_headers) {}
+  JsonIRReader(std::unique_ptr<ModuleIR> module_ir)
+      : IRReader(std::move(module_ir)) {}
 
  private:
   bool ReadDumpImpl(const std::string &dump_file) override;

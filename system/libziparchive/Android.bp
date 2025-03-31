@@ -14,6 +14,7 @@
 // limitations under the License.
 
 package {
+    default_team: "trendy_team_native_tools_libraries",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -24,7 +25,6 @@ cc_defaults {
         // ZLIB_CONST turns on const for input buffers, which is pretty standard.
         "-DZLIB_CONST",
         "-Werror",
-        "-Wall",
         "-D_FILE_OFFSET_BITS=64",
     ],
     cppflags: [
@@ -120,9 +120,6 @@ cc_defaults {
     recovery_available: true,
     vendor_ramdisk_available: true,
     native_bridge_supported: true,
-    vndk: {
-        enabled: true,
-    },
     double_loadable: true,
     export_shared_lib_headers: ["libbase"],
 
@@ -157,11 +154,15 @@ cc_library {
         // Disable incfs hardending code for the default library
         "-DINCFS_SUPPORT_DISABLED=1",
     ],
+    apex_available: ["com.android.runtime"],
 }
 
 cc_library_static {
     name: "libziparchive_for_incfs",
-    defaults: ["libziparchive_lib_defaults", "incfs_support_defaults"],
+    defaults: [
+        "libziparchive_lib_defaults",
+        "incfs_support_defaults",
+    ],
     srcs: [
         "incfs_support/signal_handling.cpp",
     ],
@@ -243,7 +244,10 @@ cc_binary {
     host_supported: true,
     target: {
         android: {
-            symlinks: ["unzip", "zipinfo"],
+            symlinks: [
+                "unzip",
+                "zipinfo",
+            ],
         },
     },
 }
@@ -255,7 +259,7 @@ cc_fuzz {
         "libziparchive",
         "libbase",
         "libz",
-        "liblog"
+        "liblog",
     ],
     host_supported: true,
     corpus: ["testdata/*"],
@@ -268,7 +272,7 @@ cc_fuzz {
         "libziparchive_for_incfs",
         "libbase",
         "libz",
-        "liblog"
+        "liblog",
     ],
     host_supported: true,
     corpus: ["testdata/*"],
@@ -277,7 +281,12 @@ cc_fuzz {
 cc_fuzz {
     name: "libziparchive_writer_fuzzer",
     srcs: ["libziparchive_writer_fuzzer.cpp"],
-    static_libs: ["libziparchive", "libbase", "libz", "liblog"],
+    static_libs: [
+        "libziparchive",
+        "libbase",
+        "libz",
+        "liblog",
+    ],
     host_supported: true,
     corpus: ["testdata/*"],
 }
@@ -290,7 +299,10 @@ sh_test {
     host_supported: true,
     device_supported: false,
     data: ["cli-tests/**/*"],
-    target_required: ["cli-test", "ziptool"],
+    target_required: [
+        "cli-test",
+        "ziptool",
+    ],
     data_device_bins: ["cli-test"],
 }
 

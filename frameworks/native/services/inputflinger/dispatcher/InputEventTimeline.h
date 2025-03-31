@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-#ifndef _UI_INPUT_INPUTDISPATCHER_INPUTEVENTTIMELINE_H
-#define _UI_INPUT_INPUTDISPATCHER_INPUTEVENTTIMELINE_H
+#pragma once
+
+#include "../InputDeviceMetricsSource.h"
 
 #include <binder/IBinder.h>
 #include <input/Input.h>
@@ -74,10 +75,14 @@ private:
 };
 
 struct InputEventTimeline {
-    InputEventTimeline(bool isDown, nsecs_t eventTime, nsecs_t readTime);
+    InputEventTimeline(bool isDown, nsecs_t eventTime, nsecs_t readTime, uint16_t vendorId,
+                       uint16_t productId, std::set<InputDeviceUsageSource> sources);
     const bool isDown; // True if this is an ACTION_DOWN event
     const nsecs_t eventTime;
     const nsecs_t readTime;
+    const uint16_t vendorId;
+    const uint16_t productId;
+    const std::set<InputDeviceUsageSource> sources;
 
     struct IBinderHash {
         std::size_t operator()(const sp<IBinder>& b) const {
@@ -104,5 +109,3 @@ public:
 
 } // namespace inputdispatcher
 } // namespace android
-
-#endif // _UI_INPUT_INPUTDISPATCHER_INPUTEVENTTIMELINE_H

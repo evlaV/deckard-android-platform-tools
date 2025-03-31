@@ -19,13 +19,12 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <gui/FrameRateUtils.h>
 #include <gui/LayerMetadata.h>
 
 // TODO(b/129481165): remove the #pragma below and fix conversion issues
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wconversion"
-#include "BufferStateLayer.h"
-#include "EffectLayer.h"
 #include "Layer.h"
 // TODO(b/129481165): remove the #pragma below and fix conversion issues
 #pragma clang diagnostic pop // ignored "-Wconversion"
@@ -78,17 +77,16 @@ SetFrameRateTest::SetFrameRateTest() {
 }
 
 void SetFrameRateTest::addChild(sp<Layer> layer, sp<Layer> child) {
-    layer.get()->addChild(child.get());
+    layer->addChild(child);
 }
 
 void SetFrameRateTest::removeChild(sp<Layer> layer, sp<Layer> child) {
-    layer.get()->removeChild(child.get());
+    layer->removeChild(child);
 }
 
 void SetFrameRateTest::commitTransaction() {
     for (auto layer : mLayers) {
-        auto c = layer->getDrawingState();
-        layer->commitTransaction(c);
+        layer->commitTransaction();
     }
 }
 
@@ -100,7 +98,7 @@ TEST_P(SetFrameRateTest, SetAndGet) {
     const auto& layerFactory = GetParam();
 
     auto layer = mLayers.emplace_back(layerFactory->createLayer(mFlinger));
-    layer->setFrameRate(FRAME_RATE_VOTE1);
+    layer->setFrameRate(FRAME_RATE_VOTE1.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_VOTE1, layer->getFrameRateForLayerTree());
 }
@@ -117,13 +115,13 @@ TEST_P(SetFrameRateTest, SetAndGetParent) {
     addChild(parent, child1);
     addChild(child1, child2);
 
-    child2->setFrameRate(FRAME_RATE_VOTE1);
+    child2->setFrameRate(FRAME_RATE_VOTE1.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_TREE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_TREE, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child2->getFrameRateForLayerTree());
 
-    child2->setFrameRate(FRAME_RATE_NO_VOTE);
+    child2->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_NO_VOTE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child1->getFrameRateForLayerTree());
@@ -142,27 +140,27 @@ TEST_P(SetFrameRateTest, SetAndGetParentAllVote) {
     addChild(parent, child1);
     addChild(child1, child2);
 
-    child2->setFrameRate(FRAME_RATE_VOTE1);
-    child1->setFrameRate(FRAME_RATE_VOTE2);
-    parent->setFrameRate(FRAME_RATE_VOTE3);
+    child2->setFrameRate(FRAME_RATE_VOTE1.vote);
+    child1->setFrameRate(FRAME_RATE_VOTE2.vote);
+    parent->setFrameRate(FRAME_RATE_VOTE3.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_VOTE3, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE2, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child2->getFrameRateForLayerTree());
 
-    child2->setFrameRate(FRAME_RATE_NO_VOTE);
+    child2->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_VOTE3, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE2, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE2, child2->getFrameRateForLayerTree());
 
-    child1->setFrameRate(FRAME_RATE_NO_VOTE);
+    child1->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_VOTE3, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE3, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE3, child2->getFrameRateForLayerTree());
 
-    parent->setFrameRate(FRAME_RATE_NO_VOTE);
+    parent->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_NO_VOTE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child1->getFrameRateForLayerTree());
@@ -181,13 +179,13 @@ TEST_P(SetFrameRateTest, SetAndGetChild) {
     addChild(parent, child1);
     addChild(child1, child2);
 
-    parent->setFrameRate(FRAME_RATE_VOTE1);
+    parent->setFrameRate(FRAME_RATE_VOTE1.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_VOTE1, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child2->getFrameRateForLayerTree());
 
-    parent->setFrameRate(FRAME_RATE_NO_VOTE);
+    parent->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_NO_VOTE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child1->getFrameRateForLayerTree());
@@ -206,27 +204,27 @@ TEST_P(SetFrameRateTest, SetAndGetChildAllVote) {
     addChild(parent, child1);
     addChild(child1, child2);
 
-    child2->setFrameRate(FRAME_RATE_VOTE1);
-    child1->setFrameRate(FRAME_RATE_VOTE2);
-    parent->setFrameRate(FRAME_RATE_VOTE3);
+    child2->setFrameRate(FRAME_RATE_VOTE1.vote);
+    child1->setFrameRate(FRAME_RATE_VOTE2.vote);
+    parent->setFrameRate(FRAME_RATE_VOTE3.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_VOTE3, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE2, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child2->getFrameRateForLayerTree());
 
-    parent->setFrameRate(FRAME_RATE_NO_VOTE);
+    parent->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_TREE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE2, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child2->getFrameRateForLayerTree());
 
-    child1->setFrameRate(FRAME_RATE_NO_VOTE);
+    child1->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_TREE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_TREE, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child2->getFrameRateForLayerTree());
 
-    child2->setFrameRate(FRAME_RATE_NO_VOTE);
+    child2->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_NO_VOTE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child1->getFrameRateForLayerTree());
@@ -244,7 +242,7 @@ TEST_P(SetFrameRateTest, SetAndGetChildAddAfterVote) {
 
     addChild(parent, child1);
 
-    parent->setFrameRate(FRAME_RATE_VOTE1);
+    parent->setFrameRate(FRAME_RATE_VOTE1.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_VOTE1, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child1->getFrameRateForLayerTree());
@@ -256,7 +254,7 @@ TEST_P(SetFrameRateTest, SetAndGetChildAddAfterVote) {
     EXPECT_EQ(FRAME_RATE_VOTE1, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child2->getFrameRateForLayerTree());
 
-    parent->setFrameRate(FRAME_RATE_NO_VOTE);
+    parent->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_NO_VOTE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child1->getFrameRateForLayerTree());
@@ -275,7 +273,7 @@ TEST_P(SetFrameRateTest, SetAndGetChildRemoveAfterVote) {
     addChild(parent, child1);
     addChild(child1, child2);
 
-    parent->setFrameRate(FRAME_RATE_VOTE1);
+    parent->setFrameRate(FRAME_RATE_VOTE1.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_VOTE1, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child1->getFrameRateForLayerTree());
@@ -287,7 +285,7 @@ TEST_P(SetFrameRateTest, SetAndGetChildRemoveAfterVote) {
     EXPECT_EQ(FRAME_RATE_VOTE1, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child2->getFrameRateForLayerTree());
 
-    parent->setFrameRate(FRAME_RATE_NO_VOTE);
+    parent->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_NO_VOTE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child1->getFrameRateForLayerTree());
@@ -308,14 +306,14 @@ TEST_P(SetFrameRateTest, SetAndGetParentNotInTree) {
     addChild(child1, child2);
     addChild(child1, child2_1);
 
-    child2->setFrameRate(FRAME_RATE_VOTE1);
+    child2->setFrameRate(FRAME_RATE_VOTE1.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_TREE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_TREE, child1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_VOTE1, child2->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child2_1->getFrameRateForLayerTree());
 
-    child2->setFrameRate(FRAME_RATE_NO_VOTE);
+    child2->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_NO_VOTE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child1->getFrameRateForLayerTree());
@@ -328,74 +326,29 @@ INSTANTIATE_TEST_SUITE_P(PerLayerType, SetFrameRateTest,
                                          std::make_shared<EffectLayerFactory>()),
                          PrintToStringParamName);
 
-TEST_F(SetFrameRateTest, ValidateFrameRate) {
-    EXPECT_TRUE(ValidateFrameRate(60.0f, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT,
-                                  ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-    EXPECT_TRUE(ValidateFrameRate(60.0f, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT,
-                                  ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-    EXPECT_TRUE(ValidateFrameRate(60.0f, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT,
-                                  ANATIVEWINDOW_CHANGE_FRAME_RATE_ALWAYS, ""));
-    EXPECT_TRUE(ValidateFrameRate(60.0f, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
-                                  ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-
-    // Privileged APIs.
-    EXPECT_FALSE(ValidateFrameRate(60.0f, ANATIVEWINDOW_FRAME_RATE_EXACT,
-                                   ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-    EXPECT_FALSE(ValidateFrameRate(0.0f, ANATIVEWINDOW_FRAME_RATE_NO_VOTE,
-                                   ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-
-    constexpr bool kPrivileged = true;
-    EXPECT_TRUE(ValidateFrameRate(60.0f, ANATIVEWINDOW_FRAME_RATE_EXACT,
-                                  ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, "",
-                                  kPrivileged));
-    EXPECT_TRUE(ValidateFrameRate(0.0f, ANATIVEWINDOW_FRAME_RATE_NO_VOTE,
-                                  ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, "",
-                                  kPrivileged));
-
-    // Invalid frame rate.
-    EXPECT_FALSE(ValidateFrameRate(-1, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT,
-                                   ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-    EXPECT_FALSE(ValidateFrameRate(1.0f / 0.0f, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT,
-                                   ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-    EXPECT_FALSE(ValidateFrameRate(0.0f / 0.0f, ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT,
-                                   ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-
-    // Invalid compatibility.
-    EXPECT_FALSE(
-            ValidateFrameRate(60.0f, -1, ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-    EXPECT_FALSE(ValidateFrameRate(60.0f, 2, ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS, ""));
-
-    // Invalid change frame rate strategy.
-    EXPECT_FALSE(ValidateFrameRate(60.0f, ANATIVEWINDOW_FRAME_RATE_EXACT, -1, ""));
-    EXPECT_FALSE(ValidateFrameRate(60.0f, ANATIVEWINDOW_FRAME_RATE_EXACT, 2, ""));
-}
-
 TEST_P(SetFrameRateTest, SetOnParentActivatesTree) {
     const auto& layerFactory = GetParam();
 
     auto parent = mLayers.emplace_back(layerFactory->createLayer(mFlinger));
-    if (!parent->isVisible()) {
-        // This is a hack as all the test layers except EffectLayer are not visible,
-        // but since the logic is unified in Layer, it should be fine.
-        return;
-    }
 
     auto child = mLayers.emplace_back(layerFactory->createLayer(mFlinger));
     addChild(parent, child);
 
-    parent->setFrameRate(FRAME_RATE_VOTE1);
+    parent->setFrameRate(FRAME_RATE_VOTE1.vote);
     commitTransaction();
 
     auto& history = mFlinger.mutableScheduler().mutableLayerHistory();
-    history.record(parent.get(), 0, 0, LayerHistory::LayerUpdateType::Buffer);
-    history.record(child.get(), 0, 0, LayerHistory::LayerUpdateType::Buffer);
+    history.record(parent->getSequence(), parent->getLayerProps(), 0, 0,
+                   LayerHistory::LayerUpdateType::Buffer);
+    history.record(child->getSequence(), child->getLayerProps(), 0, 0,
+                   LayerHistory::LayerUpdateType::Buffer);
 
-    const auto configs = mFlinger.mutableScheduler().refreshRateConfigs();
-    const auto summary = history.summarize(*configs, 0);
+    const auto selectorPtr = mFlinger.mutableScheduler().refreshRateSelector();
+    const auto summary = history.summarize(*selectorPtr, 0);
 
     ASSERT_EQ(2u, summary.size());
-    EXPECT_EQ(FRAME_RATE_VOTE1.rate, summary[0].desiredRefreshRate);
-    EXPECT_EQ(FRAME_RATE_VOTE1.rate, summary[1].desiredRefreshRate);
+    EXPECT_EQ(FRAME_RATE_VOTE1.vote.rate, summary[0].desiredRefreshRate);
+    EXPECT_EQ(FRAME_RATE_VOTE1.vote.rate, summary[1].desiredRefreshRate);
 }
 
 TEST_P(SetFrameRateTest, addChildForParentWithTreeVote) {
@@ -411,7 +364,7 @@ TEST_P(SetFrameRateTest, addChildForParentWithTreeVote) {
     addChild(parent, child1);
     addChild(child1, childOfChild1);
 
-    childOfChild1->setFrameRate(FRAME_RATE_VOTE1);
+    childOfChild1->setFrameRate(FRAME_RATE_VOTE1.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_TREE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_TREE, child1->getFrameRateForLayerTree());
@@ -425,7 +378,7 @@ TEST_P(SetFrameRateTest, addChildForParentWithTreeVote) {
     EXPECT_EQ(FRAME_RATE_VOTE1, childOfChild1->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child2->getFrameRateForLayerTree());
 
-    childOfChild1->setFrameRate(FRAME_RATE_NO_VOTE);
+    childOfChild1->setFrameRate(FRAME_RATE_NO_VOTE.vote);
     commitTransaction();
     EXPECT_EQ(FRAME_RATE_NO_VOTE, parent->getFrameRateForLayerTree());
     EXPECT_EQ(FRAME_RATE_NO_VOTE, child1->getFrameRateForLayerTree());

@@ -78,8 +78,10 @@ class Zip64Test(unittest.TestCase):
     with tempfile.NamedTemporaryFile(suffix='.zip') as zip_path:
       entry_dict = {}
       # Add 100k entries (more than 65535|UINT16_MAX).
+      # We use empty files so that we don't hit any of the _other_ EOCD limits
+      # and appear to be testing the file count when we're actually not.
       for num in range(0, 100 * 1024):
-        entry_dict[str(num)] = 50
+        entry_dict[str(num)] = 0
 
       with zipfile.ZipFile(zip_path, 'w', allowZip64=True) as output_zip:
         self._AddEntriesToZip(output_zip, entry_dict)

@@ -16,8 +16,6 @@
 
 #include "snapuserd_core.h"
 
-#include <sys/utsname.h>
-
 #include <android-base/chrono_utils.h>
 #include <android-base/properties.h>
 #include <android-base/scopeguard.h>
@@ -26,6 +24,7 @@
 
 #include "merge_worker.h"
 #include "read_worker.h"
+#include "utility.h"
 
 namespace android {
 namespace snapshot {
@@ -37,7 +36,8 @@ using android::base::unique_fd;
 SnapshotHandler::SnapshotHandler(std::string misc_name, std::string cow_device,
                                  std::string backing_device, std::string base_path_merge,
                                  std::shared_ptr<IBlockServerOpener> opener, int num_worker_threads,
-                                 bool use_iouring, bool perform_verification) {
+                                 bool use_iouring, bool perform_verification, bool o_direct,
+                                 uint32_t cow_op_merge_size) {
     misc_name_ = std::move(misc_name);
     cow_device_ = std::move(cow_device);
     backing_store_device_ = std::move(backing_device);
@@ -46,13 +46,15 @@ SnapshotHandler::SnapshotHandler(std::string misc_name, std::string cow_device,
     num_worker_threads_ = num_worker_threads;
     is_io_uring_enabled_ = use_iouring;
     perform_verification_ = perform_verification;
+    o_direct_ = o_direct;
+    cow_op_merge_size_ = cow_op_merge_size;
 }
 
 bool SnapshotHandler::InitializeWorkers() {
     for (int i = 0; i < num_worker_threads_; i++) {
         auto wt = std::make_unique<ReadWorker>(cow_device_, backing_store_device_, misc_name_,
                                                base_path_merge_, GetSharedPtr(),
-                                               block_server_opener_);
+                                               block_server_opener_, o_direct_);
         if (!wt->Init()) {
             SNAP_LOG(ERROR) << "Thread initialization failed";
             return false;
@@ -60,12 +62,11 @@ bool SnapshotHandler::InitializeWorkers() {
 
         worker_threads_.push_back(std::move(wt));
     }
-
     merge_thread_ = std::make_unique<MergeWorker>(cow_device_, misc_name_, base_path_merge_,
-                                                  GetSharedPtr());
+                                                  GetSharedPtr(), cow_op_merge_size_);
 
     read_ahead_thread_ = std::make_unique<ReadAhead>(cow_device_, backing_store_device_, misc_name_,
-                                                     GetSharedPtr());
+                                                     GetSharedPtr(), cow_op_merge_size_);
 
     update_verify_ = std::make_unique<UpdateVerify>(misc_name_);
 
@@ -83,6 +84,10 @@ void SnapshotHandler::UpdateMergeCompletionPercentage() {
     SNAP_LOG(DEBUG) << "Merge-complete %: " << merge_completion_percentage_
                     << " num_merge_ops: " << ch->num_merge_ops
                     << " total-ops: " << reader_->get_num_total_data_ops();
+
+    if (ch->num_merge_ops == reader_->get_num_total_data_ops()) {
+        MarkMergeComplete();
+    }
 }
 
 bool SnapshotHandler::CommitMerge(int num_merge_ops) {
@@ -109,7 +114,7 @@ bool SnapshotHandler::CommitMerge(int num_merge_ops) {
             return false;
         }
 
-        if (!android::base::WriteFully(cow_fd_, &header, sizeof(CowHeader))) {
+        if (!android::base::WriteFully(cow_fd_, &header, header.prefix.header_size)) {
             SNAP_PLOG(ERROR) << "Write to header failed";
             return false;
         }
@@ -173,6 +178,10 @@ bool SnapshotHandler::ReadMetadata() {
     }
 
     SNAP_LOG(INFO) << "Merge-ops: " << header.num_merge_ops;
+    if (header.num_merge_ops) {
+        resume_merge_ = true;
+        SNAP_LOG(INFO) << "Resume Snapshot-merge";
+    }
 
     if (!MmapMetadata()) {
         SNAP_LOG(ERROR) << "mmap failed";
@@ -192,13 +201,13 @@ bool SnapshotHandler::ReadMetadata() {
     while (!cowop_iter->AtEnd()) {
         const CowOperation* cow_op = cowop_iter->Get();
 
-        if (cow_op->type == kCowCopyOp) {
+        if (cow_op->type() == kCowCopyOp) {
             copy_ops += 1;
-        } else if (cow_op->type == kCowReplaceOp) {
+        } else if (cow_op->type() == kCowReplaceOp) {
             replace_ops += 1;
-        } else if (cow_op->type == kCowZeroOp) {
+        } else if (cow_op->type() == kCowZeroOp) {
             zero_ops += 1;
-        } else if (cow_op->type == kCowXorOp) {
+        } else if (cow_op->type() == kCowXorOp) {
             xor_ops += 1;
         }
 
@@ -295,6 +304,11 @@ bool SnapshotHandler::Start() {
     if (ra_thread_) {
         ra_thread_status =
                 std::async(std::launch::async, &ReadAhead::RunThread, read_ahead_thread_.get());
+        // If this is a merge-resume path, wait until RA thread is fully up as
+        // the data has to be re-constructed from the scratch space.
+        if (resume_merge_ && ShouldReconstructDataFromCow()) {
+            WaitForRaThreadToStart();
+        }
     }
 
     // Launch worker threads
@@ -307,7 +321,9 @@ bool SnapshotHandler::Start() {
             std::async(std::launch::async, &MergeWorker::Run, merge_thread_.get());
 
     // Now that the worker threads are up, scan the partitions.
-    if (perform_verification_) {
+    // If the snapshot-merge is being resumed, there is no need to scan as the
+    // current slot is already marked as boot complete.
+    if (perform_verification_ && !resume_merge_) {
         update_verify_->VerifyUpdatePartition();
     }
 
@@ -406,22 +422,7 @@ struct BufferState* SnapshotHandler::GetBufferState() {
 }
 
 bool SnapshotHandler::IsIouringSupported() {
-    struct utsname uts;
-    unsigned int major, minor;
-
-    if ((uname(&uts) != 0) || (sscanf(uts.release, "%u.%u", &major, &minor) != 2)) {
-        SNAP_LOG(ERROR) << "Could not parse the kernel version from uname. "
-                        << " io_uring not supported";
-        return false;
-    }
-
-    // We will only support kernels from 5.6 onwards as IOSQE_ASYNC flag and
-    // IO_URING_OP_READ/WRITE opcodes were introduced only on 5.6 kernel
-    if (major >= 5) {
-        if (major == 5 && minor < 6) {
-            return false;
-        }
-    } else {
+    if (!KernelSupportsIoUring()) {
         return false;
     }
 

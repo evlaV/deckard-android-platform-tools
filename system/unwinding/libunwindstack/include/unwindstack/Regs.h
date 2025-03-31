@@ -81,6 +81,8 @@ class Regs {
 
   virtual Regs* Clone() = 0;
 
+  virtual uint16_t Convert(uint16_t reg) { return reg; }
+
   static ArchEnum CurrentArch();
   static ArchEnum RemoteGetArch(pid_t pid, ErrorCode* error_code = nullptr);
   static Regs* RemoteGet(pid_t pid, ErrorCode* error_code = nullptr);

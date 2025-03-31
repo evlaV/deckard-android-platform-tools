@@ -83,8 +83,8 @@ void RegsX86_64::IterateRegisters(std::function<void(const char*, uint64_t)> fn)
   fn("rip", regs_[X86_64_REG_RIP]);
 }
 
-Regs* RegsX86_64::Read(void* remote_data) {
-  x86_64_user_regs* user = reinterpret_cast<x86_64_user_regs*>(remote_data);
+Regs* RegsX86_64::Read(const void* remote_data) {
+  const x86_64_user_regs* user = reinterpret_cast<const x86_64_user_regs*>(remote_data);
 
   RegsX86_64* regs = new RegsX86_64();
   (*regs)[X86_64_REG_RAX] = user->rax;
@@ -133,10 +133,10 @@ Regs* RegsX86_64::CreateFromUcontext(void* ucontext) {
 }
 
 bool RegsX86_64::StepIfSignalHandler(uint64_t elf_offset, Elf* elf, Memory* process_memory) {
-  uint64_t data;
-  Memory* elf_memory = elf->memory();
   // Read from elf memory since it is usually more expensive to read from
   // process memory.
+  uint64_t data;
+  auto elf_memory = elf->memory();
   if (!elf_memory->ReadFully(elf_offset, &data, sizeof(data)) || data != 0x0f0000000fc0c748) {
     return false;
   }

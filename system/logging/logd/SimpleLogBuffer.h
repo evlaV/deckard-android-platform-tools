@@ -63,7 +63,6 @@ class SimpleLogBuffer : public LogBuffer {
     LogStatistics* stats() { return stats_; }
     LogReaderList* reader_list() { return reader_list_; }
     size_t max_size(log_id_t id) REQUIRES_SHARED(logd_lock) { return max_size_[id]; }
-    std::list<LogBufferElement>& logs() { return logs_; }
 
   private:
     bool ShouldLog(log_id_t log_id, const char* msg, uint16_t len);

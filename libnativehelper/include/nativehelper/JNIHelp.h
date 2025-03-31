@@ -96,7 +96,12 @@ struct [[maybe_unused]] ExpandableString {
 }
 
 [[maybe_unused]] static const char* platformStrError(int errnum, char* buf, size_t buflen) {
+#ifdef _WIN32
+    strerror_s(buf, buflen, errnum);
+    return buf;
+#else
     return safe_strerror(strerror_r, errnum, buf, buflen);
+#endif
 }
 
 [[maybe_unused]] static jmethodID FindMethod(JNIEnv* env, const char* className,

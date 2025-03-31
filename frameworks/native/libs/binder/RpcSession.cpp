@@ -26,15 +26,12 @@
 
 #include <string_view>
 
-#include <android-base/hex.h>
-#include <android-base/macros.h>
-#include <android-base/scopeguard.h>
 #include <binder/BpBinder.h>
+#include <binder/Functional.h>
 #include <binder/Parcel.h>
 #include <binder/RpcServer.h>
 #include <binder/RpcTransportRaw.h>
 #include <binder/Stability.h>
-#include <utils/Compat.h>
 #include <utils/String8.h>
 
 #include "BuildFlags.h"
@@ -53,7 +50,9 @@ extern "C" JavaVM* AndroidRuntimeGetJavaVM();
 
 namespace android {
 
-using base::unique_fd;
+using namespace android::binder::impl;
+using android::binder::borrowed_fd;
+using android::binder::unique_fd;
 
 RpcSession::RpcSession(std::unique_ptr<RpcTransportCtx> ctx) : mCtx(std::move(ctx)) {
     LOG_RPC_DETAIL("RpcSession created %p", this);
@@ -70,7 +69,7 @@ RpcSession::~RpcSession() {
 
 sp<RpcSession> RpcSession::make() {
     // Default is without TLS.
-    return make(makeDefaultRpcTransportCtxFactory());
+    return make(binder::os::makeDefaultRpcTransportCtxFactory());
 }
 
 sp<RpcSession> RpcSession::make(std::unique_ptr<RpcTransportCtxFactory> rpcTransportCtxFactory) {
@@ -159,7 +158,7 @@ status_t RpcSession::setupUnixDomainSocketBootstrapClient(unique_fd bootstrapFd)
 
         int zero = 0;
         iovec iov{&zero, sizeof(zero)};
-        std::vector<std::variant<base::unique_fd, base::borrowed_fd>> fds;
+        std::vector<std::variant<unique_fd, borrowed_fd>> fds;
         fds.push_back(std::move(serverFd));
 
         status_t status = mBootstrapTransport->interruptableWriteFully(mShutdownTrigger.get(), &iov,
@@ -188,17 +187,13 @@ status_t RpcSession::setupInetClient(const char* addr, unsigned int port) {
     return NAME_NOT_FOUND;
 }
 
-status_t RpcSession::setupPreconnectedClient(base::unique_fd fd,
-                                             std::function<unique_fd()>&& request) {
+status_t RpcSession::setupPreconnectedClient(unique_fd fd, std::function<unique_fd()>&& request) {
     return setupClient([&](const std::vector<uint8_t>& sessionId, bool incoming) -> status_t {
         if (!fd.ok()) {
             fd = request();
             if (!fd.ok()) return BAD_VALUE;
         }
-        if (auto res = setNonBlocking(fd); !res.ok()) {
-            ALOGE("setupPreconnectedClient: %s", res.error().message().c_str());
-            return res.error().code() == 0 ? UNKNOWN_ERROR : -res.error().code();
-        }
+        if (status_t res = binder::os::setNonBlocking(fd); res != OK) return res;
 
         RpcTransportFd transportFd(std::move(fd));
         status_t status = initAndAddConnection(std::move(transportFd), sessionId, incoming);
@@ -213,7 +208,7 @@ status_t RpcSession::addNullDebuggingClient() {
 
     unique_fd serverFd(TEMP_FAILURE_RETRY(open("/dev/null", O_WRONLY | O_CLOEXEC)));
 
-    if (serverFd == -1) {
+    if (!serverFd.ok()) {
         int savedErrno = errno;
         ALOGE("Could not connect to /dev/null: %s", strerror(savedErrno));
         return -savedErrno;
@@ -310,8 +305,7 @@ status_t RpcSession::readId() {
     status = state()->getSessionId(connection.get(), sp<RpcSession>::fromExisting(this), &mId);
     if (status != OK) return status;
 
-    LOG_RPC_DETAIL("RpcSession %p has id %s", this,
-                   base::HexString(mId.data(), mId.size()).c_str());
+    LOG_RPC_DETAIL("RpcSession %p has id %s", this, HexString(mId.data(), mId.size()).c_str());
     return OK;
 }
 
@@ -414,7 +408,9 @@ public:
     }
 
 private:
-    DISALLOW_COPY_AND_ASSIGN(JavaThreadAttacher);
+    JavaThreadAttacher(const JavaThreadAttacher&) = delete;
+    void operator=(const JavaThreadAttacher&) = delete;
+
     bool mAttached = false;
 
     static JavaVM* getJavaVM() {
@@ -499,7 +495,7 @@ status_t RpcSession::setupClient(const std::function<status_t(const std::vector<
     if (auto status = initShutdownTrigger(); status != OK) return status;
 
     auto oldProtocolVersion = mProtocolVersion;
-    auto cleanup = base::ScopeGuard([&] {
+    auto cleanup = make_scope_guard([&] {
         // if any threads are started, shut them down
         (void)shutdownAndWait(true);
 
@@ -579,7 +575,7 @@ status_t RpcSession::setupClient(const std::function<status_t(const std::vector<
         if (status_t status = connectAndInit(mId, true /*incoming*/); status != OK) return status;
     }
 
-    cleanup.Disable();
+    cleanup.release();
 
     return OK;
 }
@@ -598,7 +594,7 @@ status_t RpcSession::setupOneSocketConnection(const RpcSocketAddress& addr,
 
         unique_fd serverFd(TEMP_FAILURE_RETRY(
                 socket(addr.addr()->sa_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0)));
-        if (serverFd == -1) {
+        if (!serverFd.ok()) {
             int savedErrno = errno;
             ALOGE("Could not create socket at %s: %s", addr.toString().c_str(),
                   strerror(savedErrno));
@@ -709,7 +705,7 @@ status_t RpcSession::initAndAddConnection(RpcTransportFd fd, const std::vector<u
                                                 std::nullopt, nullptr);
         if (sendSessionIdStatus != OK) {
             ALOGE("Could not write session ID ('%s') to socket: %s",
-                  base::HexString(sessionId.data(), sessionId.size()).c_str(),
+                  HexString(sessionId.data(), sessionId.size()).c_str(),
                   statusToString(sendSessionIdStatus).c_str());
             return sendSessionIdStatus;
         }
@@ -770,7 +766,7 @@ status_t RpcSession::addOutgoingConnection(std::unique_ptr<RpcTransport> rpcTran
     {
         RpcMutexLockGuard _l(mMutex);
         connection->rpcTransport = std::move(rpcTransport);
-        connection->exclusiveTid = rpcGetThreadId();
+        connection->exclusiveTid = binder::os::GetThreadId();
         mConnections.mOutgoing.push_back(connection);
     }
 
@@ -805,6 +801,14 @@ bool RpcSession::setForServer(const wp<RpcServer>& server, const wp<EventListene
     return true;
 }
 
+void RpcSession::setSessionSpecificRoot(const sp<IBinder>& sessionSpecificRoot) {
+    LOG_ALWAYS_FATAL_IF(mSessionSpecificRootObject != nullptr,
+                        "Session specific root object already set");
+    LOG_ALWAYS_FATAL_IF(mForServer != nullptr,
+                        "Session specific root object cannot be set for a server");
+    mSessionSpecificRootObject = sessionSpecificRoot;
+}
+
 sp<RpcSession::RpcConnection> RpcSession::assignIncomingConnectionToThisThread(
         std::unique_ptr<RpcTransport> rpcTransport) {
     RpcMutexLockGuard _l(mMutex);
@@ -825,7 +829,7 @@ sp<RpcSession::RpcConnection> RpcSession::assignIncomingConnectionToThisThread(
 
     sp<RpcConnection> session = sp<RpcConnection>::make();
     session->rpcTransport = std::move(rpcTransport);
-    session->exclusiveTid = rpcGetThreadId();
+    session->exclusiveTid = binder::os::GetThreadId();
 
     mConnections.mIncoming.push_back(session);
     mConnections.mMaxIncoming = mConnections.mIncoming.size();
@@ -870,7 +874,7 @@ status_t RpcSession::ExclusiveConnection::find(const sp<RpcSession>& session, Co
     connection->mConnection = nullptr;
     connection->mReentrant = false;
 
-    uint64_t tid = rpcGetThreadId();
+    uint64_t tid = binder::os::GetThreadId();
     RpcMutexUniqueLock _l(session->mMutex);
 
     session->mConnections.mWaitingThreads++;

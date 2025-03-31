@@ -79,27 +79,6 @@ static int64_t query64(ANativeWindow* window, int what) {
     return res < 0 ? res : value;
 }
 
-static bool isDataSpaceValid(ANativeWindow* window, int32_t dataSpace) {
-    bool supported = false;
-    switch (dataSpace) {
-        case HAL_DATASPACE_UNKNOWN:
-        case HAL_DATASPACE_V0_SRGB:
-            return true;
-        // These data space need wide gamut support.
-        case HAL_DATASPACE_V0_SCRGB_LINEAR:
-        case HAL_DATASPACE_V0_SCRGB:
-        case HAL_DATASPACE_DISPLAY_P3:
-            native_window_get_wide_color_support(window, &supported);
-            return supported;
-        // These data space need HDR support.
-        case HAL_DATASPACE_BT2020_PQ:
-            native_window_get_hdr_support(window, &supported);
-            return supported;
-        default:
-            return false;
-    }
-}
-
 /**************************************************************************************************
  * NDK
  **************************************************************************************************/
@@ -173,31 +152,56 @@ int32_t ANativeWindow_setBuffersTransform(ANativeWindow* window, int32_t transfo
 
 int32_t ANativeWindow_setBuffersDataSpace(ANativeWindow* window, int32_t dataSpace) {
     static_assert(static_cast<int>(ADATASPACE_UNKNOWN) == static_cast<int>(HAL_DATASPACE_UNKNOWN));
-    static_assert(static_cast<int>(STANDARD_MASK) == static_cast<int>(HAL_DATASPACE_STANDARD_MASK));
-    static_assert(static_cast<int>(STANDARD_UNSPECIFIED) == static_cast<int>(HAL_DATASPACE_STANDARD_UNSPECIFIED));
-    static_assert(static_cast<int>(STANDARD_BT709) == static_cast<int>(HAL_DATASPACE_STANDARD_BT709));
-    static_assert(static_cast<int>(STANDARD_BT601_625) == static_cast<int>(HAL_DATASPACE_STANDARD_BT601_625));
-    static_assert(static_cast<int>(STANDARD_BT601_625_UNADJUSTED) == static_cast<int>(HAL_DATASPACE_STANDARD_BT601_625_UNADJUSTED));
-    static_assert(static_cast<int>(STANDARD_BT601_525) == static_cast<int>(HAL_DATASPACE_STANDARD_BT601_525));
-    static_assert(static_cast<int>(STANDARD_BT601_525_UNADJUSTED) == static_cast<int>(HAL_DATASPACE_STANDARD_BT601_525_UNADJUSTED));
-    static_assert(static_cast<int>(STANDARD_BT470M) == static_cast<int>(HAL_DATASPACE_STANDARD_BT470M));
-    static_assert(static_cast<int>(STANDARD_FILM) == static_cast<int>(HAL_DATASPACE_STANDARD_FILM));
-    static_assert(static_cast<int>(STANDARD_DCI_P3) == static_cast<int>(HAL_DATASPACE_STANDARD_DCI_P3));
-    static_assert(static_cast<int>(STANDARD_ADOBE_RGB) == static_cast<int>(HAL_DATASPACE_STANDARD_ADOBE_RGB));
-    static_assert(static_cast<int>(TRANSFER_MASK) == static_cast<int>(HAL_DATASPACE_TRANSFER_MASK));
-    static_assert(static_cast<int>(TRANSFER_UNSPECIFIED) == static_cast<int>(HAL_DATASPACE_TRANSFER_UNSPECIFIED));
-    static_assert(static_cast<int>(TRANSFER_LINEAR) == static_cast<int>(HAL_DATASPACE_TRANSFER_LINEAR));
-    static_assert(static_cast<int>(TRANSFER_SMPTE_170M) == static_cast<int>(HAL_DATASPACE_TRANSFER_SMPTE_170M));
-    static_assert(static_cast<int>(TRANSFER_GAMMA2_2) == static_cast<int>(HAL_DATASPACE_TRANSFER_GAMMA2_2));
-    static_assert(static_cast<int>(TRANSFER_GAMMA2_6) == static_cast<int>(HAL_DATASPACE_TRANSFER_GAMMA2_6));
-    static_assert(static_cast<int>(TRANSFER_GAMMA2_8) == static_cast<int>(HAL_DATASPACE_TRANSFER_GAMMA2_8));
-    static_assert(static_cast<int>(TRANSFER_ST2084) == static_cast<int>(HAL_DATASPACE_TRANSFER_ST2084));
-    static_assert(static_cast<int>(TRANSFER_HLG) == static_cast<int>(HAL_DATASPACE_TRANSFER_HLG));
-    static_assert(static_cast<int>(RANGE_MASK) == static_cast<int>(HAL_DATASPACE_RANGE_MASK));
-    static_assert(static_cast<int>(RANGE_UNSPECIFIED) == static_cast<int>(HAL_DATASPACE_RANGE_UNSPECIFIED));
-    static_assert(static_cast<int>(RANGE_FULL) == static_cast<int>(HAL_DATASPACE_RANGE_FULL));
-    static_assert(static_cast<int>(RANGE_LIMITED) == static_cast<int>(HAL_DATASPACE_RANGE_LIMITED));
-    static_assert(static_cast<int>(RANGE_EXTENDED) == static_cast<int>(HAL_DATASPACE_RANGE_EXTENDED));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_MASK) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_MASK));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_UNSPECIFIED) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_UNSPECIFIED));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_BT709) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_BT709));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_BT601_625) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_BT601_625));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_BT601_625_UNADJUSTED) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_BT601_625_UNADJUSTED));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_BT601_525) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_BT601_525));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_BT601_525_UNADJUSTED) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_BT601_525_UNADJUSTED));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_BT470M) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_BT470M));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_FILM) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_FILM));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_DCI_P3) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_DCI_P3));
+    static_assert(static_cast<int>(ADATASPACE_STANDARD_ADOBE_RGB) ==
+                  static_cast<int>(HAL_DATASPACE_STANDARD_ADOBE_RGB));
+    static_assert(static_cast<int>(ADATASPACE_TRANSFER_MASK) ==
+                  static_cast<int>(HAL_DATASPACE_TRANSFER_MASK));
+    static_assert(static_cast<int>(ADATASPACE_TRANSFER_UNSPECIFIED) ==
+                  static_cast<int>(HAL_DATASPACE_TRANSFER_UNSPECIFIED));
+    static_assert(static_cast<int>(ADATASPACE_TRANSFER_LINEAR) ==
+                  static_cast<int>(HAL_DATASPACE_TRANSFER_LINEAR));
+    static_assert(static_cast<int>(ADATASPACE_TRANSFER_SMPTE_170M) ==
+                  static_cast<int>(HAL_DATASPACE_TRANSFER_SMPTE_170M));
+    static_assert(static_cast<int>(ADATASPACE_TRANSFER_GAMMA2_2) ==
+                  static_cast<int>(HAL_DATASPACE_TRANSFER_GAMMA2_2));
+    static_assert(static_cast<int>(ADATASPACE_TRANSFER_GAMMA2_6) ==
+                  static_cast<int>(HAL_DATASPACE_TRANSFER_GAMMA2_6));
+    static_assert(static_cast<int>(ADATASPACE_TRANSFER_GAMMA2_8) ==
+                  static_cast<int>(HAL_DATASPACE_TRANSFER_GAMMA2_8));
+    static_assert(static_cast<int>(ADATASPACE_TRANSFER_ST2084) ==
+                  static_cast<int>(HAL_DATASPACE_TRANSFER_ST2084));
+    static_assert(static_cast<int>(ADATASPACE_TRANSFER_HLG) ==
+                  static_cast<int>(HAL_DATASPACE_TRANSFER_HLG));
+    static_assert(static_cast<int>(ADATASPACE_RANGE_MASK) ==
+                  static_cast<int>(HAL_DATASPACE_RANGE_MASK));
+    static_assert(static_cast<int>(ADATASPACE_RANGE_UNSPECIFIED) ==
+                  static_cast<int>(HAL_DATASPACE_RANGE_UNSPECIFIED));
+    static_assert(static_cast<int>(ADATASPACE_RANGE_FULL) ==
+                  static_cast<int>(HAL_DATASPACE_RANGE_FULL));
+    static_assert(static_cast<int>(ADATASPACE_RANGE_LIMITED) ==
+                  static_cast<int>(HAL_DATASPACE_RANGE_LIMITED));
+    static_assert(static_cast<int>(ADATASPACE_RANGE_EXTENDED) ==
+                  static_cast<int>(HAL_DATASPACE_RANGE_EXTENDED));
     static_assert(static_cast<int>(ADATASPACE_SRGB) == static_cast<int>(HAL_DATASPACE_V0_SRGB));
     static_assert(static_cast<int>(ADATASPACE_SCRGB) == static_cast<int>(HAL_DATASPACE_V0_SCRGB));
     static_assert(static_cast<int>(ADATASPACE_DISPLAY_P3) == static_cast<int>(HAL_DATASPACE_DISPLAY_P3));
@@ -216,11 +220,10 @@ int32_t ANativeWindow_setBuffersDataSpace(ANativeWindow* window, int32_t dataSpa
         static_cast<int>(HAL_DATASPACE_BT2020_HLG));
     static_assert(static_cast<int>(ADATASPACE_BT2020_ITU_HLG) ==
         static_cast<int>(HAL_DATASPACE_BT2020_ITU_HLG));
-    static_assert(static_cast<int>(DEPTH) == static_cast<int>(HAL_DATASPACE_DEPTH));
-    static_assert(static_cast<int>(DYNAMIC_DEPTH) == static_cast<int>(HAL_DATASPACE_DYNAMIC_DEPTH));
+    static_assert(static_cast<int>(ADATASPACE_DEPTH) == static_cast<int>(HAL_DATASPACE_DEPTH));
+    static_assert(static_cast<int>(ADATASPACE_DYNAMIC_DEPTH) == static_cast<int>(HAL_DATASPACE_DYNAMIC_DEPTH));
 
-    if (!window || !query(window, NATIVE_WINDOW_IS_VALID) ||
-            !isDataSpaceValid(window, dataSpace)) {
+    if (!window || !query(window, NATIVE_WINDOW_IS_VALID)) {
         return -EINVAL;
     }
     return native_window_set_buffers_data_space(window,
@@ -231,6 +234,13 @@ int32_t ANativeWindow_getBuffersDataSpace(ANativeWindow* window) {
     if (!window || !query(window, NATIVE_WINDOW_IS_VALID))
         return -EINVAL;
     return query(window, NATIVE_WINDOW_DATASPACE);
+}
+
+int32_t ANativeWindow_getBuffersDefaultDataSpace(ANativeWindow* window) {
+    if (!window || !query(window, NATIVE_WINDOW_IS_VALID)) {
+        return -EINVAL;
+    }
+    return query(window, NATIVE_WINDOW_DEFAULT_DATASPACE);
 }
 
 int32_t ANativeWindow_setFrameRate(ANativeWindow* window, float frameRate, int8_t compatibility) {

@@ -31,6 +31,7 @@
 #include <android/binder_parcel.h>
 #include <android/binder_status.h>
 #include <assert.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <cstddef>
@@ -376,7 +377,7 @@ class ScopedAIBinder_Weak
 
 namespace internal {
 
-static void closeWithError(int fd) {
+inline void closeWithError(int fd) {
     if (fd == -1) return;
     int ret = close(fd);
     if (ret != 0) {

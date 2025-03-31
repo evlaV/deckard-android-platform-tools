@@ -23,6 +23,7 @@
 // so make sure we do not regret hard-coding it as follows:
 package {
     default_applicable_licenses: ["Android-Apache-2.0"],
+    default_team: "trendy_team_native_tools_libraries",
 }
 
 event_flag = [
@@ -91,7 +92,6 @@ cc_binary {
     init_rc: ["logd.rc"],
 
     srcs: [
-        "libaudit.cpp",
         "main.cpp",
         "CommandListener.cpp",
         "LogdNativeService.cpp",
@@ -105,6 +105,7 @@ cc_binary {
     ],
 
     static_libs: [
+        "libaudit",
         "liblog",
         "liblogd",
         "liblogd_binder",
@@ -126,15 +127,28 @@ cc_binary {
     }
 }
 
+cc_library_static {
+    name: "libaudit",
+    srcs: [
+        "libaudit/libaudit.cpp"
+    ],
+    shared_libs: ["libbase"],
+
+    export_include_dirs: ["libaudit/include"],
+
+    recovery_available: true,
+    vendor_available: true,
+}
+
 cc_binary {
     name: "auditctl",
 
     srcs: [
         "auditctl.cpp",
-        "libaudit.cpp",
     ],
 
     shared_libs: ["libbase"],
+    static_libs: ["libaudit"],
 
     cflags: [
         "-Wextra",

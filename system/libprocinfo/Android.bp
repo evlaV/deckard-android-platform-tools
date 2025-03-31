@@ -15,6 +15,7 @@
 //
 
 package {
+    default_team: "trendy_team_android_kernel",
     default_applicable_licenses: ["Android-Apache-2.0"],
 }
 
@@ -37,9 +38,6 @@ cc_library {
     ramdisk_available: true,
     recovery_available: true,
     vendor_ramdisk_available: true,
-    vndk: {
-        enabled: true,
-    },
     host_supported: true,
     srcs: [
         "process.cpp",
@@ -64,6 +62,7 @@ cc_library {
         "//apex_available:platform",
         "com.android.art",
         "com.android.art.debug",
+        "com.android.runtime",
     ],
     min_sdk_version: "apex_inherit",
 }

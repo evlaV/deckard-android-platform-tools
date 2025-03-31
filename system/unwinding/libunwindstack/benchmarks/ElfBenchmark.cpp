@@ -40,7 +40,7 @@ class ElfCreateBenchmark : public benchmark::Fixture {
       auto file_memory = unwindstack::Memory::CreateFileMemory(elf_file, 0);
       state.ResumeTiming();
 
-      unwindstack::Elf elf(file_memory.release());
+      unwindstack::Elf elf(file_memory);
       if (!elf.Init() || !elf.valid()) {
         errx(1, "Internal Error: Cannot open elf: %s", elf_file.c_str());
       }

@@ -40,6 +40,7 @@
 #include "MemoryCache.h"
 #include "MemoryFileAtOffset.h"
 #include "MemoryLocal.h"
+#include "MemoryLocalUnsafe.h"
 #include "MemoryOffline.h"
 #include "MemoryOfflineBuffer.h"
 #include "MemoryRange.h"
@@ -190,15 +191,19 @@ bool Memory::ReadString(uint64_t addr, std::string* dst, size_t max_read) {
   return false;
 }
 
-std::unique_ptr<Memory> Memory::CreateFileMemory(const std::string& path, uint64_t offset,
+std::shared_ptr<Memory> Memory::CreateFileMemory(const std::string& path, uint64_t offset,
                                                  uint64_t size) {
-  auto memory = std::make_unique<MemoryFileAtOffset>();
+  auto memory = std::make_shared<MemoryFileAtOffset>();
 
   if (memory->Init(path, offset, size)) {
     return memory;
   }
 
   return nullptr;
+}
+
+std::shared_ptr<Memory> Memory::CreateProcessMemoryLocalUnsafe() {
+  return std::shared_ptr<Memory>(new MemoryLocalUnsafe());
 }
 
 std::shared_ptr<Memory> Memory::CreateProcessMemory(pid_t pid) {
@@ -228,21 +233,28 @@ std::shared_ptr<Memory> Memory::CreateOfflineMemory(const uint8_t* data, uint64_
 }
 
 size_t MemoryBuffer::Read(uint64_t addr, void* dst, size_t size) {
-  if (addr >= size_) {
+  if (addr < offset_) {
+    return 0;
+  }
+  addr -= offset_;
+  size_t raw_size = raw_.size();
+  if (addr >= raw_size) {
     return 0;
   }
 
-  size_t bytes_left = size_ - static_cast<size_t>(addr);
-  const unsigned char* actual_base = static_cast<const unsigned char*>(raw_) + addr;
+  size_t bytes_left = raw_size - static_cast<size_t>(addr);
   size_t actual_len = std::min(bytes_left, size);
-
-  memcpy(dst, actual_base, actual_len);
+  memcpy(dst, &raw_[addr], actual_len);
   return actual_len;
 }
 
-uint8_t* MemoryBuffer::GetPtr(size_t offset) {
-  if (offset < size_) {
-    return &raw_[offset];
+uint8_t* MemoryBuffer::GetPtr(size_t addr) {
+  if (addr < offset_) {
+    return nullptr;
+  }
+  addr -= offset_;
+  if (addr < raw_.size()) {
+    return &raw_[addr];
   }
   return nullptr;
 }
@@ -572,6 +584,12 @@ void MemoryThreadCache::Clear() {
     delete cache;
     pthread_setspecific(*thread_cache_, nullptr);
   }
+}
+
+size_t MemoryLocalUnsafe::Read(uint64_t addr, void* dst, size_t size) {
+  void* raw_ptr = reinterpret_cast<void*>(addr);
+  memcpy(dst, raw_ptr, size);
+  return size;
 }
 
 }  // namespace unwindstack

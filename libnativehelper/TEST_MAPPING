@@ -15,5 +15,10 @@
     {
       "name": "CtsLibnativehelperTestCases"
     }
+  ],
+  "postsubmit": [
+    {
+      "name": "LibnativehelperInternalTestCases"
+    }
   ]
 }

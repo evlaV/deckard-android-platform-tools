@@ -34,9 +34,11 @@ namespace unwindstack {
 
 inline __attribute__((__always_inline__)) void AsmGetRegs(void* reg_data) {
   asm volatile(
+#if defined(__thumb__)
       ".align 2\n"
       "bx pc\n"
       "nop\n"
+#endif
       ".code 32\n"
       "stmia %[base], {r0-r12}\n"
       "add r2, %[base], #52\n"
@@ -44,9 +46,11 @@ inline __attribute__((__always_inline__)) void AsmGetRegs(void* reg_data) {
       "mov r4, r14\n"
       "mov r5, r15\n"
       "stmia r2, {r3-r5}\n"
+#if defined(__thumb__)
       "orr %[base], pc, #1\n"
       "bx %[base]\n"
-      : [ base ] "+r"(reg_data)
+#endif
+      : [base] "+r"(reg_data)
       :
       : "r2", "r3", "r4", "r5", "memory");
 }
@@ -116,6 +120,8 @@ inline __attribute__((__always_inline__)) void AsmGetRegs(void* reg_data) {
       "sd t4, 232(%[base])\n"
       "sd t5, 240(%[base])\n"
       "sd t6, 248(%[base])\n"
+      "csrr t1, 0xc22\n"
+      "sd t1, 256(%[base])\n"
       "la t1, 1b\n"
       "sd t1, 0(%[base])\n"
       : [base] "+r"(reg_data)
@@ -125,6 +131,8 @@ inline __attribute__((__always_inline__)) void AsmGetRegs(void* reg_data) {
 
 #elif defined(__i386__) || defined(__x86_64__)
 
+// Do not change this, some libraries depend on this function existing on
+// these architectures.
 extern "C" void AsmGetRegs(void* regs);
 
 #endif

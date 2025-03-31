@@ -299,6 +299,27 @@ const char* CachedProperty::WaitForChange(std::chrono::milliseconds relative_tim
   return Get(nullptr);
 }
 
+CachedBoolProperty::CachedBoolProperty(std::string property_name)
+    : cached_parsed_property_(std::move(property_name),
+                              [](const char* value) -> std::optional<bool> {
+                                switch (ParseBool(value)) {
+                                  case ParseBoolResult::kError:
+                                    return std::nullopt;
+                                  case ParseBoolResult::kFalse:
+                                    return false;
+                                  case ParseBoolResult::kTrue:
+                                    return true;
+                                }
+                              }) {}
+
+std::optional<bool> CachedBoolProperty::GetOptional() {
+  return cached_parsed_property_.Get();
+}
+
+bool CachedBoolProperty::Get(bool default_value) {
+  return GetOptional().value_or(default_value);
+}
+
 #endif
 
 }  // namespace base

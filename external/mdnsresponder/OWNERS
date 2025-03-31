@@ -1,4 +1,4 @@
 set noparent
-file:platform/packages/modules/Connectivity:main:/OWNERS_core_networking
 
+sanglardf@google.com
 include platform/packages/modules/adb:/OWNERS

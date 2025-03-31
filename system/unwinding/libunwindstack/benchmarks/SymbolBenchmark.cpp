@@ -39,7 +39,8 @@ class SymbolLookupBenchmark : public benchmark::Fixture {
       mem_tracker.StartTrackingAllocations();
       state.ResumeTiming();
 
-      unwindstack::Elf elf(unwindstack::Memory::CreateFileMemory(elf_file, 0).release());
+      auto elf_memory = unwindstack::Memory::CreateFileMemory(elf_file, 0);
+      unwindstack::Elf elf(elf_memory);
       if (!elf.Init() || !elf.valid()) {
         errx(1, "Internal Error: Cannot open elf: %s", elf_file.c_str());
       }

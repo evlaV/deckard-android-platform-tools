@@ -17,779 +17,457 @@
 //! This module is responsible for all the conversions required to pass information between
 //! libavb and Rust for verifying images.
 
-use crate::{error::result_to_io_enum, IoError};
-use avb_bindgen::{AvbIOResult, AvbOps};
+extern crate alloc;
+
+use crate::{
+    descriptor::{get_descriptors, Descriptor, DescriptorResult},
+    error::{
+        slot_verify_enum_to_result, vbmeta_verify_enum_to_result, SlotVerifyError,
+        SlotVerifyNoDataResult, SlotVerifyResult, VbmetaVerifyResult,
+    },
+    ops, Ops,
+};
+use alloc::vec::Vec;
+use avb_bindgen::{
+    avb_slot_verify, avb_slot_verify_data_free, AvbPartitionData, AvbSlotVerifyData, AvbVBMetaData,
+};
 use core::{
-    cmp::min,
-    ffi::{c_char, c_void, CStr},
-    ptr, slice,
+    ffi::{c_char, CStr},
+    fmt,
+    marker::PhantomData,
+    pin::pin,
+    ptr::{self, null, null_mut, NonNull},
+    slice,
 };
 
-/// Common `Result` type for `IoError` errors.
-type Result<T> = core::result::Result<T, IoError>;
+/// `AvbHashtreeErrorMode`; see libavb docs for descriptions of each mode.
+pub use avb_bindgen::AvbHashtreeErrorMode as HashtreeErrorMode;
+/// `AvbSlotVerifyFlags`; see libavb docs for descriptions of each flag.
+pub use avb_bindgen::AvbSlotVerifyFlags as SlotVerifyFlags;
 
-/// Base implementation-provided callbacks for verification.
-///
-/// See libavb `AvbOps` for more complete documentation.
-pub trait Ops {
-    /// Reads data from the requested partition on disk.
-    ///
-    /// # Arguments
-    /// * `partition`: partition name to read from.
-    /// * `offset`: offset in bytes within the partition to read from; a positive value indicates an
-    ///             offset from the partition start, a negative value indicates a backwards offset
-    ///             from the partition end.
-    /// * `buffer`: buffer to read data into.
-    ///
-    /// # Returns
-    /// The number of bytes actually read into `buffer` or an `IoError`. Reading less than
-    /// `buffer.len()` bytes is only allowed if the end of the partition was reached.
-    fn read_from_partition(
-        &mut self,
-        partition: &CStr,
-        offset: i64,
-        buffer: &mut [u8],
-    ) -> Result<usize>;
-
-    /// Returns a reference to preloaded partition contents.
-    ///
-    /// This is an optional optimization if a partition has already been loaded to provide libavb
-    /// with a reference to the data rather than copying it as `read_from_partition()` would.
-    ///
-    /// May be left unimplemented if preloaded partitions are not used.
-    ///
-    /// # Arguments
-    /// * `partition`: partition name to read from.
-    ///
-    /// # Returns
-    /// * A reference to the entire partition contents if the partition has been preloaded.
-    /// * `Err<IoError::NotImplemented>` if the requested partition has not been preloaded;
-    ///   verification will next attempt to load the partition via `read_from_partition()`.
-    /// * Any other `Err<IoError>` if an error occurred; verification will exit immediately.
-    fn get_preloaded_partition(&mut self, partition: &CStr) -> Result<&[u8]> {
-        Err(IoError::NotImplemented)
-    }
-
-    /// Checks if the given public key is valid for vbmeta image signing.
-    ///
-    /// # Arguments
-    /// * `public_key`: the public key.
-    /// * `public_key_metadata`: public key metadata set by the `--public_key_metadata` arg in
-    ///                          `avbtool`, or None if no metadata was provided.
-    ///
-    /// # Returns
-    /// True if the given key is valid, false if it is not, `IoError` on error.
-    fn validate_vbmeta_public_key(
-        &mut self,
-        public_key: &[u8],
-        public_key_metadata: Option<&[u8]>,
-    ) -> Result<bool>;
-}
-
-/// Helper to pass user-provided `Ops` through libavb via the `user_data` pointer.
-///
-/// This is a bit tricky in Rust, we can't just cast `Ops` to `void*` and back directly because
-/// `Ops` is a trait to be implemented by the user, which means we don't know the concrete type
-/// at this point and must use dynamic dispatch.
-///
-/// However, dynamic dispatch in Rust requires a "fat pointer" (2 pointers) which cannot be cast to
-/// a single `void*`. So instead, we wrap the dynamic dispatch inside this struct which _can_ be
-/// represented as a single `void*`, and then we can unwrap it again to fetch the original
-/// `&dyn Ops`.
-///
-/// A more typical approach is to use `Box` to heap-allocate the `&dyn` and then pass the `Box`
-/// around, but we want to avoid allocation as much as possible.
-///
-/// Control flow:
-/// ```
-///         user                             libavb_rs                        libavb
-/// -----------------------------------------------------------------------------------------------
-/// create `Ops` (Rust) with
-/// callback implementations
-///                           ---->
-///                                  `UserData::new()` wraps:
-///                                  `Ops` (Rust/fat) ->
-///                                  `UserData` (Rust/thin)
-///
-///                                  `create_avb_ops()` makes
-///                                  `AvbOps` (C) containing:
-///                                  1. `UserData*` (C)
-///                                  2. our callbacks (C)
-///                                                            ---->
-///                                                                   execute `AvbOps` (C)
-///                                                                   callbacks as needed
-///                                                            <----
-///                                  `as_ops()` unwraps:
-///                                  `AvbOps` (C) ->
-///                                  `UserData` (Rust/thin) ->
-///                                  `Ops` (Rust/fat)
-///
-///                                  Convert callback data to
-///                                  safe Rust
-///                           <----
-/// perform `Ops` (Rust)
-/// callback
-/// ```
-struct UserData<'a>(&'a mut dyn Ops);
-
-impl<'a> UserData<'a> {
-    fn new(ops: &'a mut impl Ops) -> Self {
-        Self(ops)
-    }
-
-    /// Creates the `AvbOps` with a mutable pointer to this `UserData` to pass into libavb.
-    ///
-    /// # Safety
-    /// The returned `AvbOps` contains a mutable pointer to this `UserData`, which means the caller
-    /// must manually enforce the rules around mutable borrows and lifetimes.
-    ///
-    /// In particular, this `UserData`:
-    /// * must remain alive and unmoved while the returned `AvbOps` exists, or it will result in
-    ///   a dangling pointer
-    /// * must not be directly accessed (including the contained `Ops`) while the returned `AvbOps`
-    ///   exists, or it will violate Rust's mutable borrowing rules
-    unsafe fn create_avb_ops(&mut self) -> AvbOps {
-        AvbOps {
-            // Rust won't transitively cast so we need to cast twice manually, but the compiler is
-            // smart enough to deduce the types we need.
-            user_data: self as *mut _ as *mut _,
-            ab_ops: ptr::null_mut(),  // Deprecated, no need to support.
-            atx_ops: ptr::null_mut(), // TODO: support optional ATX.
-            read_from_partition: Some(read_from_partition),
-            get_preloaded_partition: Some(get_preloaded_partition),
-            write_to_partition: None, // Not needed, only used for deprecated A/B.
-            validate_vbmeta_public_key: Some(validate_vbmeta_public_key),
-            // TODO: add callback wrappers for the remaining API.
-            read_rollback_index: None,
-            write_rollback_index: None,
-            read_is_device_unlocked: None,
-            get_unique_guid_for_partition: None,
-            get_size_of_partition: None,
-            read_persistent_value: None,
-            write_persistent_value: None,
-            validate_public_key_for_partition: None,
-        }
-    }
-}
-
-/// Extracts the user-provided `Ops` from a raw `AvbOps`.
-///
-/// # Arguments
-/// * `avb_ops`: The raw `AvbOps` pointer used by libavb.
-///
-/// # Returns
-/// The Rust `Ops` extracted from `avb_ops.user_data`.
-///
-/// # Safety
-/// Only call this function on an `AvbOps` created via `create_avb_ops()`.
-///
-/// Additionally, this should be considered a mutable borrow of the contained `Ops`:
-/// * do not return back to libavb while still holding the returned reference, or it will result
-///   in a dangling reference
-/// * do not call this again until the previous `Ops` goes out of scope, or it will violate Rust's
-///   mutable borrowing rules
-///
-/// In practice, these conditions are met since we call this exactly once in each callback
-/// to extract the `Ops`, and drop it at callback completion.
-unsafe fn as_ops<'a>(avb_ops: *mut AvbOps) -> Result<&'a mut dyn Ops> {
-    // SAFETY: we created this AvbOps object and passed it to libavb so we know it meets all
-    // the criteria for `as_mut()`.
-    let avb_ops = unsafe { avb_ops.as_mut() }.ok_or(IoError::Io)?;
-    // Cast the void* `user_data` back to a UserData*.
-    let user_data = avb_ops.user_data as *mut UserData;
-    // SAFETY: we created this UserData object and passed it to libavb so we know it meets all
-    // the criteria for `as_mut()`.
-    Ok(unsafe { user_data.as_mut() }.ok_or(IoError::Io)?.0)
-}
-
-/// Converts a non-NULL `ptr` to `()`, NULL to `Err(IoError::Io)`.
-fn check_nonnull<T>(ptr: *const T) -> Result<()> {
+/// Returns `Err(SlotVerifyError::Internal)` if the given pointer is `NULL`.
+fn check_nonnull<T>(ptr: *const T) -> SlotVerifyNoDataResult<()> {
     match ptr.is_null() {
-        true => Err(IoError::Io),
+        true => Err(SlotVerifyError::Internal),
         false => Ok(()),
     }
 }
 
-/// Wraps a callback to convert the given `Result<>` to raw `AvbIOResult` for libavb.
+/// Wraps a raw C `AvbVBMetaData` struct.
 ///
-/// See corresponding `try_*` function docs.
-unsafe extern "C" fn read_from_partition(
-    ops: *mut AvbOps,
-    partition: *const c_char,
-    offset: i64,
-    num_bytes: usize,
-    buffer: *mut c_void,
-    out_num_read: *mut usize,
-) -> AvbIOResult {
-    result_to_io_enum(try_read_from_partition(
-        ops,
-        partition,
-        offset,
-        num_bytes,
-        buffer,
-        out_num_read,
-    ))
-}
+/// This provides a Rust safe view over the raw data; no copies are made.
+//
+// `repr(transparent)` guarantees that size and alignment match the underlying type exactly, so that
+// we can cast the array of `AvbVBMetaData` structs directly into a slice of `VbmetaData` wrappers
+// without allocating any additional memory.
+#[repr(transparent)]
+pub struct VbmetaData(AvbVBMetaData);
 
-/// Bounces the C callback into the user-provided Rust implementation.
-///
-/// # Safety
-/// * `ops` must have been created via `create_avb_ops()`.
-/// * `partition` must adhere to the requirements of `CStr::from_ptr()`.
-/// * `buffer` must adhere to the requirements of `slice::from_raw_parts_mut()`.
-/// * `out_num_read` must adhere to the requirements of `ptr::write()`.
-unsafe fn try_read_from_partition(
-    ops: *mut AvbOps,
-    partition: *const c_char,
-    offset: i64,
-    num_bytes: usize,
-    buffer: *mut c_void,
-    out_num_read: *mut usize,
-) -> Result<()> {
-    check_nonnull(partition)?;
-    check_nonnull(buffer)?;
-    check_nonnull(out_num_read)?;
-
-    // Initialize the output variables first in case something fails.
-    // SAFETY:
-    // * we've checked that the pointer is non-NULL.
-    // * libavb gives us a properly-allocated `out_num_read`.
-    unsafe { ptr::write(out_num_read, 0) };
-
-    // SAFETY:
-    // * we only use `ops` objects created via `create_avb_ops()` as required.
-    // * `ops` is only extracted once and is dropped at the end of the callback.
-    let ops = unsafe { as_ops(ops) }?;
-    // SAFETY:
-    // * we've checked that the pointer is non-NULL.
-    // * libavb gives us a properly-allocated and nul-terminated `partition`.
-    // * the string contents are not modified while the returned `&CStr` exists.
-    // * the returned `&CStr` is not held past the scope of this callback.
-    let partition = unsafe { CStr::from_ptr(partition) };
-    // SAFETY:
-    // * we've checked that the pointer is non-NULL.
-    // * libavb gives us a properly-allocated `buffer` with size `num_bytes`.
-    // * we only access the contents via the returned slice.
-    // * the returned slice is not held past the scope of this callback.
-    let buffer = unsafe { slice::from_raw_parts_mut(buffer as *mut u8, num_bytes) };
-
-    let bytes_read = ops.read_from_partition(partition, offset, buffer)?;
-    // SAFETY:
-    // * we've checked that the pointer is non-NULL.
-    // * libavb gives us a properly-allocated `out_num_read`.
-    unsafe { ptr::write(out_num_read, bytes_read) };
-    Ok(())
-}
-
-/// Wraps a callback to convert the given `Result<>` to raw `AvbIOResult` for libavb.
-///
-/// See corresponding `try_*` function docs.
-unsafe extern "C" fn get_preloaded_partition(
-    ops: *mut AvbOps,
-    partition: *const c_char,
-    num_bytes: usize,
-    out_pointer: *mut *mut u8,
-    out_num_bytes_preloaded: *mut usize,
-) -> AvbIOResult {
-    result_to_io_enum(try_get_preloaded_partition(
-        ops,
-        partition,
-        num_bytes,
-        out_pointer,
-        out_num_bytes_preloaded,
-    ))
-}
-
-/// Bounces the C callback into the user-provided Rust implementation.
-///
-/// # Safety
-/// * `ops` must have been created via `create_avb_ops()`.
-/// * `partition` must adhere to the requirements of `CStr::from_ptr()`.
-/// * `out_pointer` and `out_num_bytes_preloaded` must adhere to the requirements of `ptr::write()`.
-/// * `out_pointer` will become an alias to the `ops` preloaded partition data, so the preloaded
-///   data must remain valid and unmodified while `out_pointer` exists.
-unsafe fn try_get_preloaded_partition(
-    ops: *mut AvbOps,
-    partition: *const c_char,
-    num_bytes: usize,
-    out_pointer: *mut *mut u8,
-    out_num_bytes_preloaded: *mut usize,
-) -> Result<()> {
-    check_nonnull(partition)?;
-    check_nonnull(out_pointer)?;
-    check_nonnull(out_num_bytes_preloaded)?;
-
-    // Initialize the output variables first in case something fails.
-    // SAFETY:
-    // * we've checked that the pointers are non-NULL.
-    // * libavb gives us properly-aligned and sized `out` vars.
-    unsafe {
-        ptr::write(out_pointer, ptr::null_mut());
-        ptr::write(out_num_bytes_preloaded, 0);
-    }
-
-    // SAFETY:
-    // * we only use `ops` objects created via `create_avb_ops()` as required.
-    // * `ops` is only extracted once and is dropped at the end of the callback.
-    let ops = unsafe { as_ops(ops) }?;
-    // SAFETY:
-    // * we've checked that the pointer is non-NULL.
-    // * libavb gives us a properly-allocated and nul-terminated `partition`.
-    // * the string contents are not modified while the returned `&CStr` exists.
-    // * the returned `&CStr` is not held past the scope of this callback.
-    let partition = unsafe { CStr::from_ptr(partition) };
-
-    match ops.get_preloaded_partition(partition) {
-        // SAFETY:
-        // * we've checked that the pointers are non-NULL.
-        // * libavb gives us properly-aligned and sized `out` vars.
-        Ok(contents) => unsafe {
-            ptr::write(
-                out_pointer,
-                // Warning: we are casting an immutable &[u8] to a mutable *u8. If libavb actually
-                // modified these contents this could cause undefined behavior, but it just reads.
-                // TODO: can we change the libavb API to take a const*?
-                contents.as_ptr() as *mut u8,
-            );
-            ptr::write(
-                out_num_bytes_preloaded,
-                // Truncate here if necessary, we may have more preloaded data than libavb needs.
-                min(contents.len(), num_bytes),
-            );
-        },
-        // No-op if this partition is not preloaded, we've already reset the out variables to
-        // indicate preloaded data is not available.
-        Err(IoError::NotImplemented) => (),
-        Err(e) => return Err(e),
-    };
-    Ok(())
-}
-
-/// Wraps a callback to convert the given `Result<>` to raw `AvbIOResult` for libavb.
-///
-/// See corresponding `try_*` function docs.
-unsafe extern "C" fn validate_vbmeta_public_key(
-    ops: *mut AvbOps,
-    public_key_data: *const u8,
-    public_key_length: usize,
-    public_key_metadata: *const u8,
-    public_key_metadata_length: usize,
-    out_is_trusted: *mut bool,
-) -> AvbIOResult {
-    result_to_io_enum(try_validate_vbmeta_public_key(
-        ops,
-        public_key_data,
-        public_key_length,
-        public_key_metadata,
-        public_key_metadata_length,
-        out_is_trusted,
-    ))
-}
-
-/// Bounces the C callback into the user-provided Rust implementation.
-///
-/// # Safety
-/// * `ops` must have been created via `create_avb_ops()`.
-/// * `public_key_*` args must adhere to the requirements of `slice::from_raw_parts()`.
-/// * `out_is_trusted` must adhere to the requirements of `ptr::write()`.
-unsafe fn try_validate_vbmeta_public_key(
-    ops: *mut AvbOps,
-    public_key_data: *const u8,
-    public_key_length: usize,
-    public_key_metadata: *const u8,
-    public_key_metadata_length: usize,
-    out_is_trusted: *mut bool,
-) -> Result<()> {
-    check_nonnull(public_key_data)?;
-    check_nonnull(out_is_trusted)?;
-
-    // Initialize the output variables first in case something fails.
-    // SAFETY:
-    // * we've checked that the pointer is non-NULL.
-    // * libavb gives us a properly-allocated `out_is_trusted`.
-    unsafe { ptr::write(out_is_trusted, false) };
-
-    // SAFETY:
-    // * we only use `ops` objects created via `create_avb_ops()` as required.
-    // * `ops` is only extracted once and is dropped at the end of the callback.
-    let ops = unsafe { as_ops(ops) }?;
-    // SAFETY:
-    // * we've checked that the pointer is non-NULL.
-    // * libavb gives us a properly-allocated `public_key_data` with size `public_key_length`.
-    // * we only access the contents via the returned slice.
-    // * the returned slice is not held past the scope of this callback.
-    let public_key = unsafe { slice::from_raw_parts(public_key_data, public_key_length) };
-    let metadata = check_nonnull(public_key_metadata).ok().map(
-        // SAFETY:
-        // * we've checked that the pointer is non-NULL.
-        // * libavb gives us a properly-allocated `public_key_metadata` with size
-        //   `public_key_metadata_length`.
-        // * we only access the contents via the returned slice.
-        // * the returned slice is not held past the scope of this callback.
-        |_| unsafe { slice::from_raw_parts(public_key_metadata, public_key_metadata_length) },
-    );
-
-    let trusted = ops.validate_vbmeta_public_key(public_key, metadata)?;
-
-    // SAFETY:
-    // * we've checked that the pointer is non-NULL.
-    // * libavb gives us a properly-allocated `out_is_trusted`.
-    unsafe { ptr::write(out_is_trusted, trusted) };
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use std::collections::HashMap;
-    use std::ffi::CString;
-
-    /// Ops implementation for testing.
+impl VbmetaData {
+    /// Validates the internal data so the accessors can be fail-free. This should be called on all
+    /// `VbmetaData` objects before they are handed to the user.
     ///
-    /// In addition to being used to exercise individual callback wrappers, this will be used for
-    /// full verification tests so behavior needs to be correct.
-    #[derive(Default)]
-    struct TestOps {
-        /// Partitions to "read" on request.
-        pub partitions: HashMap<&'static str, Vec<u8>>,
-        /// Preloaded partitions. Same functionality as `partitions`, just separated to be able
-        /// to test reading and preloading callbacks independently.
-        pub preloaded: HashMap<&'static str, Vec<u8>>,
-        /// Vbmeta public keys as a map of {(key, metadata): trusted}. Querying unknown keys will
-        /// return `IoError::Io`.
-        pub vbmeta_keys: HashMap<(&'static [u8], Option<&'static [u8]>), bool>,
+    /// Normally this would be done in a `new()` function but we never instantiate `VbmetaData`
+    /// objects ourselves, we just cast them from the C structs provided by libavb.
+    ///
+    /// Returns `Err(SlotVerifyError::Internal)` on failure.
+    fn validate(&self) -> SlotVerifyNoDataResult<()> {
+        check_nonnull(self.0.partition_name)?;
+        check_nonnull(self.0.vbmeta_data)?;
+        Ok(())
     }
 
-    impl Ops for TestOps {
-        fn read_from_partition(
-            &mut self,
-            partition: &CStr,
-            offset: i64,
-            buffer: &mut [u8],
-        ) -> Result<usize> {
-            let contents = self
-                .partitions
-                .get(partition.to_str()?)
-                .ok_or(IoError::NoSuchPartition)?;
-
-            // Negative offset means count backwards from the end.
-            let offset = {
-                if offset < 0 {
-                    offset
-                        .checked_add(i64::try_from(contents.len()).unwrap())
-                        .unwrap()
-                } else {
-                    offset
-                }
-            };
-            if offset < 0 {
-                return Err(IoError::RangeOutsidePartition);
-            }
-            let offset = usize::try_from(offset).unwrap();
-
-            if offset >= contents.len() {
-                return Err(IoError::RangeOutsidePartition);
-            }
-
-            // Truncating is allowed for reads past the partition end.
-            let end = min(offset.checked_add(buffer.len()).unwrap(), contents.len());
-            let bytes_read = end - offset;
-
-            buffer[..bytes_read].copy_from_slice(&contents[offset..end]);
-            Ok(bytes_read)
-        }
-
-        fn get_preloaded_partition(&mut self, partition: &CStr) -> Result<&[u8]> {
-            self.preloaded
-                .get(partition.to_str()?)
-                .ok_or(IoError::NotImplemented)
-                .map(|vec| &vec[..])
-        }
-
-        fn validate_vbmeta_public_key(
-            &mut self,
-            public_key: &[u8],
-            public_key_metadata: Option<&[u8]>,
-        ) -> Result<bool> {
-            self.vbmeta_keys
-                .get(&(public_key, public_key_metadata))
-                .ok_or(IoError::Io)
-                .copied()
-        }
+    /// Returns the name of the partition this vbmeta image was loaded from.
+    pub fn partition_name(&self) -> &CStr {
+        // SAFETY:
+        // * libavb gives us a properly-allocated and nul-terminated string.
+        // * the returned contents remain valid and unmodified while we exist.
+        unsafe { CStr::from_ptr(self.0.partition_name) }
     }
 
-    /// Calls the `read_from_partition()` C callback the same way libavb would.
-    fn call_read_from_partition(
-        ops: &mut TestOps,
-        partition: &str,
-        offset: i64,
-        num_bytes: usize,
-        buffer: &mut [u8],
-        out_num_read: &mut usize,
-    ) -> AvbIOResult {
-        let mut user_data = UserData(ops);
-        // SAFETY: `user_data` remains in place and untouched while `avb_ops` exists.
-        let mut avb_ops = unsafe { user_data.create_avb_ops() };
-        let part_name = CString::new(partition).unwrap();
-
-        // SAFETY: we've properly created and initialized all the raw pointers being passed into
-        // this C function.
-        unsafe {
-            avb_ops.read_from_partition.unwrap()(
-                &mut avb_ops,
-                part_name.as_ptr(),
-                offset,
-                num_bytes,
-                buffer.as_mut_ptr() as *mut c_void,
-                out_num_read as *mut usize,
-            )
-        }
+    /// Returns the vbmeta image contents.
+    pub fn data(&self) -> &[u8] {
+        // SAFETY:
+        // * libavb gives us a properly-allocated byte array.
+        // * the returned contents remain valid and unmodified while we exist.
+        unsafe { slice::from_raw_parts(self.0.vbmeta_data, self.0.vbmeta_size) }
     }
 
-    /// Calls the `get_preloaded_partition()` C callback the same way libavb would.
+    /// Returns the vbmeta verification result.
+    pub fn verify_result(&self) -> VbmetaVerifyResult<()> {
+        vbmeta_verify_enum_to_result(self.0.verify_result)
+    }
+
+    /// Extracts the descriptors from the vbmeta image.
+    ///
+    /// Note that this function allocates memory to hold the `Descriptor` objects.
+    ///
+    /// # Returns
+    /// A vector of descriptors, or `DescriptorError` on failure.
+    pub fn descriptors(&self) -> DescriptorResult<Vec<Descriptor>> {
+        // SAFETY: the only way to get a `VbmetaData` object is via the return value of
+        // `slot_verify()`, so we know we have been properly validated.
+        unsafe { get_descriptors(self) }
+    }
+
+    /// Gets a property from the vbmeta image for the given key
+    ///
+    /// This function re-implements the libavb avb_property_lookup logic.
+    ///
+    /// # Returns
+    /// Byte array with property data or None in case property not found or failure.
+    pub fn get_property_value(&self, key: &str) -> Option<&[u8]> {
+        self.descriptors().ok()?.iter().find_map(|d| match d {
+            Descriptor::Property(p) if p.key == key => Some(p.value),
+            _ => None,
+        })
+    }
+}
+
+impl fmt::Display for VbmetaData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}: {:?}", self.partition_name(), self.verify_result())
+    }
+}
+
+/// Forwards to `Display` formatting; the default `Debug` formatting implementation isn't very
+/// useful as it's mostly raw pointer addresses.
+impl fmt::Debug for VbmetaData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+/// Wraps a raw C `AvbPartitionData` struct.
+///
+/// This provides a Rust safe view over the raw data; no copies are made.
+#[repr(transparent)]
+pub struct PartitionData(AvbPartitionData);
+
+impl PartitionData {
+    /// Validates the internal data so the accessors can be fail-free. This should be called on all
+    /// `PartitionData` objects before they are handed to the user.
+    ///
+    /// Normally this would be done in a `new()` function but we never instantiate `PartitionData`
+    /// objects ourselves, we just cast them from the C structs provided by libavb.
+    ///
+    /// Returns `Err(SlotVerifyError::Internal)` on failure.
+    fn validate(&self) -> SlotVerifyNoDataResult<()> {
+        check_nonnull(self.0.partition_name)?;
+        check_nonnull(self.0.data)?;
+        Ok(())
+    }
+
+    /// Returns the name of the partition this image was loaded from.
+    pub fn partition_name(&self) -> &CStr {
+        // SAFETY:
+        // * libavb gives us a properly-allocated and nul-terminated string.
+        // * the returned contents remain valid and unmodified while we exist.
+        unsafe { CStr::from_ptr(self.0.partition_name) }
+    }
+
+    /// Returns the image contents.
+    pub fn data(&self) -> &[u8] {
+        // SAFETY:
+        // * libavb gives us a properly-allocated byte array.
+        // * the returned contents remain valid and unmodified while we exist.
+        unsafe { slice::from_raw_parts(self.0.data, self.0.data_size) }
+    }
+
+    /// Returns whether this partition was preloaded via `get_preloaded_partition()`.
+    pub fn preloaded(&self) -> bool {
+        self.0.preloaded
+    }
+
+    /// Returns the verification result for this partition.
+    ///
+    /// Only top-level `Verification` errors will contain valid `SlotVerifyData` objects, if this
+    /// individual partition returns a `Verification` error the error will always contain `None`.
+    pub fn verify_result(&self) -> SlotVerifyNoDataResult<()> {
+        slot_verify_enum_to_result(self.0.verify_result)
+    }
+}
+
+/// A "(p)" after the partition name indicates a preloaded partition.
+impl fmt::Display for PartitionData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:?}{}: {:?}",
+            self.partition_name(),
+            match self.preloaded() {
+                true => "(p)",
+                false => "",
+            },
+            self.verify_result()
+        )
+    }
+}
+
+/// Forwards to `Display` formatting; the default `Debug` formatting implementation isn't very
+/// useful as it's mostly raw pointer addresses.
+impl fmt::Debug for PartitionData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+/// Wraps a raw C `AvbSlotVerifyData` struct.
+///
+/// This provides a Rust safe view over the raw data; no copies are made.
+///
+/// # Lifetimes
+/// * `'a`: the lifetime of any preloaded partition data borrowed from an `Ops<'a>` object.
+///
+/// If the `Ops` doesn't provide any preloaded data, `SlotVerifyData` doesn't borrow anything
+/// and instead allocates and owns all data internally, freeing it accordingly on `Drop`. In this
+/// case, `'a` can be `'static` which imposes no lifetime restrictions on `SlotVerifyData`.
+pub struct SlotVerifyData<'a> {
+    /// Internally owns the underlying data and deletes it on drop.
+    raw_data: NonNull<AvbSlotVerifyData>,
+
+    /// This provides the necessary lifetimes so the compiler can make sure that the preloaded
+    /// partition data stays alive at least as long as we do, since the underlying
+    /// `AvbSlotVerifyData` may wrap this data rather than making a copy.
+    //
+    // We do not want to actually borrow an `Ops` here, since in some cases `Ops` is just a
+    // temporary object and may go out of scope before us. The only shared data is the preloaded
+    // partition contents, not the entire `Ops` object.
+    _preloaded: PhantomData<&'a [u8]>,
+}
+
+// Useful so that `SlotVerifyError`, which may hold a `SlotVerifyData`, can derive `PartialEq`.
+impl<'a> PartialEq for SlotVerifyData<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        // A `SlotVerifyData` uniquely owns the underlying data so is only equal to itself.
+        ptr::eq(self, other)
+    }
+}
+
+impl<'a> Eq for SlotVerifyData<'a> {}
+
+impl<'a> SlotVerifyData<'a> {
+    /// Creates a `SlotVerifyData` wrapping the given raw `AvbSlotVerifyData`.
+    ///
+    /// The returned `SlotVerifyData` will take ownership of the given `AvbSlotVerifyData` and
+    /// properly release the allocated memory when it drops.
+    ///
+    /// If `ops` provided any preloaded data, the returned `SlotVerifyData` also borrows the data to
+    /// account for the underlying `AvbSlotVerifyData` holding a pointer to it. If there was no
+    /// preloaded data, then `SlotVerifyData` owns all its data.
+    ///
+    /// # Arguments
+    /// * `data`: a `AvbSlotVerifyData` object created by libavb using `ops`.
+    /// * `ops`: the user-provided `Ops` object that was used for verification; only used here to
+    ///          grab the preloaded data lifetime.
+    ///
+    /// # Returns
+    /// The new object, or `Err(SlotVerifyError::Internal)` if the data looks invalid.
     ///
     /// # Safety
-    /// If `ops` provides preloaded data, `out_buffer` will become an alias to this data. The
-    /// lifetime bounds will ensure `ops` outlives `out_buffer`, but the caller must ensure the
-    /// preloaded data is not modified while `out_buffer` lives.
-    unsafe fn call_get_preloaded_partition<'a, 'b>(
-        ops: &'a mut TestOps,
-        partition: &str,
-        num_bytes: usize,
-        out_buffer: &mut &'b mut [u8],
-        out_num_bytes_preloaded: &mut usize,
-    ) -> AvbIOResult
-    where
-        'a: 'b,
-    {
-        let mut user_data = UserData(ops);
-        // SAFETY: `user_data` remains in place and untouched while `avb_ops` exists.
-        let mut avb_ops = unsafe { user_data.create_avb_ops() };
-        let part_name = CString::new(partition).unwrap();
-        let mut out_ptr: *mut u8 = ptr::null_mut();
+    /// * `data` must be a valid `AvbSlotVerifyData` object created by libavb using `ops`.
+    /// * after calling this function, do not access `data` except through the returned object
+    unsafe fn new(
+        data: *mut AvbSlotVerifyData,
+        _ops: &dyn Ops<'a>,
+    ) -> SlotVerifyNoDataResult<Self> {
+        let ret = Self {
+            raw_data: NonNull::new(data).ok_or(SlotVerifyError::Internal)?,
+            _preloaded: PhantomData,
+        };
 
+        // Validate all the contained data here so accessors will never fail.
+        // SAFETY: `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
+        let data = unsafe { ret.raw_data.as_ref() };
+        check_nonnull(data.ab_suffix)?;
+        check_nonnull(data.vbmeta_images)?;
+        check_nonnull(data.loaded_partitions)?;
+        check_nonnull(data.cmdline)?;
+        ret.vbmeta_data().iter().try_for_each(|v| v.validate())?;
+        ret.partition_data().iter().try_for_each(|i| i.validate())?;
+
+        Ok(ret)
+    }
+
+    /// Returns the slot suffix string.
+    pub fn ab_suffix(&self) -> &CStr {
         // SAFETY:
-        // * We've properly created and initialized all the raw pointers being passed in
-        // * We've set up lifetimes such that the `TestOps` which owns the data will outlive
-        //   `out_buffer` which wraps the data.
-        let result = unsafe {
-            avb_ops.get_preloaded_partition.unwrap()(
-                &mut avb_ops,
-                part_name.as_ptr(),
-                num_bytes,
-                &mut out_ptr,
-                out_num_bytes_preloaded as *mut usize,
-            )
-        };
-
-        // If preload failed, libavb will see the null buffer and go to `read_from_partition()`.
-        // For our purposes we return `NO_SUCH_PARTITION` so we can detect and test this case.
-        if out_ptr.is_null() {
-            return AvbIOResult::AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION;
-        }
-
-        // SAFETY: we've properly created the `out` variables.
-        *out_buffer = unsafe { slice::from_raw_parts_mut(out_ptr, *out_num_bytes_preloaded) };
-        result
+        // * `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
+        // * libavb gives us a properly-allocated and nul-terminated string.
+        // * the returned contents remain valid and unmodified while we exist.
+        unsafe { CStr::from_ptr(self.raw_data.as_ref().ab_suffix) }
     }
 
-    /// Calls the `validate_vbmeta_public_key()` C callback the same way libavb would.
-    fn call_validate_vbmeta_public_key(
-        ops: &mut TestOps,
-        public_key: &[u8],
-        public_key_metadata: Option<&[u8]>,
-        out_is_trusted: &mut bool,
-    ) -> AvbIOResult {
-        let mut user_data = UserData(ops);
-        // SAFETY: `user_data` remains in place and untouched while `avb_ops` exists.
-        let mut avb_ops = unsafe { user_data.create_avb_ops() };
-        let (metadata_ptr, metadata_size) =
-            public_key_metadata.map_or((ptr::null(), 0), |m| (m.as_ptr(), m.len()));
-
-        // SAFETY: we've properly created and initialized all the raw pointers being passed in.
+    /// Returns the `VbmetaData` structs.
+    pub fn vbmeta_data(&self) -> &[VbmetaData] {
+        // SAFETY:
+        // * `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
+        // * libavb gives us a properly-allocated array of structs.
+        // * the returned contents remain valid and unmodified while we exist.
         unsafe {
-            avb_ops.validate_vbmeta_public_key.unwrap()(
-                &mut avb_ops,
-                public_key.as_ptr(),
-                public_key.len(),
-                metadata_ptr,
-                metadata_size,
-                out_is_trusted,
+            slice::from_raw_parts(
+                // `repr(transparent)` means we can cast between these types.
+                self.raw_data.as_ref().vbmeta_images as *const VbmetaData,
+                self.raw_data.as_ref().num_vbmeta_images,
             )
         }
     }
 
-    #[test]
-    fn test_read_from_partition() {
-        let mut ops = TestOps::default();
-        ops.partitions = HashMap::from([("foo", vec![1u8, 2u8, 3u8, 4u8])]);
-
-        let mut buffer: [u8; 8] = [0; 8];
-        let mut bytes_read: usize = 0;
-        let result = call_read_from_partition(&mut ops, "foo", 0, 4, &mut buffer, &mut bytes_read);
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_OK);
-        assert_eq!(bytes_read, 4);
-        assert_eq!(buffer, [1, 2, 3, 4, 0, 0, 0, 0]);
+    /// Returns the `PartitionData` structs.
+    pub fn partition_data(&self) -> &[PartitionData] {
+        // SAFETY:
+        // * `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
+        // * libavb gives us a properly-allocated array of structs.
+        // * the returned contents remain valid and unmodified while we exist.
+        unsafe {
+            slice::from_raw_parts(
+                // `repr(transparent)` means we can cast between these types.
+                self.raw_data.as_ref().loaded_partitions as *const PartitionData,
+                self.raw_data.as_ref().num_loaded_partitions,
+            )
+        }
     }
 
-    #[test]
-    fn test_read_from_partition_with_offset() {
-        let mut ops = TestOps::default();
-        ops.partitions = HashMap::from([("foo", vec![1u8, 2u8, 3u8, 4u8])]);
-
-        let mut buffer: [u8; 8] = [0; 8];
-        let mut bytes_read: usize = 0;
-        let result = call_read_from_partition(&mut ops, "foo", 1, 2, &mut buffer, &mut bytes_read);
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_OK);
-        assert_eq!(bytes_read, 2);
-        assert_eq!(buffer, [2, 3, 0, 0, 0, 0, 0, 0]);
+    /// Returns the kernel commandline.
+    pub fn cmdline(&self) -> &CStr {
+        // SAFETY:
+        // * `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
+        // * libavb gives us a properly-allocated and nul-terminated string.
+        // * the returned contents remain valid and unmodified while we exist.
+        unsafe { CStr::from_ptr(self.raw_data.as_ref().cmdline) }
     }
 
-    #[test]
-    fn test_read_from_partition_negative_offset() {
-        let mut ops = TestOps::default();
-        ops.partitions = HashMap::from([("foo", vec![1u8, 2u8, 3u8, 4u8])]);
-
-        let mut buffer: [u8; 8] = [0; 8];
-        let mut bytes_read: usize = 0;
-        let result = call_read_from_partition(&mut ops, "foo", -2, 2, &mut buffer, &mut bytes_read);
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_OK);
-        assert_eq!(bytes_read, 2);
-        assert_eq!(buffer, [3, 4, 0, 0, 0, 0, 0, 0]);
+    /// Returns the rollback indices.
+    pub fn rollback_indexes(&self) -> &[u64] {
+        // SAFETY: `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
+        &unsafe { self.raw_data.as_ref() }.rollback_indexes[..]
     }
 
-    #[test]
-    fn test_read_from_partition_truncate() {
-        let mut ops = TestOps::default();
-        ops.partitions = HashMap::from([("foo", vec![1u8, 2u8, 3u8, 4u8])]);
+    /// Returns the resolved hashtree error mode.
+    pub fn resolved_hashtree_error_mode(&self) -> HashtreeErrorMode {
+        // SAFETY: `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
+        unsafe { self.raw_data.as_ref() }.resolved_hashtree_error_mode
+    }
+}
 
-        let mut buffer: [u8; 8] = [0; 8];
-        let mut bytes_read: usize = 0;
-        let result = call_read_from_partition(&mut ops, "foo", 0, 8, &mut buffer, &mut bytes_read);
+/// Frees any internally-allocated and owned data.
+impl<'a> Drop for SlotVerifyData<'a> {
+    fn drop(&mut self) {
+        // SAFETY:
+        // * `raw_data` points to a valid `AvbSlotVerifyData` object owned by us.
+        // * libavb created the object and requires us to free it by calling this function.
+        unsafe { avb_slot_verify_data_free(self.raw_data.as_ptr()) };
+    }
+}
 
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_OK);
-        assert_eq!(bytes_read, 4);
-        assert_eq!(buffer, [1, 2, 3, 4, 0, 0, 0, 0]);
+/// Implements `Display` to make it easy to print some basic information.
+///
+/// This implementation will print the slot, partition name, and verification status for all
+/// vbmetadata and images.
+impl<'a> fmt::Display for SlotVerifyData<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "slot: {:?}, vbmeta: {:?}, images: {:?}",
+            self.ab_suffix(),
+            self.vbmeta_data(),
+            self.partition_data()
+        )
+    }
+}
+
+/// Forwards to `Display` formatting; the default `Debug` formatting implementation isn't very
+/// useful as it's mostly raw pointer addresses.
+impl<'a> fmt::Debug for SlotVerifyData<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+/// Performs verification of the requested images.
+///
+/// This wraps `avb_slot_verify()` for Rust, see the original docs for more details.
+///
+/// # Arguments
+/// * `ops`: implementation of the required verification callbacks.
+/// * `requested_partition`: the set of partition names to verify.
+/// * `ab_suffix`: the slot suffix to append to the partition names, or None.
+/// * `flags`: flags to configure verification.
+/// * `hashtree_error_mode`: desired error handling behavior.
+///
+/// # Returns
+/// `Ok` if verification completed successfully, the verification error otherwise. `SlotVerifyData`
+/// will be returned in two cases:
+///
+/// 1. always returned on verification success
+/// 2. if `AllowVerificationError` is given in `flags`, it will also be returned on verification
+///    failure
+///
+/// A returned `SlotVerifyData` will also borrow any preloaded data provided by `ops`. The `ops`
+/// object itself can go out of scope, but any preloaded data it could provide must outlive the
+/// returned object.
+pub fn slot_verify<'a>(
+    ops: &mut dyn Ops<'a>,
+    requested_partitions: &[&CStr],
+    ab_suffix: Option<&CStr>,
+    flags: SlotVerifyFlags,
+    hashtree_error_mode: HashtreeErrorMode,
+) -> SlotVerifyResult<'a, SlotVerifyData<'a>> {
+    // libavb detects the size of the `requested_partitions` array by NULL termination. Expecting
+    // the Rust caller to do this would make the API much more awkward, so we populate a
+    // NULL-terminated array of c-string pointers ourselves. For now we use a fixed-sized array
+    // rather than dynamically allocating, 8 should be more than enough.
+    const MAX_PARTITION_ARRAY_SIZE: usize = 8 + 1; // Max 8 partition names + 1 for NULL terminator.
+    if requested_partitions.len() >= MAX_PARTITION_ARRAY_SIZE {
+        return Err(SlotVerifyError::Internal);
+    }
+    let mut partitions_array = [null() as *const c_char; MAX_PARTITION_ARRAY_SIZE];
+    for (source, dest) in requested_partitions.iter().zip(partitions_array.iter_mut()) {
+        *dest = source.as_ptr();
     }
 
-    #[test]
-    fn test_read_from_partition_unknown() {
-        let mut ops = TestOps::default();
-        ops.partitions = HashMap::from([("foo", vec![1u8, 2u8, 3u8, 4u8])]);
+    // To be more Rust idiomatic we allow `ab_suffix` to be `None`, but libavb requires a valid
+    // pointer to an empty string in this case, not NULL.
+    let ab_suffix = ab_suffix.unwrap_or(CStr::from_bytes_with_nul(b"\0").unwrap());
 
-        let mut buffer: [u8; 8] = [0; 8];
-        let mut bytes_read: usize = 10;
-        let result = call_read_from_partition(&mut ops, "bar", 0, 8, &mut buffer, &mut bytes_read);
+    let ops_bridge = pin!(ops::OpsBridge::new(ops));
+    let mut out_data: *mut AvbSlotVerifyData = null_mut();
 
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION);
-        assert_eq!(bytes_read, 0);
-        assert_eq!(buffer, [0; 8]);
-    }
+    // Call the libavb verification function.
+    //
+    // Note: do not use the `?` operator to return-early here; in some cases `out_data` will be
+    // allocated and returned even on verification failure, and we need to take ownership of it
+    // or else the memory will leak.
+    //
+    // SAFETY:
+    // * `ops_bridge.init_and_get_c_ops()` gives us a valid `AvbOps`.
+    // * we've properly initialized all objects passed into libavb.
+    // * if `out_data` is non-null on return, we take ownership via `SlotVerifyData`.
+    let result = slot_verify_enum_to_result(unsafe {
+        avb_slot_verify(
+            ops_bridge.init_and_get_c_ops(),
+            partitions_array.as_ptr(),
+            ab_suffix.as_ptr(),
+            flags,
+            hashtree_error_mode,
+            &mut out_data,
+        )
+    });
 
-    #[test]
-    fn test_get_preloaded_partition() {
-        let mut ops = TestOps::default();
-        ops.preloaded = HashMap::from([("foo_preload", vec![1u8, 2u8, 3u8, 4u8])]);
+    // If `out_data` is non-null, take ownership so memory gets released on drop.
+    let data = match out_data.is_null() {
+        true => None,
+        // SAFETY: `out_data` was properly allocated by libavb and ownership has passed to us.
+        false => Some(unsafe { SlotVerifyData::new(out_data, ops)? }),
+    };
 
-        let mut contents: &mut [u8] = &mut [];
-        let mut size: usize = 0;
-        // SAFETY: preloaded data remain valid and unmodified while `contents` exists.
-        let result = unsafe {
-            call_get_preloaded_partition(&mut ops, "foo_preload", 4, &mut contents, &mut size)
-        };
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_OK);
-        assert_eq!(size, 4);
-        assert_eq!(contents, [1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn test_get_preloaded_partition_truncate() {
-        let mut ops = TestOps::default();
-        ops.preloaded = HashMap::from([("foo_preload", vec![1u8, 2u8, 3u8, 4u8])]);
-
-        let mut contents: &mut [u8] = &mut [];
-        let mut size: usize = 0;
-        // SAFETY: preloaded data remain valid and unmodified while `contents` exists.
-        let result = unsafe {
-            call_get_preloaded_partition(&mut ops, "foo_preload", 2, &mut contents, &mut size)
-        };
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_OK);
-        assert_eq!(size, 2);
-        assert_eq!(contents, [1, 2]);
-    }
-
-    #[test]
-    fn test_get_preloaded_partition_unknown() {
-        let mut ops = TestOps::default();
-        ops.preloaded = HashMap::from([("foo_preload", vec![1u8, 2u8, 3u8, 4u8])]);
-
-        let mut contents: &mut [u8] = &mut [];
-        let mut size: usize = 10;
-        // SAFETY: requested preloaded data does not exist, no data alias is created.
-        let result =
-            unsafe { call_get_preloaded_partition(&mut ops, "bar", 4, &mut contents, &mut size) };
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION);
-        assert_eq!(size, 0);
-        assert_eq!(contents, []);
-    }
-
-    #[test]
-    fn test_validate_vbmeta_public_key() {
-        let mut ops = TestOps::default();
-        ops.vbmeta_keys = HashMap::from([((b"testkey".as_ref(), None), true)]);
-
-        let mut is_trusted = false;
-        let result = call_validate_vbmeta_public_key(&mut ops, b"testkey", None, &mut is_trusted);
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_OK);
-        assert!(is_trusted);
-    }
-
-    #[test]
-    fn test_validate_vbmeta_public_key_with_metadata() {
-        let mut ops = TestOps::default();
-        ops.vbmeta_keys =
-            HashMap::from([((b"testkey".as_ref(), Some(b"testmeta".as_ref())), true)]);
-
-        let mut is_trusted = false;
-        let result = call_validate_vbmeta_public_key(
-            &mut ops,
-            b"testkey",
-            Some(b"testmeta"),
-            &mut is_trusted,
-        );
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_OK);
-        assert!(is_trusted);
-    }
-
-    #[test]
-    fn test_validate_vbmeta_public_key_rejected() {
-        let mut ops = TestOps::default();
-        ops.vbmeta_keys = HashMap::from([((b"testkey".as_ref(), None), false)]);
-
-        let mut is_trusted = true;
-        let result = call_validate_vbmeta_public_key(&mut ops, b"testkey", None, &mut is_trusted);
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_OK);
-        assert!(!is_trusted);
-    }
-
-    #[test]
-    fn test_validate_vbmeta_public_key_error() {
-        let mut ops = TestOps::default();
-
-        let mut is_trusted = true;
-        let result = call_validate_vbmeta_public_key(&mut ops, b"testkey", None, &mut is_trusted);
-
-        assert_eq!(result, AvbIOResult::AVB_IO_RESULT_ERROR_IO);
-        assert!(!is_trusted);
+    // Fold the verify data into the result.
+    match result {
+        // libavb will always provide verification data on success.
+        Ok(()) => Ok(data.unwrap()),
+        // Data may also be provided on verification failure, fold it into the error.
+        Err(SlotVerifyError::Verification(None)) => Err(SlotVerifyError::Verification(data)),
+        // No other error provides verification data.
+        Err(e) => Err(e),
     }
 }

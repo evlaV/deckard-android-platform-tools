@@ -27,7 +27,7 @@ type FormatFn = Box<dyn Fn(&log::Record) -> String + Sync + Send>;
 /// or env_logger where available.
 #[derive(Default)]
 pub struct Config<'a> {
-    log_level: Option<log::Level>,
+    log_level: Option<log::LevelFilter>,
     custom_format: Option<FormatFn>,
     filter: Option<&'a str>,
     #[allow(dead_code)] // Field is only used on device, and ignored on host.
@@ -36,11 +36,15 @@ pub struct Config<'a> {
 
 /// Based on android_logger::Config
 impl<'a> Config<'a> {
-    /// Change the minimum log level.
+    /// Changes the maximum log level.
     ///
-    /// All values above the set level are logged. For example, if
-    /// `Warn` is set, the `Error` is logged too, but `Info` isn't.
-    pub fn with_min_level(mut self, level: log::Level) -> Self {
+    /// Note, that `Trace` is the maximum level, because it provides the
+    /// maximum amount of detail in the emitted logs.
+    ///
+    /// If `Off` level is provided, then nothing is logged at all.
+    ///
+    /// [`log::max_level()`] is considered as the default level.
+    pub fn with_max_level(mut self, level: log::LevelFilter) -> Self {
         self.log_level = Some(level);
         self
     }
@@ -56,7 +60,7 @@ impl<'a> Config<'a> {
     /// # use universal_logger::Config;
     /// universal_logger::init(
     ///     Config::default()
-    ///         .with_min_level(log::Level::Trace)
+    ///         .with_max_level(log::LevelFilter::Trace)
     ///         .format(|record| format!("my_app: {}", record.args()))
     /// )
     /// ```
@@ -86,7 +90,7 @@ pub fn init(config: Config) -> bool {
 
     let mut builder = env_logger::Builder::from_default_env();
     if let Some(log_level) = config.log_level {
-        builder.filter_level(log_level.to_level_filter());
+        builder.filter_level(log_level);
     }
     if let Some(custom_format) = config.custom_format {
         use std::io::Write; // Trait used by write!() macro, but not in Android code
@@ -116,7 +120,7 @@ pub fn init(config: Config) -> bool {
     // the builder instead.
     let mut builder = android_logger::Config::default();
     if let Some(log_level) = config.log_level {
-        builder = builder.with_min_level(log_level);
+        builder = builder.with_max_level(log_level);
     }
     if let Some(custom_format) = config.custom_format {
         builder = builder.format(move |f, r| {
@@ -144,12 +148,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_with_min_level() {
+    fn test_with_max_level() {
         let config = Config::default()
-            .with_min_level(log::Level::Trace)
-            .with_min_level(log::Level::Error);
+            .with_max_level(log::LevelFilter::Trace)
+            .with_max_level(log::LevelFilter::Error);
 
-        assert_eq!(config.log_level, Some(log::Level::Error));
+        assert_eq!(config.log_level, Some(log::LevelFilter::Error));
     }
 
     #[test]

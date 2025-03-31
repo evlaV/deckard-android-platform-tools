@@ -28,6 +28,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include "fastboot_driver_interface.h"
 #include "filesystem.h"
@@ -56,7 +57,8 @@ enum fb_buffer_type {
 };
 
 struct fastboot_buffer {
-    enum fb_buffer_type type;
+    fb_buffer_type type;
+    fb_buffer_type file_type;
     std::vector<SparsePtr> files;
     int64_t sz;
     unique_fd fd;
@@ -89,7 +91,7 @@ struct FlashingPlan {
     // If the image uses the default slot, or the user specified "all", then
     // the paired string will be empty. If the image requests a specific slot
     // (for example, system_other) it is specified instead.
-    ImageSource* source;
+    std::unique_ptr<ImageSource> source;
     bool wants_wipe = false;
     bool skip_reboot = false;
     bool wants_set_active = false;
@@ -187,7 +189,6 @@ int64_t get_sparse_limit(int64_t size, const FlashingPlan* fp);
 std::vector<SparsePtr> resparse_file(sparse_file* s, int64_t max_size);
 
 bool supports_AB(fastboot::IFastBootDriver* fb);
-bool is_retrofit_device(const ImageSource* source);
 bool is_logical(const std::string& partition);
 void fb_perform_format(const std::string& partition, int skip_if_not_supported,
                        const std::string& type_override, const std::string& size_override,

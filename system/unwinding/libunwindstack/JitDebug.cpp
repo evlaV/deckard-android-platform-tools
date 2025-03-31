@@ -26,11 +26,12 @@ namespace unwindstack {
 template <>
 bool GlobalDebugInterface<Elf>::Load(Maps*, std::shared_ptr<Memory>& memory, uint64_t addr,
                                      uint64_t size, /*out*/ std::shared_ptr<Elf>& elf) {
-  std::unique_ptr<MemoryBuffer> copy(new MemoryBuffer());
-  if (!copy->Resize(size) || !memory->ReadFully(addr, copy->GetPtr(0), size)) {
+  std::shared_ptr<Memory> copy(new MemoryBuffer(size));
+  uint8_t* dst_ptr = copy->GetPtr(0);
+  if (dst_ptr == nullptr || !memory->ReadFully(addr, dst_ptr, size)) {
     return false;
   }
-  elf.reset(new Elf(copy.release()));
+  elf.reset(new Elf(copy));
   return elf->Init() && elf->valid();
 }
 

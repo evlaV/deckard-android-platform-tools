@@ -17,39 +17,30 @@
 
 #include <memory>
 #include <optional>
-#include <unordered_map>
 #include <vector>
 
 #include <android-base/unique_fd.h>
 #include <libsnapshot/cow_format.h>
+#include <libsnapshot_cow/parser_base.h>
 
 namespace android {
 namespace snapshot {
 
-class CowParserV2 {
+class CowParserV2 final : public CowParserBase {
   public:
-    bool Parse(android::base::borrowed_fd fd, const CowHeader& header,
-               std::optional<uint64_t> label = {});
+    bool Parse(android::base::borrowed_fd fd, const CowHeaderV3& header,
+               std::optional<uint64_t> label = {}) override;
+    bool Translate(TranslatedCowOps* out) override;
+    std::optional<CowFooter> footer() const override { return footer_; }
 
     const CowHeader& header() const { return header_; }
-    const std::optional<CowFooter>& footer() const { return footer_; }
-    std::shared_ptr<std::vector<CowOperation>> ops() { return ops_; }
-    std::shared_ptr<std::unordered_map<uint64_t, uint64_t>> data_loc() const { return data_loc_; }
-    uint64_t fd_size() const { return fd_size_; }
-    const std::optional<uint64_t>& last_label() const { return last_label_; }
+    std::shared_ptr<std::vector<CowOperationV2>> get_v2ops() { return v2_ops_; }
 
   private:
     bool ParseOps(android::base::borrowed_fd fd, std::optional<uint64_t> label);
-
-    CowHeader header_ = {};
+    std::shared_ptr<std::vector<CowOperationV2>> v2_ops_;
     std::optional<CowFooter> footer_;
-    std::shared_ptr<std::vector<CowOperation>> ops_;
-    std::shared_ptr<std::unordered_map<uint64_t, uint64_t>> data_loc_;
-    uint64_t fd_size_;
-    std::optional<uint64_t> last_label_;
 };
-
-bool ReadCowHeader(android::base::borrowed_fd fd, CowHeader* header);
 
 }  // namespace snapshot
 }  // namespace android

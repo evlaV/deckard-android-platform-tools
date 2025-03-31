@@ -18,6 +18,7 @@
 #include <inttypes.h>
 #include <poll.h>
 #include <sched.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -33,6 +34,10 @@
 #include <log/event_tag_map.h>
 #include <log/log_read.h>
 #include <private/android_logger.h>
+
+#include "test_utils.h"
+
+size_t convertPrintable(char*, const char*, size_t);
 
 BENCHMARK_MAIN();
 
@@ -194,7 +199,7 @@ static void BM_pmsg_short(benchmark::State& state) {
   pmsg_header.pid = getpid();
 
   android_log_header_t header;
-  header.tid = gettid();
+  header.tid = 0;
   header.realtime.tv_sec = ts.tv_sec;
   header.realtime.tv_nsec = ts.tv_nsec;
 
@@ -280,7 +285,7 @@ static void BM_pmsg_short_aligned(benchmark::State& state) {
   buffer->pmsg_header.uid = getuid();
   buffer->pmsg_header.pid = getpid();
 
-  buffer->header.tid = gettid();
+  buffer->header.tid = 0;
   buffer->header.realtime.tv_sec = ts.tv_sec;
   buffer->header.realtime.tv_nsec = ts.tv_nsec;
 
@@ -354,7 +359,7 @@ static void BM_pmsg_short_unaligned1(benchmark::State& state) {
   buffer->pmsg_header.uid = getuid();
   buffer->pmsg_header.pid = getpid();
 
-  buffer->header.tid = gettid();
+  buffer->header.tid = 0;
   buffer->header.realtime.tv_sec = ts.tv_sec;
   buffer->header.realtime.tv_nsec = ts.tv_nsec;
 
@@ -428,7 +433,7 @@ static void BM_pmsg_long_aligned(benchmark::State& state) {
   buffer->pmsg_header.uid = getuid();
   buffer->pmsg_header.pid = getpid();
 
-  buffer->header.tid = gettid();
+  buffer->header.tid = 0;
   buffer->header.realtime.tv_sec = ts.tv_sec;
   buffer->header.realtime.tv_nsec = ts.tv_nsec;
 
@@ -500,7 +505,7 @@ static void BM_pmsg_long_unaligned1(benchmark::State& state) {
   buffer->pmsg_header.uid = getuid();
   buffer->pmsg_header.pid = getpid();
 
-  buffer->header.tid = gettid();
+  buffer->header.tid = 0;
   buffer->header.realtime.tv_sec = ts.tv_sec;
   buffer->header.realtime.tv_nsec = ts.tv_nsec;
 
@@ -633,7 +638,7 @@ static unsigned long long caught_convert(char* cp) {
   return l;
 }
 
-static const int alarm_time = 3;
+static const int alarm_time = getAlarmSeconds(3);
 
 /*
  *	Measure the time it takes for the logd posting call to acquire the
@@ -787,9 +792,6 @@ static void BM_is_loggable(benchmark::State& state) {
 }
 BENCHMARK(BM_is_loggable);
 
-/*
- *	Measure the time it takes for __android_log_security.
- */
 static void BM_security(benchmark::State& state) {
   while (state.KeepRunning()) {
     __android_log_security();
@@ -843,7 +845,7 @@ static uint32_t notTag = 1;
 static void BM_lookupEventTag_NOT(benchmark::State& state) {
   prechargeEventMap();
 
-  while (set.find(notTag) != set.end()) {
+  while (set.contains(notTag)) {
     ++notTag;
     if (notTag >= USHRT_MAX) notTag = 1;
   }
@@ -997,3 +999,33 @@ static void BM_log_verbose_overhead(benchmark::State& state) {
   android::base::SetProperty("log.tag." + test_log_tag, "");
 }
 BENCHMARK(BM_log_verbose_overhead);
+
+static void BM_log_convertPrintable_ascii(benchmark::State& state) {
+  char buf[BUFSIZ];
+  const char* s = "hello, world! this is a plain ASCII string 1234.";
+  size_t n = strlen(s);
+  for (auto _ : state) {
+    convertPrintable(buf, s, n);
+  }
+}
+BENCHMARK(BM_log_convertPrintable_ascii);
+
+static void BM_log_convertPrintable_non_printable(benchmark::State& state) {
+  char buf[BUFSIZ];
+  const char* s = "hello,\x01world!\x02this is a plain ASCII string 1234\x7f";
+  size_t n = strlen(s);
+  for (auto _ : state) {
+    convertPrintable(buf, s, n);
+  }
+}
+BENCHMARK(BM_log_convertPrintable_non_printable);
+
+static void BM_log_convertPrintable_non_ascii(benchmark::State& state) {
+  char buf[BUFSIZ];
+  const char* s = "동해 물과 백두산이 마르고 닳도록, 하느님이 보우하사 우리나라 만세.";
+  size_t n = strlen(s);
+  for (auto _ : state) {
+    convertPrintable(buf, s, n);
+  }
+}
+BENCHMARK(BM_log_convertPrintable_non_ascii);

@@ -30,16 +30,20 @@
 #include <android/gui/DisplayStatInfo.h>
 #include <android/native_window.h>
 
+#include <gui/FenceMonitor.h>
+#include <gui/TraceUtils.h>
 #include <utils/Log.h>
-#include <utils/Trace.h>
 #include <utils/NativeHandle.h>
+#include <utils/Trace.h>
 
 #include <ui/DynamicDisplayInfo.h>
 #include <ui/Fence.h>
 #include <ui/GraphicBuffer.h>
 #include <ui/Region.h>
 
+#include <gui/AidlStatusUtil.h>
 #include <gui/BufferItem.h>
+
 #include <gui/IProducerListener.h>
 
 #include <gui/ISurfaceComposer.h>
@@ -47,11 +51,21 @@
 #include <private/gui/ComposerService.h>
 #include <private/gui/ComposerServiceAIDL.h>
 
+#include <com_android_graphics_libgui_flags.h>
+
 namespace android {
 
+using namespace com::android::graphics::libgui;
+using gui::aidl_utils::statusTFromBinderStatus;
 using ui::Dataspace;
 
 namespace {
+
+enum {
+    // moved from nativewindow/include/system/window.h, to be removed
+    NATIVE_WINDOW_GET_WIDE_COLOR_SUPPORT = 28,
+    NATIVE_WINDOW_GET_HDR_SUPPORT = 29,
+};
 
 bool isInterceptorRegistrationOp(int op) {
     return op == NATIVE_WINDOW_SET_CANCEL_INTERCEPTOR ||
@@ -182,7 +196,7 @@ status_t Surface::getDisplayRefreshCycleDuration(nsecs_t* outRefreshDuration) {
     gui::DisplayStatInfo stats;
     binder::Status status = composerServiceAIDL()->getDisplayStats(nullptr, &stats);
     if (!status.isOk()) {
-        return status.transactionError();
+        return statusTFromBinderStatus(status);
     }
 
     *outRefreshDuration = stats.vsyncPeriod;
@@ -328,12 +342,23 @@ status_t Surface::getFrameTimestamps(uint64_t frameNumber,
 
     getFrameTimestamp(outRequestedPresentTime, events->requestedPresentTime);
     getFrameTimestamp(outLatchTime, events->latchTime);
-    getFrameTimestamp(outFirstRefreshStartTime, events->firstRefreshStartTime);
+
+    nsecs_t firstRefreshStartTime = NATIVE_WINDOW_TIMESTAMP_INVALID;
+    getFrameTimestamp(&firstRefreshStartTime, events->firstRefreshStartTime);
+    if (outFirstRefreshStartTime) {
+        *outFirstRefreshStartTime = firstRefreshStartTime;
+    }
+
     getFrameTimestamp(outLastRefreshStartTime, events->lastRefreshStartTime);
     getFrameTimestamp(outDequeueReadyTime, events->dequeueReadyTime);
 
-    getFrameTimestampFence(outAcquireTime, events->acquireFence,
+    nsecs_t acquireTime = NATIVE_WINDOW_TIMESTAMP_INVALID;
+    getFrameTimestampFence(&acquireTime, events->acquireFence,
             events->hasAcquireInfo());
+    if (outAcquireTime != nullptr) {
+        *outAcquireTime = acquireTime;
+    }
+
     getFrameTimestampFence(outGpuCompositionDoneTime,
             events->gpuCompositionDoneFence,
             events->hasGpuCompositionDoneInfo());
@@ -342,36 +367,38 @@ status_t Surface::getFrameTimestamps(uint64_t frameNumber,
     getFrameTimestampFence(outReleaseTime, events->releaseFence,
             events->hasReleaseInfo());
 
+    // Fix up the GPU completion fence at this layer -- eglGetFrameTimestampsANDROID() expects
+    // that EGL_FIRST_COMPOSITION_GPU_FINISHED_TIME_ANDROID > EGL_RENDERING_COMPLETE_TIME_ANDROID.
+    // This is typically true, but SurfaceFlinger may opt to cache prior GPU composition results,
+    // which breaks that assumption, so zero out GPU composition time.
+    if (outGpuCompositionDoneTime != nullptr
+            && *outGpuCompositionDoneTime > 0 && (acquireTime > 0 || firstRefreshStartTime > 0)
+            && *outGpuCompositionDoneTime <= std::max(acquireTime, firstRefreshStartTime)) {
+        *outGpuCompositionDoneTime = 0;
+    }
+
     return NO_ERROR;
 }
 
+// Deprecated(b/242763577): to be removed, this method should not be used
+// The reason this method still exists here is to support compiled vndk
+// Surface support should not be tied to the display
+// Return true since most displays should have this support
 status_t Surface::getWideColorSupport(bool* supported) {
     ATRACE_CALL();
 
-    const sp<IBinder> display = ComposerServiceAIDL::getInstance().getInternalDisplayToken();
-    if (display == nullptr) {
-        return NAME_NOT_FOUND;
-    }
-
-    *supported = false;
-    binder::Status status = composerServiceAIDL()->isWideColorDisplay(display, supported);
-    return status.transactionError();
+    *supported = true;
+    return NO_ERROR;
 }
 
+// Deprecated(b/242763577): to be removed, this method should not be used
+// The reason this method still exists here is to support compiled vndk
+// Surface support should not be tied to the display
+// Return true since most displays should have this support
 status_t Surface::getHdrSupport(bool* supported) {
     ATRACE_CALL();
 
-    const sp<IBinder> display = ComposerServiceAIDL::getInstance().getInternalDisplayToken();
-    if (display == nullptr) {
-        return NAME_NOT_FOUND;
-    }
-
-    ui::DynamicDisplayInfo info;
-    if (status_t err = composerService()->getDynamicDisplayInfo(display, &info); err != NO_ERROR) {
-        return err;
-    }
-
-    *supported = !info.hdrCapabilities.getSupportedHdrTypes().empty();
+    *supported = true;
     return NO_ERROR;
 }
 
@@ -544,82 +571,6 @@ int Surface::setSwapInterval(int interval) {
     return NO_ERROR;
 }
 
-class FenceMonitor {
-public:
-    explicit FenceMonitor(const char* name) : mName(name), mFencesQueued(0), mFencesSignaled(0) {
-        std::thread thread(&FenceMonitor::loop, this);
-        pthread_setname_np(thread.native_handle(), mName);
-        thread.detach();
-    }
-
-    void queueFence(const sp<Fence>& fence) {
-        char message[64];
-
-        std::lock_guard<std::mutex> lock(mMutex);
-        if (fence->getSignalTime() != Fence::SIGNAL_TIME_PENDING) {
-            snprintf(message, sizeof(message), "%s fence %u has signaled", mName, mFencesQueued);
-            ATRACE_NAME(message);
-            // Need an increment on both to make the trace number correct.
-            mFencesQueued++;
-            mFencesSignaled++;
-            return;
-        }
-        snprintf(message, sizeof(message), "Trace %s fence %u", mName, mFencesQueued);
-        ATRACE_NAME(message);
-
-        mQueue.push_back(fence);
-        mCondition.notify_one();
-        mFencesQueued++;
-        ATRACE_INT(mName, int32_t(mQueue.size()));
-    }
-
-private:
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wmissing-noreturn"
-    void loop() {
-        while (true) {
-            threadLoop();
-        }
-    }
-#pragma clang diagnostic pop
-
-    void threadLoop() {
-        sp<Fence> fence;
-        uint32_t fenceNum;
-        {
-            std::unique_lock<std::mutex> lock(mMutex);
-            while (mQueue.empty()) {
-                mCondition.wait(lock);
-            }
-            fence = mQueue[0];
-            fenceNum = mFencesSignaled;
-        }
-        {
-            char message[64];
-            snprintf(message, sizeof(message), "waiting for %s %u", mName, fenceNum);
-            ATRACE_NAME(message);
-
-            status_t result = fence->waitForever(message);
-            if (result != OK) {
-                ALOGE("Error waiting for fence: %d", result);
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock(mMutex);
-            mQueue.pop_front();
-            mFencesSignaled++;
-            ATRACE_INT(mName, int32_t(mQueue.size()));
-        }
-    }
-
-    const char* mName;
-    uint32_t mFencesQueued;
-    uint32_t mFencesSignaled;
-    std::deque<sp<Fence>> mQueue;
-    std::condition_variable mCondition;
-    std::mutex mMutex;
-};
-
 void Surface::getDequeueBufferInputLocked(
         IGraphicBufferProducer::DequeueBufferInput* dequeueInput) {
     LOG_ALWAYS_FATAL_IF(dequeueInput == nullptr, "input is null");
@@ -634,7 +585,7 @@ void Surface::getDequeueBufferInputLocked(
 }
 
 int Surface::dequeueBuffer(android_native_buffer_t** buffer, int* fenceFd) {
-    ATRACE_CALL();
+    ATRACE_FORMAT("dequeueBuffer - %s", getDebugName());
     ALOGV("Surface::dequeueBuffer");
 
     IGraphicBufferProducer::DequeueBufferInput dqInput;
@@ -693,7 +644,7 @@ int Surface::dequeueBuffer(android_native_buffer_t** buffer, int* fenceFd) {
     ALOGE_IF(fence == nullptr, "Surface::dequeueBuffer: received null Fence! buf=%d", buf);
 
     if (CC_UNLIKELY(atrace_is_tag_enabled(ATRACE_TAG_GRAPHICS))) {
-        static FenceMonitor hwcReleaseThread("HWC release");
+        static gui::FenceMonitor hwcReleaseThread("HWC release");
         hwcReleaseThread.queueFence(fence);
     }
 
@@ -892,7 +843,7 @@ int Surface::dequeueBuffers(std::vector<BatchBuffer>* buffers) {
         sp<GraphicBuffer>& gbuf(mSlots[slot].buffer);
 
         if (CC_UNLIKELY(atrace_is_tag_enabled(ATRACE_TAG_GRAPHICS))) {
-            static FenceMonitor hwcReleaseThread("HWC release");
+            static gui::FenceMonitor hwcReleaseThread("HWC release");
             hwcReleaseThread.queueFence(output.fence);
         }
 
@@ -1162,7 +1113,7 @@ void Surface::onBufferQueuedLocked(int slot, sp<Fence> fence,
     mQueueBufferCondition.broadcast();
 
     if (CC_UNLIKELY(atrace_is_tag_enabled(ATRACE_TAG_GRAPHICS))) {
-        static FenceMonitor gpuCompletionThread("GPU completion");
+        static gui::FenceMonitor gpuCompletionThread("GPU completion");
         gpuCompletionThread.queueFence(fence);
     }
 }
@@ -1263,10 +1214,10 @@ void Surface::querySupportedTimestampsLocked() const {
     mQueriedSupportedTimestamps = true;
 
     std::vector<FrameEvent> supportedFrameTimestamps;
-    status_t err = composerService()->getSupportedFrameTimestamps(
-            &supportedFrameTimestamps);
+    binder::Status status =
+            composerServiceAIDL()->getSupportedFrameTimestamps(&supportedFrameTimestamps);
 
-    if (err != NO_ERROR) {
+    if (!status.isOk()) {
         return;
     }
 
@@ -1294,15 +1245,12 @@ int Surface::query(int what, int* value) const {
                 if (err == NO_ERROR) {
                     return NO_ERROR;
                 }
-                sp<ISurfaceComposer> surfaceComposer = composerService();
+                sp<gui::ISurfaceComposer> surfaceComposer = composerServiceAIDL();
                 if (surfaceComposer == nullptr) {
                     return -EPERM; // likely permissions error
                 }
-                if (surfaceComposer->authenticateSurfaceTexture(mGraphicBufferProducer)) {
-                    *value = 1;
-                } else {
-                    *value = 0;
-                }
+                // ISurfaceComposer no longer supports authenticateSurfaceTexture
+                *value = 0;
                 return NO_ERROR;
             }
             case NATIVE_WINDOW_CONCRETE_TYPE:
@@ -1869,13 +1817,20 @@ int Surface::dispatchGetLastQueuedBuffer2(va_list args) {
 
 int Surface::dispatchSetFrameTimelineInfo(va_list args) {
     ATRACE_CALL();
-    auto frameNumber = static_cast<uint64_t>(va_arg(args, uint64_t));
-    auto frameTimelineVsyncId = static_cast<int64_t>(va_arg(args, int64_t));
-    auto inputEventId = static_cast<int32_t>(va_arg(args, int32_t));
-    auto startTimeNanos = static_cast<int64_t>(va_arg(args, int64_t));
-
     ALOGV("Surface::%s", __func__);
-    return setFrameTimelineInfo(frameNumber, {frameTimelineVsyncId, inputEventId, startTimeNanos});
+
+    const auto nativeWindowFtlInfo = static_cast<ANativeWindowFrameTimelineInfo>(
+            va_arg(args, ANativeWindowFrameTimelineInfo));
+
+    FrameTimelineInfo ftlInfo;
+    ftlInfo.vsyncId = nativeWindowFtlInfo.frameTimelineVsyncId;
+    ftlInfo.inputEventId = nativeWindowFtlInfo.inputEventId;
+    ftlInfo.startTimeNanos = nativeWindowFtlInfo.startTimeNanos;
+    ftlInfo.useForRefreshRateSelection = nativeWindowFtlInfo.useForRefreshRateSelection;
+    ftlInfo.skippedFrameVsyncId = nativeWindowFtlInfo.skippedFrameVsyncId;
+    ftlInfo.skippedFrameStartTimeNanos = nativeWindowFtlInfo.skippedFrameStartTimeNanos;
+
+    return setFrameTimelineInfo(nativeWindowFtlInfo.frameNumber, ftlInfo);
 }
 
 bool Surface::transformToDisplayInverse() const {
@@ -2637,21 +2592,31 @@ void Surface::ProducerListenerProxy::onBuffersDiscarded(const std::vector<int32_
 
 status_t Surface::setFrameRate(float frameRate, int8_t compatibility,
                                int8_t changeFrameRateStrategy) {
-    ATRACE_CALL();
-    ALOGV("Surface::setFrameRate");
-
-    if (!ValidateFrameRate(frameRate, compatibility, changeFrameRateStrategy,
-                           "Surface::setFrameRate")) {
-        return BAD_VALUE;
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(BQ_SETFRAMERATE)
+    if (flags::bq_setframerate()) {
+        status_t err = mGraphicBufferProducer->setFrameRate(frameRate, compatibility,
+                                                            changeFrameRateStrategy);
+        ALOGE_IF(err, "IGraphicBufferProducer::setFrameRate(%.2f) returned %s", frameRate,
+                 strerror(-err));
+        return err;
     }
+#else
+    static_cast<void>(frameRate);
+    static_cast<void>(compatibility);
+    static_cast<void>(changeFrameRateStrategy);
+#endif
 
-    return composerService()->setFrameRate(mGraphicBufferProducer, frameRate, compatibility,
-                                           changeFrameRateStrategy);
+    ALOGI("Surface::setFrameRate is deprecated, setFrameRate hint is dropped as destination is not "
+          "SurfaceFlinger");
+    // ISurfaceComposer no longer supports setFrameRate, we will return NO_ERROR when the api is
+    // called to avoid apps crashing, as BAD_VALUE can generate fatal exception in apps.
+    return NO_ERROR;
 }
 
 status_t Surface::setFrameTimelineInfo(uint64_t /*frameNumber*/,
-                                       const FrameTimelineInfo& frameTimelineInfo) {
-    return composerService()->setFrameTimelineInfo(mGraphicBufferProducer, frameTimelineInfo);
+                                       const FrameTimelineInfo& /*frameTimelineInfo*/) {
+    // ISurfaceComposer no longer supports setFrameTimelineInfo
+    return BAD_VALUE;
 }
 
 sp<IBinder> Surface::getSurfaceControlHandle() const {
@@ -2662,6 +2627,14 @@ sp<IBinder> Surface::getSurfaceControlHandle() const {
 void Surface::destroy() {
     Mutex::Autolock lock(mMutex);
     mSurfaceControlHandle = nullptr;
+}
+
+const char* Surface::getDebugName() {
+    std::unique_lock lock{mNameMutex};
+    if (mName.empty()) {
+        mName = getConsumerName();
+    }
+    return mName.c_str();
 }
 
 }; // namespace android

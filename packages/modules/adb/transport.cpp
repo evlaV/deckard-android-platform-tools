@@ -56,6 +56,8 @@
 #include "sysdeps/chrono.h"
 
 #if ADB_HOST
+#include <google/protobuf/text_format.h>
+#include "adb_host.pb.h"
 #include "client/usb.h"
 #endif
 
@@ -95,6 +97,10 @@ const char* const kFeatureSendRecv2DryRunSend = "sendrecv_v2_dry_run_send";
 const char* const kFeatureDelayedAck = "delayed_ack";
 // TODO(joshuaduong): Bump to v2 when openscreen discovery is enabled by default
 const char* const kFeatureOpenscreenMdns = "openscreen_mdns";
+const char* const kFeatureDeviceTrackerProtoFormat = "devicetracker_proto_format";
+const char* const kFeatureDevRaw = "devraw";
+const char* const kFeatureAppInfo = "app_info";  // Add information to track-app (package name, ...)
+const char* const kFeatureServerStatus = "server_status";  // Ability to output server status
 
 namespace {
 
@@ -592,10 +598,6 @@ void kick_transport(atransport* t, bool reset) {
 #endif
 }
 
-static int transport_registration_send = -1;
-static int transport_registration_recv = -1;
-static fdevent* transport_registration_fde;
-
 #if ADB_HOST
 
 /* this adds support required by the 'track-devices' service.
@@ -606,7 +608,7 @@ static fdevent* transport_registration_fde;
 struct device_tracker {
     asocket socket;
     bool update_needed = false;
-    bool long_output = false;
+    TrackerOutputType output_type = SHORT_TEXT;
     device_tracker* next = nullptr;
 };
 
@@ -666,11 +668,11 @@ static void device_tracker_ready(asocket* socket) {
     // for the first time, even if no update occurred.
     if (tracker->update_needed) {
         tracker->update_needed = false;
-        device_tracker_send(tracker, list_transports(tracker->long_output));
+        device_tracker_send(tracker, list_transports(tracker->output_type));
     }
 }
 
-asocket* create_device_tracker(bool long_output) {
+asocket* create_device_tracker(TrackerOutputType output_type) {
     device_tracker* tracker = new device_tracker();
     if (tracker == nullptr) LOG(FATAL) << "cannot allocate device tracker";
 
@@ -680,7 +682,7 @@ asocket* create_device_tracker(bool long_output) {
     tracker->socket.ready = device_tracker_ready;
     tracker->socket.close = device_tracker_close;
     tracker->update_needed = true;
-    tracker->long_output = long_output;
+    tracker->output_type = output_type;
 
     tracker->next = device_tracker_list;
     device_tracker_list = tracker;
@@ -713,7 +715,7 @@ void update_transports() {
     while (tracker != nullptr) {
         device_tracker* next = tracker->next;
         // This may destroy the tracker if the connection is closed.
-        device_tracker_send(tracker, list_transports(tracker->long_output));
+        device_tracker_send(tracker, list_transports(tracker->output_type));
         tracker = next;
     }
 }
@@ -726,103 +728,28 @@ void update_transports() {
 
 #endif  // ADB_HOST
 
-// The transport listeners communicate with the transports list via fdevent. tmsg structure is a
-// container used as message unit and written to a pipe in order to communicate the transport
-// (pointer) and the action to perform.
-//
-//     Transport listener         FDEVENT          Transports list
-//     --------------------------------------------------------------
-//     (&transport,action)   ->    tmsg     ->   (&transport, action)
-//
-// TODO: Figure out if this fdevent bridge really is necessary? With the re-entrant lock to sync
-// access, what prevents us from "simply" updating the transport_list directly?
-
-struct tmsg {
-    atransport* transport;
-
-    enum struct Action : int {
-        UNREGISTER = 0,  // Unregister the transport from transport list (typically a device has
-                         // been unplugged from USB or disconnected from TCP.
-        REGISTER = 1,  // Register the transport to the transport list (typically a device has been
-                       // plugged via USB or connected via TCP.
-    };
-    Action action;
-};
-
-static int transport_read_action(int fd, struct tmsg* m) {
-    char* p = (char*)m;
-    int len = sizeof(*m);
-    int r;
-
-    while (len > 0) {
-        r = adb_read(fd, p, len);
-        if (r > 0) {
-            len -= r;
-            p += r;
-        } else {
-            D("transport_read_action: on fd %d: %s", fd, strerror(errno));
-            return -1;
-        }
-    }
-    return 0;
-}
-
-static int transport_write_action(int fd, struct tmsg* m) {
-    char* p = (char*)m;
-    int len = sizeof(*m);
-    int r;
-
-    while (len > 0) {
-        r = adb_write(fd, p, len);
-        if (r > 0) {
-            len -= r;
-            p += r;
-        } else {
-            D("transport_write_action: on fd %d: %s", fd, strerror(errno));
-            return -1;
-        }
-    }
-    return 0;
-}
-
 #if ADB_HOST
 static bool usb_devices_start_detached() {
     static const char* env = getenv("ADB_LIBUSB_START_DETACHED");
     static bool result = env && strcmp("1", env) == 0;
-    return should_use_libusb() && result;
+    return is_libusb_enabled() && result;
 }
 #endif
 
-//  Callback function that is consumed by the fdevent setup (initialization)
-//  from the contexts of both the client as well as adbd peers.
-static void transport_registration_func(int _fd, unsigned ev, void*) {
-    tmsg m;
-    atransport* t;
+static void fdevent_unregister_transport(atransport* t) {
+    D("transport: %s deleting", t->serial.c_str());
 
-    if (!(ev & FDE_READ)) {
-        return;
+    {
+        std::lock_guard<std::recursive_mutex> lock(transport_lock);
+        transport_list.remove(t);
     }
 
-    if (transport_read_action(_fd, &m)) {
-        PLOG(FATAL) << "cannot read transport registration socket";
-    }
+    delete t;
 
-    t = m.transport;
+    update_transports();
+}
 
-    if (m.action == tmsg::Action::UNREGISTER) {
-        D("transport: %s deleting", t->serial.c_str());
-
-        {
-            std::lock_guard<std::recursive_mutex> lock(transport_lock);
-            transport_list.remove(t);
-        }
-
-        delete t;
-
-        update_transports();
-        return;
-    }
-
+static void fdevent_register_transport(atransport* t) {
     /* don't create transport threads for inaccessible devices */
     if (t->GetConnectionState() != kCsNoPerm) {
         t->connection()->SetTransport(t);
@@ -855,26 +782,10 @@ static void transport_registration_func(int _fd, unsigned ev, void*) {
 }
 
 #if ADB_HOST
-void init_reconnect_handler(void) {
+void init_reconnect_handler() {
     reconnect_handler.Start();
 }
 #endif
-
-void init_transport_registration(void) {
-    int s[2];
-
-    if (adb_socketpair(s)) {
-        PLOG(FATAL) << "cannot open transport registration socketpair";
-    }
-    D("socketpair: (%d,%d)", s[0], s[1]);
-
-    transport_registration_send = s[0];
-    transport_registration_recv = s[1];
-
-    transport_registration_fde =
-            fdevent_create(transport_registration_recv, transport_registration_func, nullptr);
-    fdevent_set(transport_registration_fde, FDE_READ);
-}
 
 void kick_all_transports() {
 #if ADB_HOST
@@ -907,25 +818,14 @@ void kick_all_transports_by_auth_key(std::string_view auth_key) {
 }
 #endif
 
-/* the fdevent select pump is single threaded */
 void register_transport(atransport* transport) {
-    tmsg m;
-    m.transport = transport;
-    m.action = tmsg::Action::REGISTER;
     D("transport: %s registered", transport->serial.c_str());
-    if (transport_write_action(transport_registration_send, &m)) {
-        PLOG(FATAL) << "cannot write transport registration socket";
-    }
+    fdevent_run_on_looper([=]() { fdevent_register_transport(transport); });
 }
 
 static void remove_transport(atransport* transport) {
-    tmsg m;
-    m.transport = transport;
-    m.action = tmsg::Action::UNREGISTER;
     D("transport: %s removed", transport->serial.c_str());
-    if (transport_write_action(transport_registration_send, &m)) {
-        PLOG(FATAL) << "cannot write transport registration socket";
-    }
+    fdevent_run_on_looper([=]() { fdevent_unregister_transport(transport); });
 }
 
 static void transport_destroy(atransport* t) {
@@ -1177,7 +1077,7 @@ bool atransport::Attach(std::string* error) {
     D("%s: attach", serial.c_str());
     fdevent_check_looper();
 
-    if (!should_use_libusb()) {
+    if (!is_libusb_enabled()) {
         *error = "attach/detach only implemented for libusb backend";
         return false;
     }
@@ -1204,7 +1104,7 @@ bool atransport::Detach(std::string* error) {
     D("%s: detach", serial.c_str());
     fdevent_check_looper();
 
-    if (!should_use_libusb()) {
+    if (!is_libusb_enabled()) {
         *error = "attach/detach only implemented for libusb backend";
         return false;
     }
@@ -1308,6 +1208,10 @@ const FeatureSet& supported_features() {
             kFeatureSendRecv2Zstd,
             kFeatureSendRecv2DryRunSend,
             kFeatureOpenscreenMdns,
+            kFeatureDeviceTrackerProtoFormat,
+            kFeatureDevRaw,
+            kFeatureAppInfo,
+            kFeatureServerStatus,
         };
         // clang-format on
 
@@ -1422,6 +1326,64 @@ static std::string sanitize(std::string str, bool alphanumeric) {
     return str;
 }
 
+static adb::proto::ConnectionState adbStateFromProto(ConnectionState state) {
+    switch (state) {
+        case kCsConnecting:
+            return adb::proto::ConnectionState::CONNECTING;
+        case kCsAuthorizing:
+            return adb::proto::ConnectionState::AUTHORIZING;
+        case kCsUnauthorized:
+            return adb::proto::ConnectionState::UNAUTHORIZED;
+        case kCsNoPerm:
+            return adb::proto::ConnectionState::NOPERMISSION;
+        case kCsDetached:
+            return adb::proto::ConnectionState::DETACHED;
+        case kCsOffline:
+            return adb::proto::ConnectionState::OFFLINE;
+        case kCsBootloader:
+            return adb::proto::ConnectionState::BOOTLOADER;
+        case kCsDevice:
+            return adb::proto::ConnectionState::DEVICE;
+        case kCsHost:
+            return adb::proto::ConnectionState::HOST;
+        case kCsRecovery:
+            return adb::proto::ConnectionState::RECOVERY;
+        case kCsSideload:
+            return adb::proto::ConnectionState::SIDELOAD;
+        case kCsRescue:
+            return adb::proto::ConnectionState::RESCUE;
+        case kCsAny:
+            return adb::proto::ConnectionState::ANY;
+    }
+}
+
+static std::string transportListToProto(const std::list<atransport*>& sorted_transport_list,
+                                        bool text_version) {
+    adb::proto::Devices devices;
+    for (const auto& t : sorted_transport_list) {
+        auto* device = devices.add_device();
+        device->set_serial(t->serial.c_str());
+        device->set_connection_type(t->type == kTransportUsb ? adb::proto::ConnectionType::USB
+                                                             : adb::proto::ConnectionType::SOCKET);
+        device->set_state(adbStateFromProto(t->GetConnectionState()));
+        device->set_bus_address(sanitize(t->devpath, false));
+        device->set_product(sanitize(t->product, false));
+        device->set_model(sanitize(t->model, true));
+        device->set_device(sanitize(t->device, false));
+        device->set_negotiated_speed(t->connection()->NegotiatedSpeedMbps());
+        device->set_max_speed(t->connection()->MaxSpeedMbps());
+        device->set_transport_id(t->id);
+    }
+
+    std::string proto;
+    if (text_version) {
+        google::protobuf::TextFormat::PrintToString(devices, &proto);
+    } else {
+        devices.SerializeToString(&proto);
+    }
+    return proto;
+}
+
 static void append_transport_info(std::string* result, const char* key, const std::string& value,
                                   bool alphanumeric) {
     if (value.empty()) {
@@ -1460,7 +1422,16 @@ static void append_transport(const atransport* t, std::string* result, bool long
     *result += '\n';
 }
 
-std::string list_transports(bool long_listing) {
+static std::string transportListToText(const std::list<atransport*>& sorted_transport_list,
+                                       bool long_listing) {
+    std::string result;
+    for (const auto& t : sorted_transport_list) {
+        append_transport(t, &result, long_listing);
+    }
+    return result;
+}
+
+std::string list_transports(TrackerOutputType outputType) {
     std::lock_guard<std::recursive_mutex> lock(transport_lock);
 
     auto sorted_transport_list = transport_list;
@@ -1471,11 +1442,16 @@ std::string list_transports(bool long_listing) {
         return x->serial < y->serial;
     });
 
-    std::string result;
-    for (const auto& t : sorted_transport_list) {
-        append_transport(t, &result, long_listing);
+    switch (outputType) {
+        case SHORT_TEXT:
+        case LONG_TEXT: {
+            return transportListToText(sorted_transport_list, outputType == LONG_TEXT);
+        }
+        case PROTOBUF:
+        case TEXT_PROTOBUF: {
+            return transportListToProto(sorted_transport_list, outputType == TEXT_PROTOBUF);
+        }
     }
-    return result;
 }
 
 void close_usb_devices(std::function<bool(const atransport*)> predicate, bool reset) {
@@ -1666,7 +1642,7 @@ void atransport::UpdateReverseConfig(std::string_view service_addr) {
         }
         std::string remote(service_addr.substr(0, it));
 
-        if (norebind && reverse_forwards_.find(remote) != reverse_forwards_.end()) {
+        if (norebind && reverse_forwards_.contains(remote)) {
             // This will fail, don't update the map.
             LOG(DEBUG) << "ignoring reverse forward that will fail due to norebind";
             return;

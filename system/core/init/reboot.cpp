@@ -563,7 +563,7 @@ static void StopServices(const std::set<std::string>& services, std::chrono::mil
         }
     }
     if (timeout > 0ms) {
-        WaitToBeReaped(pids, timeout);
+        WaitToBeReaped(Service::GetSigchldFd(), pids, timeout);
     } else {
         // Even if we don't to wait for services to stop, we still optimistically reap zombies.
         ReapAnyOutstandingChildren();
@@ -1083,7 +1083,8 @@ void HandlePowerctlMessage(const std::string& command) {
                         return;
                     }
                 }
-            } else if (reboot_target == "quiescent") {
+            } else if (std::find(cmd_params.begin(), cmd_params.end(), "quiescent")
+                    != cmd_params.end()) { // Quiescent can be either subreason or details.
                 bootloader_message boot = {};
                 if (std::string err; !read_bootloader_message(&boot, &err)) {
                     LOG(ERROR) << "Failed to read bootloader message: " << err;

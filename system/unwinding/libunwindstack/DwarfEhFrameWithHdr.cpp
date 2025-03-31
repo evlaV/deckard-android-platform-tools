@@ -18,6 +18,8 @@
 
 #include <unwindstack/DwarfError.h>
 #include <unwindstack/DwarfStructs.h>
+#include <unwindstack/Elf.h>
+#include <unwindstack/ElfInterface.h>
 #include <unwindstack/Memory.h>
 
 #include "Check.h"
@@ -32,19 +34,22 @@ static inline bool IsEncodingRelative(uint8_t encoding) {
 }
 
 template <typename AddressType>
-bool DwarfEhFrameWithHdr<AddressType>::EhFrameInit(uint64_t offset, uint64_t size,
-                                                   int64_t section_bias) {
-  return DwarfSectionImpl<AddressType>::Init(offset, size, section_bias);
+bool DwarfEhFrameWithHdr<AddressType>::EhFrameInit(const SectionInfo& info) {
+  return DwarfSectionImpl<AddressType>::Init(info);
 }
 
 template <typename AddressType>
-bool DwarfEhFrameWithHdr<AddressType>::Init(uint64_t offset, uint64_t, int64_t section_bias) {
+bool DwarfEhFrameWithHdr<AddressType>::Init(const SectionInfo& info) {
+  if (info.flags & SHF_COMPRESSED) {
+    return false;
+  }
+
   memory_.clear_func_offset();
   memory_.clear_text_offset();
-  memory_.set_data_offset(offset);
-  memory_.set_cur_offset(offset);
+  memory_.set_data_offset(info.offset);
+  memory_.set_cur_offset(info.offset);
 
-  hdr_section_bias_ = section_bias;
+  hdr_section_bias_ = info.bias;
 
   // Read the first four bytes all at once.
   uint8_t data[4];
@@ -95,7 +100,7 @@ bool DwarfEhFrameWithHdr<AddressType>::Init(uint64_t offset, uint64_t, int64_t s
   }
 
   hdr_entries_offset_ = memory_.cur_offset();
-  hdr_entries_data_offset_ = offset;
+  hdr_entries_data_offset_ = info.offset;
 
   return true;
 }
@@ -134,7 +139,7 @@ const typename DwarfEhFrameWithHdr<AddressType>::FdeInfo*
 DwarfEhFrameWithHdr<AddressType>::GetFdeInfoFromIndex(size_t index) {
   auto entry = fde_info_.find(index);
   if (entry != fde_info_.end()) {
-    return &fde_info_[index];
+    return &entry->second;
   }
   FdeInfo* info = &fde_info_[index];
 

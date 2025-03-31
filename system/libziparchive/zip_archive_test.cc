@@ -359,6 +359,10 @@ TEST(ziparchive, FindEntry) {
   ASSERT_EQ(0x950821c5, data.crc32);
   ASSERT_EQ(static_cast<uint32_t>(0x438a8005), data.mod_time);
 
+  // size of extra field in local file header confirmed with zipdetails.
+  // zipinfo -v will provide size of extra field from central directory.
+  ASSERT_EQ(28, data.extra_field_size);
+
   // An entry that doesn't exist. Should be a negative return code.
   ASSERT_LT(FindEntry(handle, "this file does not exist", &data), 0);
 

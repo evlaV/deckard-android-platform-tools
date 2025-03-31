@@ -17,6 +17,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <sys/types.h>
 
 #include <functional>
 
@@ -49,9 +50,15 @@ class RegsRiscv64 : public RegsImpl<uint64_t> {
 
   Regs* Clone() override final;
 
-  static Regs* Read(void* data);
+  uint16_t Convert(uint16_t reg) override;
+
+  static Regs* Read(const void* data, pid_t pid = 0);
 
   static Regs* CreateFromUcontext(void* ucontext);
+
+  static uint64_t GetVlenbFromRemote(pid_t pid);
+
+  static uint64_t GetVlenbFromLocal();
 };
 
 }  // namespace unwindstack

@@ -18,6 +18,7 @@
 
 #include "egl_platform_entries.h"
 
+#include <aidl/android/hardware/graphics/common/PixelFormat.h>
 #include <android-base/properties.h>
 #include <android-base/strings.h>
 #include <android/hardware_buffer.h>
@@ -29,7 +30,6 @@
 #include <private/android/AHardwareBufferHelpers.h>
 #include <stdlib.h>
 #include <string.h>
-#include <aidl/android/hardware/graphics/common/PixelFormat.h>
 
 #include <condition_variable>
 #include <deque>
@@ -422,6 +422,8 @@ static android_dataspace dataSpaceFromEGLColorSpace(EGLint colorspace, PixelForm
         return HAL_DATASPACE_V0_SCRGB;
     } else if (colorspace == EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT) {
         return HAL_DATASPACE_V0_SCRGB_LINEAR;
+    } else if (colorspace == EGL_GL_COLORSPACE_BT2020_HLG_EXT) {
+        return static_cast<android_dataspace>(HAL_DATASPACE_BT2020_HLG);
     } else if (colorspace == EGL_GL_COLORSPACE_BT2020_LINEAR_EXT) {
         if (pixelFormat == PixelFormat::RGBA_FP16) {
             return static_cast<android_dataspace>(HAL_DATASPACE_STANDARD_BT2020 |
@@ -433,6 +435,7 @@ static android_dataspace dataSpaceFromEGLColorSpace(EGLint colorspace, PixelForm
     } else if (colorspace == EGL_GL_COLORSPACE_BT2020_PQ_EXT) {
         return HAL_DATASPACE_BT2020_PQ;
     }
+
     return HAL_DATASPACE_UNKNOWN;
 }
 
@@ -458,6 +461,9 @@ static std::vector<EGLint> getDriverColorSpaces(egl_display_t* dp) {
     }
     if (findExtension(dp->disp.queryString.extensions, "EGL_EXT_gl_colorspace_scrgb_linear")) {
         colorSpaces.push_back(EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT);
+    }
+    if (findExtension(dp->disp.queryString.extensions, "EGL_EXT_gl_colorspace_bt2020_hlg")) {
+        colorSpaces.push_back(EGL_GL_COLORSPACE_BT2020_HLG_EXT);
     }
     if (findExtension(dp->disp.queryString.extensions, "EGL_EXT_gl_colorspace_bt2020_linear")) {
         colorSpaces.push_back(EGL_GL_COLORSPACE_BT2020_LINEAR_EXT);
@@ -492,6 +498,7 @@ static EGLBoolean processAttributes(egl_display_t* dp, ANativeWindow* window,
                 case EGL_GL_COLORSPACE_DISPLAY_P3_PASSTHROUGH_EXT:
                 case EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT:
                 case EGL_GL_COLORSPACE_SCRGB_EXT:
+                case EGL_GL_COLORSPACE_BT2020_HLG_EXT:
                 case EGL_GL_COLORSPACE_BT2020_LINEAR_EXT:
                 case EGL_GL_COLORSPACE_BT2020_PQ_EXT:
                 case EGL_GL_COLORSPACE_DISPLAY_P3_LINEAR_EXT:
@@ -678,7 +685,7 @@ EGLSurface eglCreateWindowSurfaceTmpl(egl_display_t* dp, egl_connection_t* cnx, 
 
     // NOTE: When using Vulkan backend, the Vulkan runtime makes all the
     // native_window_* calls, so don't do them here.
-    if (!cnx->useAngle) {
+    if (!cnx->angleLoaded) {
         int result = native_window_api_connect(window, NATIVE_WINDOW_API_EGL);
         if (result < 0) {
             ALOGE("eglCreateWindowSurface: native_window_api_connect (win=%p) "
@@ -697,14 +704,14 @@ EGLSurface eglCreateWindowSurfaceTmpl(egl_display_t* dp, egl_connection_t* cnx, 
     std::vector<AttrType> strippedAttribList;
     if (!processAttributes<AttrType>(dp, window, attrib_list, &colorSpace, &strippedAttribList)) {
         ALOGE("error invalid colorspace: %d", colorSpace);
-        if (!cnx->useAngle) {
+        if (!cnx->angleLoaded) {
             native_window_api_disconnect(window, NATIVE_WINDOW_API_EGL);
         }
         return EGL_NO_SURFACE;
     }
     attrib_list = strippedAttribList.data();
 
-    if (!cnx->useAngle) {
+    if (!cnx->angleLoaded) {
         int err = native_window_set_buffers_format(window, static_cast<int>(format));
         if (err != 0) {
             ALOGE("error setting native window pixel format: %s (%d)", strerror(-err), err);
@@ -736,7 +743,7 @@ EGLSurface eglCreateWindowSurfaceTmpl(egl_display_t* dp, egl_connection_t* cnx, 
     }
 
     // EGLSurface creation failed
-    if (!cnx->useAngle) {
+    if (!cnx->angleLoaded) {
         native_window_set_buffers_format(window, 0);
         native_window_api_disconnect(window, NATIVE_WINDOW_API_EGL);
     }
@@ -943,6 +950,8 @@ EGLContext eglCreateContextImpl(EGLDisplay dpy, EGLConfig config, EGLContext sha
                 android::GraphicsEnv::getInstance().setTargetStats(
                         android::GpuStatsInfo::Stats::GLES_1_IN_USE);
             }
+            android::GraphicsEnv::getInstance().setTargetStats(
+                    android::GpuStatsInfo::Stats::CREATED_GLES_CONTEXT);
             egl_context_t* c = new egl_context_t(dpy, context, config, cnx, version);
             return c;
         }
@@ -1345,7 +1354,7 @@ EGLBoolean eglSwapBuffersWithDamageKHRImpl(EGLDisplay dpy, EGLSurface draw, EGLi
         }
     }
 
-    if (!s->cnx->useAngle) {
+    if (!s->cnx->angleLoaded) {
         if (!sendSurfaceMetadata(s)) {
             native_window_api_disconnect(s->getNativeWindow(), NATIVE_WINDOW_API_EGL);
             return setError(EGL_BAD_NATIVE_WINDOW, (EGLBoolean)EGL_FALSE);
@@ -1370,7 +1379,7 @@ EGLBoolean eglSwapBuffersWithDamageKHRImpl(EGLDisplay dpy, EGLSurface draw, EGLi
         androidRect.bottom = y;
         androidRects.push_back(androidRect);
     }
-    if (!s->cnx->useAngle) {
+    if (!s->cnx->angleLoaded) {
         native_window_set_surface_damage(s->getNativeWindow(), androidRects.data(),
                                          androidRects.size());
     }
@@ -1461,7 +1470,7 @@ EGLBoolean eglSurfaceAttribImpl(EGLDisplay dpy, EGLSurface surface, EGLint attri
         int err = native_window_set_auto_refresh(s->getNativeWindow(), value != 0);
         if (err != 0) {
             return setError(EGL_BAD_SURFACE, (EGLBoolean)EGL_FALSE);
-        } else if (!s->cnx->useAngle) {
+        } else if (!s->cnx->angleLoaded) {
             return EGL_TRUE;
         } // else if ANGLE, fall through to the call to the driver (i.e. ANGLE) below
     }
@@ -1475,7 +1484,7 @@ EGLBoolean eglSurfaceAttribImpl(EGLDisplay dpy, EGLSurface surface, EGLint attri
         int err = native_window_enable_frame_timestamps(s->getNativeWindow(), value != 0);
         if (err != 0) {
             return setError(EGL_BAD_SURFACE, (EGLBoolean)EGL_FALSE);
-        } else if (!s->cnx->useAngle) {
+        } else if (!s->cnx->angleLoaded) {
             return EGL_TRUE;
         } // else if ANGLE, fall through to the call to the driver (i.e. ANGLE) below
     }
@@ -1635,26 +1644,6 @@ EGLImageKHR eglCreateImageTmpl(EGLDisplay dpy, EGLContext ctx, EGLenum target,
     const egl_display_t* dp = validate_display(dpy);
     if (!dp) return EGL_NO_IMAGE_KHR;
 
-    std::vector<AttrType> strippedAttribs;
-    if (needsAndroidPEglMitigation()) {
-        // Mitigation for Android P vendor partitions: eglImageCreateKHR should accept
-        // EGL_GL_COLORSPACE_LINEAR_KHR, EGL_GL_COLORSPACE_SRGB_KHR and
-        // EGL_GL_COLORSPACE_DEFAULT_EXT if EGL_EXT_image_gl_colorspace is supported,
-        // but some drivers don't like the DEFAULT value and generate an error.
-        for (const AttrType* attr = attrib_list; attr && attr[0] != EGL_NONE; attr += 2) {
-            if (attr[0] == EGL_GL_COLORSPACE_KHR &&
-                dp->haveExtension("EGL_EXT_image_gl_colorspace")) {
-                if (attr[1] != EGL_GL_COLORSPACE_LINEAR_KHR &&
-                    attr[1] != EGL_GL_COLORSPACE_SRGB_KHR) {
-                    continue;
-                }
-            }
-            strippedAttribs.push_back(attr[0]);
-            strippedAttribs.push_back(attr[1]);
-        }
-        strippedAttribs.push_back(EGL_NONE);
-    }
-
     ContextRef _c(dp, ctx);
     egl_context_t* const c = _c.get();
 
@@ -1662,8 +1651,7 @@ EGLImageKHR eglCreateImageTmpl(EGLDisplay dpy, EGLContext ctx, EGLenum target,
     egl_connection_t* const cnx = &gEGLImpl;
     if (cnx->dso && eglCreateImageFunc) {
         result = eglCreateImageFunc(dp->disp.dpy, c ? c->context : EGL_NO_CONTEXT, target, buffer,
-                                    needsAndroidPEglMitigation() ? strippedAttribs.data()
-                                                                 : attrib_list);
+                                    attrib_list);
     }
     return result;
 }

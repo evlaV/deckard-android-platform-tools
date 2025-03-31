@@ -61,6 +61,14 @@ void Error(const char* format, ...) {
   va_end(args);
 }
 
+void Fatal(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  PrintToStdout(0, format, args);
+  va_end(args);
+  abort();
+}
+
 void AsyncSafe(const char* format, ...) {
   va_list args;
   va_start(args, format);

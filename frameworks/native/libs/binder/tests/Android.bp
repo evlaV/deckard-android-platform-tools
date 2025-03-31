@@ -25,9 +25,15 @@ package {
 
 cc_defaults {
     name: "binder_test_defaults",
+    cmake_snapshot_supported: true,
     cflags: [
         "-Wall",
         "-Werror",
+        "-Wformat",
+        "-Wpessimizing-move",
+        "-Wsign-compare",
+        "-Wunused-result",
+        "-Wzero-as-null-pointer-constant",
     ],
 }
 
@@ -57,6 +63,7 @@ cc_test {
         "binderStatusUnitTest.cpp",
         "binderMemoryHeapBaseUnitTest.cpp",
         "binderRecordedTransactionTest.cpp",
+        "binderPersistableBundleTest.cpp",
     ],
     shared_libs: [
         "libbinder",
@@ -69,10 +76,14 @@ cc_test {
 cc_test {
     name: "binderRecordReplayTest",
     srcs: ["binderRecordReplayTest.cpp"],
+    cflags: [
+        "-DBINDER_WITH_KERNEL_IPC",
+    ],
     shared_libs: [
         "libbinder",
         "libcutils",
         "libutils",
+        "liblog",
     ],
     static_libs: [
         "binderRecordReplayTestIface-cpp",
@@ -95,6 +106,14 @@ aidl_interface {
         java: {
             enabled: true,
             platform_apis: true,
+        },
+
+        // TODO: switch from FileDescriptor to ParcelFileDescriptor
+        ndk: {
+            enabled: false,
+        },
+        rust: {
+            enabled: false,
         },
     },
 }
@@ -124,6 +143,7 @@ aidl_interface {
     name: "binderRpcTestIface",
     vendor_available: true,
     host_supported: true,
+    cmake_snapshot_supported: true,
     unstable: true,
     srcs: [
         "BinderRpcTestClientInfo.aidl",
@@ -133,6 +153,10 @@ aidl_interface {
         "IBinderRpcSession.aidl",
         "IBinderRpcTest.aidl",
         "ParcelableCertificateData.aidl",
+    ],
+    flags: [
+        "-Werror",
+        "-Wno-mixed-oneway",
     ],
     backend: {
         java: {
@@ -172,9 +196,36 @@ cc_library_static {
     ],
 }
 
+cc_library_static {
+    name: "libbinder_test_utils",
+    host_supported: true,
+    vendor_available: true,
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
+    defaults: [
+        "binder_test_defaults",
+    ],
+    header_libs: [
+        "libbinder_headers_base",
+    ],
+    shared_libs: [
+        "libbase",
+    ],
+    srcs: [
+        "FileUtils.cpp",
+    ],
+    visibility: [
+        ":__subpackages__",
+    ],
+}
+
 cc_defaults {
     name: "binderRpcTest_common_defaults",
     host_supported: true,
+    cmake_snapshot_supported: true,
     target: {
         darwin: {
             enabled: false,
@@ -184,7 +235,18 @@ cc_defaults {
         "binder_test_defaults",
     ],
 
+    compile_multilib: "both",
+    multilib: {
+        lib32: {
+            suffix: "32",
+        },
+        lib64: {
+            suffix: "64",
+        },
+    },
+
     static_libs: [
+        "libbinder_test_utils",
         "libbinder_tls_static",
         "libbinder_tls_test_utils",
         "binderRpcTestIface-cpp",
@@ -227,6 +289,12 @@ cc_defaults {
     // contention on the device. b/276820894
     test_options: {
         unit_test: false,
+        test_runner_options: [
+            {
+                name: "native-test-timeout",
+                value: "10m",
+            },
+        ],
     },
 
     test_suites: ["general-tests"],
@@ -278,7 +346,7 @@ cc_defaults {
     ],
 }
 
-cc_test {
+cc_binary {
     // The module name cannot start with "binderRpcTest" because
     // then atest tries to execute it as part of binderRpcTest
     name: "binder_rpc_test_service",
@@ -289,7 +357,7 @@ cc_test {
     ],
 }
 
-cc_test {
+cc_binary {
     name: "binder_rpc_test_service_no_kernel",
     defaults: [
         "binderRpcTest_service_defaults",
@@ -300,7 +368,7 @@ cc_test {
     ],
 }
 
-cc_test {
+cc_binary {
     name: "binder_rpc_test_service_single_threaded",
     defaults: [
         "binderRpcTest_service_defaults",
@@ -315,7 +383,7 @@ cc_test {
     ],
 }
 
-cc_test {
+cc_binary {
     name: "binder_rpc_test_service_single_threaded_no_kernel",
     defaults: [
         "binderRpcTest_service_defaults",
@@ -326,6 +394,9 @@ cc_test {
     ],
     static_libs: [
         "libbinder_rpc_single_threaded_no_kernel",
+    ],
+    shared_libs: [
+        "libbinder_ndk",
     ],
 }
 
@@ -388,6 +459,8 @@ cc_test {
     // Add the Trusty mock library as a fake dependency so it gets built
     required: [
         "libbinder_on_trusty_mock",
+        "libbinder_ndk_on_trusty_mock",
+        "libbinder_rs_on_trusty_mock",
         "binderRpcTestService_on_trusty_mock",
         "binderRpcTest_on_trusty_mock",
     ],
@@ -401,6 +474,20 @@ cc_test {
     ],
     static_libs: [
         "libbinder_rpc_no_kernel",
+    ],
+}
+
+cc_test {
+    name: "binderRpcTestNoKernelAtAll",
+    defaults: [
+        "binderRpcTest_defaults",
+        "binderRpcTest_static_defaults",
+    ],
+    static_libs: [
+        "libbinder_rpc_no_kernel",
+    ],
+    cflags: [
+        "-DBINDER_NO_KERNEL_IPC_TESTING",
     ],
 }
 
@@ -430,6 +517,9 @@ cc_test {
     ],
     static_libs: [
         "libbinder_rpc_single_threaded_no_kernel",
+    ],
+    shared_libs: [
+        "libbinder_ndk",
     ],
 }
 
@@ -801,6 +891,7 @@ cc_defaults {
         ],
         // Adds bugs to hotlist "AIDL fuzzers bugs" on buganizer
         hotlists: ["4637097"],
+        use_for_presubmit: true,
     },
 }
 

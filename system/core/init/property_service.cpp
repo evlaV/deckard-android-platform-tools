@@ -58,11 +58,13 @@
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
 #include <fs_mgr.h>
+#include <private/android_filesystem_config.h>
 #include <property_info_parser/property_info_parser.h>
 #include <property_info_serializer/property_info_serializer.h>
 #include <selinux/android.h>
 #include <selinux/label.h>
 #include <selinux/selinux.h>
+#include <vendorsupport/api_level.h>
 
 #include "debug_ramdisk.h"
 #include "epoll.h"
@@ -76,10 +78,15 @@
 #include "system/core/init/property_service.pb.h"
 #include "util.h"
 
+static constexpr char APPCOMPAT_OVERRIDE_PROP_FOLDERNAME[] =
+        "/dev/__properties__/appcompat_override";
+static constexpr char APPCOMPAT_OVERRIDE_PROP_TREE_FILE[] =
+        "/dev/__properties__/appcompat_override/property_info";
 using namespace std::literals;
 
 using android::base::ErrnoError;
 using android::base::Error;
+using android::base::GetIntProperty;
 using android::base::GetProperty;
 using android::base::ParseInt;
 using android::base::ReadFileToString;
@@ -108,16 +115,16 @@ constexpr auto ID_PROP = "ro.build.id";
 constexpr auto LEGACY_ID_PROP = "ro.build.legacy.id";
 constexpr auto VBMETA_DIGEST_PROP = "ro.boot.vbmeta.digest";
 constexpr auto DIGEST_SIZE_USED = 8;
-constexpr auto API_LEVEL_CURRENT = 10000;
 
 static bool persistent_properties_loaded = false;
 
-static int property_set_fd = -1;
 static int from_init_socket = -1;
 static int init_socket = -1;
 static bool accept_messages = false;
 static std::mutex accept_messages_lock;
+static std::mutex selinux_check_access_lock;
 static std::thread property_service_thread;
+static std::thread property_service_for_system_thread;
 
 static std::unique_ptr<PersistWriteThread> persist_write_thread;
 
@@ -162,6 +169,7 @@ bool CanReadProperty(const std::string& source_context, const std::string& name)
     ucred cr = {.pid = 0, .uid = 0, .gid = 0};
     audit_data.cr = &cr;
 
+    auto lock = std::lock_guard{selinux_check_access_lock};
     return selinux_check_access(source_context.c_str(), target_context, "file", "read",
                                 &audit_data) == 0;
 }
@@ -177,10 +185,9 @@ static bool CheckMacPerms(const std::string& name, const char* target_context,
     audit_data.name = name.c_str();
     audit_data.cr = &cr;
 
-    bool has_access = (selinux_check_access(source_context, target_context, "property_service",
-                                            "set", &audit_data) == 0);
-
-    return has_access;
+    auto lock = std::lock_guard{selinux_check_access_lock};
+    return selinux_check_access(source_context, target_context, "property_service", "set",
+                                &audit_data) == 0;
 }
 
 void NotifyPropertyChange(const std::string& name, const std::string& value) {
@@ -395,31 +402,38 @@ static std::optional<uint32_t> PropertySet(const std::string& name, const std::s
         return {PROP_ERROR_INVALID_VALUE};
     }
 
-    prop_info* pi = (prop_info*)__system_property_find(name.c_str());
-    if (pi != nullptr) {
-        // ro.* properties are actually "write-once".
-        if (StartsWith(name, "ro.")) {
-            *error = "Read-only property was already set";
-            return {PROP_ERROR_READ_ONLY_PROPERTY};
-        }
-
-        __system_property_update(pi, value.c_str(), valuelen);
+    if (name == "sys.powerctl") {
+        // No action here - NotifyPropertyChange will trigger the appropriate action, and since this
+        // can come to the second thread, we mustn't call out to the __system_property_* functions
+        // which support multiple readers but only one mutator.
     } else {
-        int rc = __system_property_add(name.c_str(), name.size(), value.c_str(), valuelen);
-        if (rc < 0) {
-            *error = "__system_property_add failed";
-            return {PROP_ERROR_SET_FAILED};
-        }
-    }
+        prop_info* pi = (prop_info*)__system_property_find(name.c_str());
+        if (pi != nullptr) {
+            // ro.* properties are actually "write-once".
+            if (StartsWith(name, "ro.")) {
+                *error = "Read-only property was already set";
+                return {PROP_ERROR_READ_ONLY_PROPERTY};
+            }
 
-    // Don't write properties to disk until after we have read all default
-    // properties to prevent them from being overwritten by default values.
-    if (socket && persistent_properties_loaded && StartsWith(name, "persist.")) {
-        if (persist_write_thread) {
-            persist_write_thread->Write(name, value, std::move(*socket));
-            return {};
+            __system_property_update(pi, value.c_str(), valuelen);
+        } else {
+            int rc = __system_property_add(name.c_str(), name.size(), value.c_str(), valuelen);
+            if (rc < 0) {
+                *error = "__system_property_add failed";
+                return {PROP_ERROR_SET_FAILED};
+            }
         }
-        WritePersistentProperty(name, value);
+
+        // Don't write properties to disk until after we have read all default
+        // properties to prevent them from being overwritten by default values.
+        bool need_persist = StartsWith(name, "persist.") || StartsWith(name, "next_boot.");
+        if (socket && persistent_properties_loaded && need_persist) {
+            if (persist_write_thread) {
+                persist_write_thread->Write(name, value, std::move(*socket));
+                return {};
+            }
+            WritePersistentProperty(name, value);
+        }
     }
 
     NotifyPropertyChange(name, value);
@@ -439,6 +453,10 @@ static uint32_t SendControlMessage(const std::string& msg, const std::string& na
                                    SocketConnection* socket, std::string* error) {
     auto lock = std::lock_guard{accept_messages_lock};
     if (!accept_messages) {
+        // If we're already shutting down and you're asking us to stop something,
+        // just say we did (https://issuetracker.google.com/336223505).
+        if (msg == "stop") return PROP_SUCCESS;
+
         *error = "Received control message after shutdown, ignoring";
         return PROP_ERROR_HANDLE_CONTROL_MESSAGE;
     }
@@ -580,10 +598,10 @@ uint32_t HandlePropertySetNoSocket(const std::string& name, const std::string& v
     return *ret;
 }
 
-static void handle_property_set_fd() {
+static void handle_property_set_fd(int fd) {
     static constexpr uint32_t kDefaultSocketTimeout = 2000; /* ms */
 
-    int s = accept4(property_set_fd, nullptr, nullptr, SOCK_CLOEXEC);
+    int s = accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
     if (s == -1) {
         return;
     }
@@ -956,6 +974,17 @@ static std::string ConstructBuildFingerprint(bool legacy) {
     std::string build_fingerprint = GetProperty("ro.product.brand", UNKNOWN);
     build_fingerprint += '/';
     build_fingerprint += GetProperty("ro.product.name", UNKNOWN);
+
+    // should be set in /product/etc/build.prop
+    // when we have a dev option device, and we've switched the kernel to 16kb mode
+    // we use the same system image, but we've switched out the kernel, so make it
+    // visible at a high level
+    bool has16KbDevOption =
+            android::base::GetBoolProperty("ro.product.build.16k_page.enabled", false);
+    if (has16KbDevOption && getpagesize() == 16384) {
+        build_fingerprint += "_16kb";
+    }
+
     build_fingerprint += '/';
     build_fingerprint += GetProperty("ro.product.device", UNKNOWN);
     build_fingerprint += ':';
@@ -1081,36 +1110,45 @@ static void property_initialize_ro_cpu_abilist() {
     }
 }
 
-static int read_api_level_props(const std::vector<std::string>& api_level_props) {
-    int api_level = API_LEVEL_CURRENT;
-    for (const auto& api_level_prop : api_level_props) {
-        api_level = android::base::GetIntProperty(api_level_prop, API_LEVEL_CURRENT);
-        if (api_level != API_LEVEL_CURRENT) {
-            break;
-        }
-    }
-    return api_level;
-}
-
 static void property_initialize_ro_vendor_api_level() {
     // ro.vendor.api_level shows the api_level that the vendor images (vendor, odm, ...) are
     // required to support.
     constexpr auto VENDOR_API_LEVEL_PROP = "ro.vendor.api_level";
 
-    // Api level properties of the board. The order of the properties must be kept.
-    std::vector<std::string> BOARD_API_LEVEL_PROPS = {"ro.board.api_level",
-                                                      "ro.board.first_api_level"};
-    // Api level properties of the device. The order of the properties must be kept.
-    std::vector<std::string> DEVICE_API_LEVEL_PROPS = {"ro.product.first_api_level",
-                                                       "ro.build.version.sdk"};
+    if (__system_property_find(VENDOR_API_LEVEL_PROP) != nullptr) {
+        // The device already have ro.vendor.api_level in its vendor/build.prop.
+        // Skip initializing the ro.vendor.api_level property.
+        return;
+    }
 
-    int api_level = std::min(read_api_level_props(BOARD_API_LEVEL_PROPS),
-                             read_api_level_props(DEVICE_API_LEVEL_PROPS));
+    auto vendor_api_level = GetIntProperty("ro.board.first_api_level", __ANDROID_VENDOR_API_MAX__);
+    if (vendor_api_level != __ANDROID_VENDOR_API_MAX__) {
+        // Update the vendor_api_level with "ro.board.api_level" only if both "ro.board.api_level"
+        // and "ro.board.first_api_level" are defined.
+        vendor_api_level = GetIntProperty("ro.board.api_level", vendor_api_level);
+    }
+
+    auto product_first_api_level =
+            GetIntProperty("ro.product.first_api_level", __ANDROID_API_FUTURE__);
+    if (product_first_api_level == __ANDROID_API_FUTURE__) {
+        // Fallback to "ro.build.version.sdk" if the "ro.product.first_api_level" is not defined.
+        product_first_api_level = GetIntProperty("ro.build.version.sdk", __ANDROID_API_FUTURE__);
+    }
+
+    vendor_api_level =
+            std::min(AVendorSupport_getVendorApiLevelOf(product_first_api_level), vendor_api_level);
+
+    if (vendor_api_level < 0) {
+        LOG(ERROR) << "Unexpected vendor api level for " << VENDOR_API_LEVEL_PROP << ". Check "
+                   << "ro.product.first_api_level and ro.build.version.sdk.";
+        vendor_api_level = __ANDROID_VENDOR_API_MAX__;
+    }
+
     std::string error;
-    auto res = PropertySetNoSocket(VENDOR_API_LEVEL_PROP, std::to_string(api_level), &error);
+    auto res = PropertySetNoSocket(VENDOR_API_LEVEL_PROP, std::to_string(vendor_api_level), &error);
     if (res != PROP_SUCCESS) {
-        LOG(ERROR) << "Failed to set " << VENDOR_API_LEVEL_PROP << " with " << api_level << ": "
-                   << error << "(" << res << ")";
+        LOG(ERROR) << "Failed to set " << VENDOR_API_LEVEL_PROP << " with " << vendor_api_level
+                   << ": " << error << "(" << res << ")";
     }
 }
 
@@ -1280,11 +1318,19 @@ void CreateSerializedPropertyInfo() {
         return;
     }
 
-    constexpr static const char kPropertyInfosPath[] = "/dev/__properties__/property_info";
-    if (!WriteStringToFile(serialized_contexts, kPropertyInfosPath, 0444, 0, 0, false)) {
+    if (!WriteStringToFile(serialized_contexts, PROP_TREE_FILE, 0444, 0, 0, false)) {
         PLOG(ERROR) << "Unable to write serialized property infos to file";
     }
-    selinux_android_restorecon(kPropertyInfosPath, 0);
+    selinux_android_restorecon(PROP_TREE_FILE, 0);
+
+#ifdef WRITE_APPCOMPAT_OVERRIDE_SYSTEM_PROPERTIES
+    mkdir(APPCOMPAT_OVERRIDE_PROP_FOLDERNAME, S_IRWXU | S_IXGRP | S_IXOTH);
+    if (!WriteStringToFile(serialized_contexts, APPCOMPAT_OVERRIDE_PROP_TREE_FILE, 0444, 0, 0,
+                           false)) {
+        PLOG(ERROR) << "Unable to write appcompat override property infos to file";
+    }
+    selinux_android_restorecon(APPCOMPAT_OVERRIDE_PROP_TREE_FILE, 0);
+#endif
 }
 
 static void ExportKernelBootProps() {
@@ -1397,12 +1443,14 @@ static void HandleInitSocket() {
     switch (init_message.msg_case()) {
         case InitMessage::kLoadPersistentProperties: {
             load_override_properties();
-            // Read persistent properties after all default values have been loaded.
+
             auto persistent_properties = LoadPersistentProperties();
-            for (const auto& persistent_property_record : persistent_properties.properties()) {
-                InitPropertySet(persistent_property_record.name(),
-                                persistent_property_record.value());
+            for (const auto& property_record : persistent_properties.properties()) {
+                auto const& prop_name = property_record.name();
+                auto const& prop_value = property_record.value();
+                InitPropertySet(prop_name, prop_value);
             }
+
             // Apply debug ramdisk special settings after persistent properties are loaded.
             if (android::base::GetBoolProperty("ro.force.debuggable", false)) {
                 // Always enable usb adb if device is booted with debug ramdisk.
@@ -1417,19 +1465,21 @@ static void HandleInitSocket() {
     }
 }
 
-static void PropertyServiceThread() {
+static void PropertyServiceThread(int fd, bool listen_init) {
     Epoll epoll;
     if (auto result = epoll.Open(); !result.ok()) {
         LOG(FATAL) << result.error();
     }
 
-    if (auto result = epoll.RegisterHandler(property_set_fd, handle_property_set_fd);
+    if (auto result = epoll.RegisterHandler(fd, std::bind(handle_property_set_fd, fd));
         !result.ok()) {
         LOG(FATAL) << result.error();
     }
 
-    if (auto result = epoll.RegisterHandler(init_socket, HandleInitSocket); !result.ok()) {
-        LOG(FATAL) << result.error();
+    if (listen_init) {
+        if (auto result = epoll.RegisterHandler(init_socket, HandleInitSocket); !result.ok()) {
+            LOG(FATAL) << result.error();
+        }
     }
 
     while (true) {
@@ -1461,8 +1511,6 @@ void PersistWriteThread::Work() {
             work_.pop_front();
         }
 
-        std::this_thread::sleep_for(1s);
-
         // Perform write/fsync outside the lock.
         WritePersistentProperty(std::get<0>(item), std::get<1>(item));
         NotifyPropertyChange(std::get<0>(item), std::get<1>(item));
@@ -1480,6 +1528,23 @@ void PersistWriteThread::Write(std::string name, std::string value, SocketConnec
     cv_.notify_all();
 }
 
+void StartThread(const char* name, int mode, int gid, std::thread& t, bool listen_init) {
+    int fd = -1;
+    if (auto result = CreateSocket(name, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
+                                   /*passcred=*/false, /*should_listen=*/false, mode, /*uid=*/0,
+                                   /*gid=*/gid, /*socketcon=*/{});
+        result.ok()) {
+        fd = *result;
+    } else {
+        LOG(FATAL) << "start_property_service socket creation failed: " << result.error();
+    }
+
+    listen(fd, 8);
+
+    auto new_thread = std::thread(PropertyServiceThread, fd, listen_init);
+    t.swap(new_thread);
+}
+
 void StartPropertyService(int* epoll_socket) {
     InitPropertySet("ro.property_service.version", "2");
 
@@ -1491,19 +1556,9 @@ void StartPropertyService(int* epoll_socket) {
     init_socket = sockets[1];
     StartSendingMessages();
 
-    if (auto result = CreateSocket(PROP_SERVICE_NAME, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK,
-                                   /*passcred=*/false, /*should_listen=*/false, 0666, /*uid=*/0,
-                                   /*gid=*/0, /*socketcon=*/{});
-        result.ok()) {
-        property_set_fd = *result;
-    } else {
-        LOG(FATAL) << "start_property_service socket creation failed: " << result.error();
-    }
-
-    listen(property_set_fd, 8);
-
-    auto new_thread = std::thread{PropertyServiceThread};
-    property_service_thread.swap(new_thread);
+    StartThread(PROP_SERVICE_FOR_SYSTEM_NAME, 0660, AID_SYSTEM, property_service_for_system_thread,
+                true);
+    StartThread(PROP_SERVICE_NAME, 0666, 0, property_service_thread, false);
 
     auto async_persist_writes =
             android::base::GetBoolProperty("ro.property_service.async_persist_writes", false);

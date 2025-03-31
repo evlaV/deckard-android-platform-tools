@@ -26,13 +26,28 @@
 #include <vector>
 
 #include <android-base/file.h>
+#include <android-base/strings.h>
 
 namespace android {
 namespace procinfo {
 
+/*
+ * The populated fields of MapInfo corresponds to the following fields of an entry
+ * in /proc/<pid>/maps:
+ *
+ * <start>     -<end>         ...   <pgoff>        ...   <inode>    <name>
+ * 790b07dc6000-790b07dd9000  r--p  00000000       fe:09 21068208   /system/lib64/foo.so
+ *                               |
+ *                               |
+ *                               |___ p - private (!<shared>)
+ *                                    s - <shared>
+ */
 struct MapInfo {
   uint64_t start;
   uint64_t end;
+  // NOTE: It should not be assumed the virtual addresses in range [start,end] all
+  //       correspond to valid offsets on the backing file.
+  //       See: MappedFileSize().
   uint16_t flags;
   uint64_t pgoff;
   ino_t inode;
@@ -331,6 +346,98 @@ inline bool ReadMapFileAsyncSafe(const char* map_file, void* buffer, size_t buff
       start = 0;
     }
   }
+}
+
+/**
+ * A file memory mapping can be created such that it is only partially
+ * backed by the underlying file. i.e. the mapping size is larger than
+ * the file size.
+ *
+ * On builds that support larger than 4KB page-size, the common assumption
+ * that a file mapping is entirely backed by the underlying file, is
+ * more likely to be false.
+ *
+ * If an access to a region of the mapping beyond the end of the file
+ * occurs, there are 2 situations:
+ *     1) The access is between the end of the file and the next page
+ *        boundary. The kernel will facilitate this although there is
+ *        no file here.
+ *        Note: That writing this region does not persist any data to
+ *        the actual backing file.
+ *     2) The access is beyond the first page boundary after the end
+ *        of the file. This will cause a filemap_fault which does not
+ *        correspond to a valid file offset and the kernel will return
+ *        a SIGBUS.
+ *        See return value SIGBUS at:
+ *        https://man7.org/linux/man-pages/man2/mmap.2.html#RETURN_VALUE
+ *
+ * Userspace programs that parse /proc/<pid>/maps or /proc/<pid>/smaps
+ * to determine the extent of memory mappings which they then use as
+ * arguments to other syscalls or directly access; should be aware of
+ * the second case above (2) and not assume that file mappings are
+ * entirely back by the underlying file.
+ *
+ * This is especially important for operations that would cause a
+ * page-fault on the range described in (2). In this case userspace
+ * should either handle the signal or use the range backed by the
+ * underlying file for the desired operation.
+ *
+ *
+ * MappedFileSize() - Returns the size of the memory map backed
+ *                    by the underlying file; or 0 if not file-backed.
+ * @start_addr   - start address of the memory map.
+ * @end_addr     - end address of the memory map.
+ * @file_offset  - file offset of the backing file corresponding to the
+ *                 start of the memory map.
+ * @file_size    - size of the file (<file_path>) in bytes.
+ *
+ * NOTE: The arguments corresponds to the following fields of an entry
+ * in /proc/<pid>/maps:
+ *
+ * <start_addr>-< end_addr >  ...   <file_offset>  ...   ...        <file_path>
+ * 790b07dc6000-790b07dd9000  r--p  00000000       fe:09 21068208   /system/lib64/foo.so
+ *
+ * NOTE: Clients of this API should be aware that, although unlikely,
+ * it is possible for @file_size to change under us and race with
+ * the checks in MappedFileSize().
+ * Users should avoid concurrent modifications of @file_size, or
+ * use appropriate locking according to the usecase.
+ */
+inline uint64_t MappedFileSize(uint64_t start_addr, uint64_t end_addr,
+                               uint64_t file_offset, uint64_t file_size) {
+    uint64_t len = end_addr - start_addr;
+
+    // This VMA may have been split from a larger file mapping; or the
+    // file may have been resized since the mapping was created.
+    if (file_offset > file_size) {
+        return 0;
+    }
+
+    // Mapping exceeds file_size ?
+    if ((file_offset + len) > file_size) {
+        return file_size - file_offset;
+    }
+
+    return len;
+}
+
+/*
+ * MappedFileSize() - Returns the size of the memory map backed
+ *                    by the underlying file; or 0 if not file-backed.
+ */
+inline uint64_t MappedFileSize(const MapInfo& map) {
+    // Anon mapping or device?
+    if (map.name.empty() || map.name[0] != '/' ||
+          android::base::StartsWith(map.name, "/dev/")) {
+        return 0;
+    }
+
+    struct stat file_stat;
+    if (stat(map.name.c_str(), &file_stat) != 0) {
+        return 0;
+    }
+
+    return MappedFileSize(map.start, map.end, map.pgoff, file_stat.st_size);
 }
 
 } /* namespace procinfo */

@@ -151,11 +151,11 @@ void LogTags::AddEventLogTags(uint32_t tag, uid_t uid, const std::string& Name,
         // unlikely except for dupes, or updates to uid list (more later)
         if (itot != tag2total.end()) update = false;
 
-        newOne = tag2name.find(tag) == tag2name.end();
+        newOne = !tag2name.contains(tag);
         key2tag[Key] = tag;
 
         if (Format.length()) {
-            if (key2tag.find(Name) == key2tag.end()) {
+            if (!key2tag.contains(Name)) {
                 key2tag[Name] = tag;
             }
             tag2format[tag] = Format;
@@ -167,7 +167,7 @@ void LogTags::AddEventLogTags(uint32_t tag, uid_t uid, const std::string& Name,
             if (uid == AID_ROOT) {
                 tag2uid.erase(ut);
                 update = true;
-            } else if (ut->second.find(uid) == ut->second.end()) {
+            } else if (!ut->second.contains(uid)) {
                 const_cast<uid_list&>(ut->second).emplace(uid);
                 update = true;
             }
@@ -693,7 +693,7 @@ uint32_t LogTags::nameToTag(uid_t uid, const char* name, const char* format) {
         if (updateUid && (Tag != emptyTag) && !unique) {
             tag2uid_const_iterator ut = tag2uid.find(Tag);
             if ((ut != tag2uid.end()) &&
-                (ut->second.find(uid) == ut->second.end())) {
+                (!ut->second.contains(uid))) {
                 unique = write;  // write passthrough to update uid counts
                 if (!write) Tag = emptyTag;  // deny read access
             }
@@ -713,7 +713,7 @@ uint32_t LogTags::nameToTag(uid_t uid, const char* name, const char* format) {
         android::RWLock::AutoWLock writeLock(rwlock);
 
         // double check after switch from read lock to write lock for Tag
-        updateTag = tag2name.find(Tag) == tag2name.end();
+        updateTag = !tag2name.contains(Tag);
         // unlikely, either update, race inviting conflict or multiple uids
         if (!updateTag) {
             Tag = nameToTag_locked(Name, format, unique);
@@ -723,8 +723,7 @@ uint32_t LogTags::nameToTag(uid_t uid, const char* name, const char* format) {
                 tag2uid_const_iterator ut = tag2uid.find(Tag);
                 if (updateUid) {
                     // Add it to the uid list
-                    if ((ut == tag2uid.end()) ||
-                        (ut->second.find(uid) != ut->second.end())) {
+                    if (ut == tag2uid.end() || ut->second.contains(uid)) {
                         return Tag;
                     }
                     const_cast<uid_list&>(ut->second).emplace(uid);
@@ -768,7 +767,7 @@ uint32_t LogTags::nameToTag(uid_t uid, const char* name, const char* format) {
 
             if (*format) {
                 key2tag[Name + "+" + format] = Tag;
-                if (key2tag.find(Name) == key2tag.end()) key2tag[Name] = Tag;
+                if (!key2tag.contains(Name)) key2tag[Name] = Tag;
             } else {
                 key2tag[Name] = Tag;
             }
@@ -818,7 +817,7 @@ std::string LogTags::formatEntry_locked(uint32_t tag, uid_t uid,
         return formatEntry(tag, AID_ROOT, name, format);
     }
     if (uid != AID_ROOT) {
-        if (authenticate && (ut->second.find(uid) == ut->second.end())) {
+        if (authenticate && !ut->second.contains(uid)) {
             return std::string("");
         }
         return formatEntry(tag, uid, name, format);

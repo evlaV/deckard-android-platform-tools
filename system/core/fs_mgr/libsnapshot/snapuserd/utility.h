@@ -14,10 +14,15 @@
 
 #pragma once
 
+#include <initializer_list>
+#include <string_view>
+
 namespace android {
 namespace snapshot {
 
 bool SetThreadPriority(int priority);
+bool SetProfiles(std::initializer_list<std::string_view> profiles);
+bool KernelSupportsIoUring();
 
 }  // namespace snapshot
 }  // namespace android

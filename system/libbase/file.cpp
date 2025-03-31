@@ -222,8 +222,18 @@ bool ReadFdToString(borrowed_fd fd, std::string* content) {
   // very large files too, where the std::string growth heuristics might not
   // be suitable. https://code.google.com/p/android/issues/detail?id=258500.
   struct stat sb;
-  if (fstat(fd.get(), &sb) != -1 && sb.st_size > 0) {
-    content->reserve(sb.st_size);
+  if (fstat(fd.get(), &sb) != -1 && sb.st_size > 0 && sb.st_size <= SSIZE_MAX) {
+    // Shrink the string capacity to fit the file, but if the capacity is only
+    // slightly larger than needed, avoid reallocating. std::string::reserve no
+    // longer lowers capacity after P0966R1, but it does round the request up a
+    // small amount (e.g. 8 or 16 bytes).
+    size_t fd_size = sb.st_size;
+    if (fd_size > content->capacity()) {
+      content->reserve(fd_size);
+    } else if (fd_size < content->capacity() && content->capacity() - fd_size >= 64) {
+      content->shrink_to_fit();
+      content->reserve(fd_size);
+    }
   }
 
   char buf[4096] __attribute__((__uninitialized__));
@@ -313,7 +323,11 @@ bool ReadFully(borrowed_fd fd, void* data, size_t byte_count) {
   size_t remaining = byte_count;
   while (remaining > 0) {
     ssize_t n = TEMP_FAILURE_RETRY(read(fd.get(), p, remaining));
-    if (n <= 0) return false;
+    if (n == 0) {  // EOF
+      errno = ENODATA;
+      return false;
+    }
+    if (n == -1) return false;
     p += n;
     remaining -= n;
   }
@@ -358,7 +372,11 @@ bool ReadFullyAtOffset(borrowed_fd fd, void* data, size_t byte_count, off64_t of
   uint8_t* p = reinterpret_cast<uint8_t*>(data);
   while (byte_count > 0) {
     ssize_t n = TEMP_FAILURE_RETRY(pread(fd.get(), p, byte_count, offset));
-    if (n <= 0) return false;
+    if (n == 0) {  // EOF
+      errno = ENODATA;
+      return false;
+    }
+    if (n == -1) return false;
     p += n;
     byte_count -= n;
     offset += n;

@@ -321,3 +321,26 @@ TEST(properties, CachedProperty_WaitForChange) {
   GTEST_LOG_(INFO) << "This test does nothing on the host.\n";
 #endif
 }
+
+TEST(properties, CachedBoolProperty) {
+#if defined(__BIONIC__)
+  unsigned long now =
+      std::chrono::system_clock::now().time_since_epoch() / std::chrono::milliseconds(1);
+  std::string key = android::base::StringPrintf("debug.libbase.CachedBoolProperty_test_%lu", now);
+  android::base::CachedBoolProperty cached_bool_property(key);
+
+  // Not set yet.
+  EXPECT_EQ(std::nullopt, cached_bool_property.GetOptional());
+
+  android::base::SetProperty(key, "foo");
+  EXPECT_EQ(std::nullopt, cached_bool_property.GetOptional());
+
+  android::base::SetProperty(key, "1");
+  EXPECT_EQ(std::optional(true), cached_bool_property.GetOptional());
+
+  android::base::SetProperty(key, "0");
+  EXPECT_EQ(std::optional(false), cached_bool_property.GetOptional());
+#else
+  GTEST_LOG_(INFO) << "This test does nothing on the host.\n";
+#endif
+}

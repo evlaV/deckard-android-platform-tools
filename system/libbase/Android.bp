@@ -15,6 +15,7 @@
 //
 
 package {
+    default_team: "trendy_team_native_tools_libraries",
     default_applicable_licenses: ["system_libbase_license"],
 }
 
@@ -97,6 +98,7 @@ cc_defaults {
         "posix_strerror_r.cpp",
         "process.cpp",
         "properties.cpp",
+        "result.cpp",
         "stringprintf.cpp",
         "strings.cpp",
         "threads.cpp",
@@ -149,10 +151,7 @@ cc_library {
     recovery_available: true,
     host_supported: true,
     native_bridge_supported: true,
-    vndk: {
-        enabled: true,
-        support_system_process: true,
-    },
+    double_loadable: true,
     header_libs: [
         "libbase_headers",
     ],
@@ -163,20 +162,6 @@ cc_library {
         "//apex_available:anyapex",
         "//apex_available:platform",
     ],
-    target: {
-        product: {
-            header_abi_checker: {
-                enabled: true,
-                ref_dump_dirs: ["abi-dumps"],
-            },
-        },
-        vendor: {
-            header_abi_checker: {
-                enabled: true,
-                ref_dump_dirs: ["abi-dumps"],
-            },
-        },
-    },
 }
 
 cc_library_static {
@@ -186,6 +171,10 @@ cc_library_static {
     stl: "c++_static",
     export_include_dirs: ["include"],
     whole_static_libs: ["fmtlib_ndk"],
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.mediaprovider",
+    ],
 }
 
 // Tests
@@ -332,6 +321,6 @@ cc_fuzz {
         cc: [
             "android-bionic@google.com",
         ],
-        componentid: 128577
-    }
+        componentid: 128577,
+    },
 }

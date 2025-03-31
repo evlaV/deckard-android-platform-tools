@@ -36,6 +36,7 @@
 //   <Class, method, method-string, signature, is_static>
 #define JMETHODID_CONSTANTS_LIST(V)                                                         \
   V(FileDescriptor, init, "<init>", "()V", false)                                           \
+  V(FileDescriptor, setInt$, "setInt$", "(I)V", false)                                      \
   V(NIOAccess, getBaseArray, "getBaseArray", "(Ljava/nio/Buffer;)Ljava/lang/Object;", true) \
   V(NIOAccess, getBaseArrayOffset, "getBaseArrayOffset", "(Ljava/nio/Buffer;)I", true)      \
   V(NioBuffer, array, "array", "()Ljava/lang/Object;", false)                               \

@@ -30,46 +30,6 @@ using namespace android;
 using namespace android::renderengine;
 
 ///////////////////////////////////////////////////////////////////////////////
-//  Helpers for Benchmark::Apply
-///////////////////////////////////////////////////////////////////////////////
-
-std::string RenderEngineTypeName(RenderEngine::RenderEngineType type) {
-    switch (type) {
-        case RenderEngine::RenderEngineType::SKIA_GL_THREADED:
-            return "skiaglthreaded";
-        case RenderEngine::RenderEngineType::SKIA_GL:
-            return "skiagl";
-        case RenderEngine::RenderEngineType::GLES:
-        case RenderEngine::RenderEngineType::THREADED:
-            LOG_ALWAYS_FATAL("GLESRenderEngine is deprecated - why time it?");
-            return "unused";
-    }
-}
-
-/**
- * Passed (indirectly - see RunSkiaGLThreaded) to Benchmark::Apply to create a
- * Benchmark which specifies which RenderEngineType it uses.
- *
- * This simplifies calling ->Arg(type)->Arg(type) and provides strings to make
- * it obvious which version is being run.
- *
- * @param b The benchmark family
- * @param type The type of RenderEngine to use.
- */
-static void AddRenderEngineType(benchmark::internal::Benchmark* b,
-                                RenderEngine::RenderEngineType type) {
-    b->Arg(static_cast<int64_t>(type));
-    b->ArgName(RenderEngineTypeName(type));
-}
-
-/**
- * Run a benchmark once using SKIA_GL_THREADED.
- */
-static void RunSkiaGLThreaded(benchmark::internal::Benchmark* b) {
-    AddRenderEngineType(b, RenderEngine::RenderEngineType::SKIA_GL_THREADED);
-}
-
-///////////////////////////////////////////////////////////////////////////////
 //  Helpers for calling drawLayers
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -80,25 +40,32 @@ std::pair<uint32_t, uint32_t> getDisplaySize() {
     std::once_flag once;
     std::call_once(once, []() {
         auto surfaceComposerClient = SurfaceComposerClient::getDefault();
-        auto displayToken = surfaceComposerClient->getInternalDisplayToken();
-        ui::DisplayMode displayMode;
-        if (surfaceComposerClient->getActiveDisplayMode(displayToken, &displayMode) < 0) {
-            LOG_ALWAYS_FATAL("Failed to get active display mode!");
+        auto ids = SurfaceComposerClient::getPhysicalDisplayIds();
+        LOG_ALWAYS_FATAL_IF(ids.empty(), "Failed to get any display!");
+        ui::Size resolution = ui::kEmptySize;
+        // find the largest display resolution
+        for (auto id : ids) {
+            auto displayToken = surfaceComposerClient->getPhysicalDisplayToken(id);
+            ui::DisplayMode displayMode;
+            if (surfaceComposerClient->getActiveDisplayMode(displayToken, &displayMode) < 0) {
+                LOG_ALWAYS_FATAL("Failed to get active display mode!");
+            }
+            auto tw = displayMode.resolution.width;
+            auto th = displayMode.resolution.height;
+            LOG_ALWAYS_FATAL_IF(tw <= 0 || th <= 0, "Invalid display size!");
+            if (resolution.width * resolution.height <
+                displayMode.resolution.width * displayMode.resolution.height) {
+                resolution = displayMode.resolution;
+            }
         }
-        auto w = displayMode.resolution.width;
-        auto h = displayMode.resolution.height;
-        LOG_ALWAYS_FATAL_IF(w <= 0 || h <= 0, "Invalid display size!");
-        width = static_cast<uint32_t>(w);
-        height = static_cast<uint32_t>(h);
+        width = static_cast<uint32_t>(resolution.width);
+        height = static_cast<uint32_t>(resolution.height);
     });
     return std::pair<uint32_t, uint32_t>(width, height);
 }
 
-// This value doesn't matter, as it's not read. TODO(b/199918329): Once we remove
-// GLESRenderEngine we can remove this, too.
-static constexpr const bool kUseFrameBufferCache = false;
-
-static std::unique_ptr<RenderEngine> createRenderEngine(RenderEngine::RenderEngineType type) {
+static std::unique_ptr<RenderEngine> createRenderEngine(RenderEngine::Threaded threaded,
+                                                        RenderEngine::GraphicsApi graphicsApi) {
     auto args = RenderEngineCreationArgs::Builder()
                         .setPixelFormat(static_cast<int>(ui::PixelFormat::RGBA_8888))
                         .setImageCacheSize(1)
@@ -106,8 +73,8 @@ static std::unique_ptr<RenderEngine> createRenderEngine(RenderEngine::RenderEngi
                         .setPrecacheToneMapperShaderOnly(false)
                         .setSupportsBackgroundBlur(true)
                         .setContextPriority(RenderEngine::ContextPriority::REALTIME)
-                        .setRenderEngineType(type)
-                        .setUseColorManagerment(true)
+                        .setThreaded(threaded)
+                        .setGraphicsApi(graphicsApi)
                         .build();
     return RenderEngine::create(args);
 }
@@ -117,11 +84,12 @@ static std::shared_ptr<ExternalTexture> allocateBuffer(RenderEngine& re, uint32_
                                                        uint64_t extraUsageFlags = 0,
                                                        std::string name = "output") {
     return std::make_shared<
-            impl::ExternalTexture>(new GraphicBuffer(width, height, HAL_PIXEL_FORMAT_RGBA_8888, 1,
-                                                     GRALLOC_USAGE_HW_RENDER |
-                                                             GRALLOC_USAGE_HW_TEXTURE |
-                                                             extraUsageFlags,
-                                                     std::move(name)),
+            impl::ExternalTexture>(sp<GraphicBuffer>::make(width, height,
+                                                           HAL_PIXEL_FORMAT_RGBA_8888, 1u,
+                                                           GRALLOC_USAGE_HW_RENDER |
+                                                                   GRALLOC_USAGE_HW_TEXTURE |
+                                                                   extraUsageFlags,
+                                                           std::move(name)),
                                    re,
                                    impl::ExternalTexture::Usage::READABLE |
                                            impl::ExternalTexture::Usage::WRITEABLE);
@@ -158,9 +126,7 @@ static std::shared_ptr<ExternalTexture> copyBuffer(RenderEngine& re,
     };
     auto layers = std::vector<LayerSettings>{layer};
 
-    auto [status, drawFence] =
-            re.drawLayers(display, layers, texture, kUseFrameBufferCache, base::unique_fd()).get();
-    sp<Fence> waitFence = sp<Fence>::make(std::move(drawFence));
+    sp<Fence> waitFence = re.drawLayers(display, layers, texture, base::unique_fd()).get().value();
     waitFence->waitForever(LOG_TAG);
     return texture;
 }
@@ -189,10 +155,8 @@ static void benchDrawLayers(RenderEngine& re, const std::vector<LayerSettings>& 
 
     // This loop starts and stops the timer.
     for (auto _ : benchState) {
-        auto [status, drawFence] = re.drawLayers(display, layers, outputBuffer,
-                                                 kUseFrameBufferCache, base::unique_fd())
-                                           .get();
-        sp<Fence> waitFence = sp<Fence>::make(std::move(drawFence));
+        sp<Fence> waitFence =
+                re.drawLayers(display, layers, outputBuffer, base::unique_fd()).get().value();
         waitFence->waitForever(LOG_TAG);
     }
 
@@ -212,8 +176,11 @@ static void benchDrawLayers(RenderEngine& re, const std::vector<LayerSettings>& 
 //  Benchmarks
 ///////////////////////////////////////////////////////////////////////////////
 
-void BM_blur(benchmark::State& benchState) {
-    auto re = createRenderEngine(static_cast<RenderEngine::RenderEngineType>(benchState.range()));
+template <class... Args>
+void BM_blur(benchmark::State& benchState, Args&&... args) {
+    auto args_tuple = std::make_tuple(std::move(args)...);
+    auto re = createRenderEngine(static_cast<RenderEngine::Threaded>(std::get<0>(args_tuple)),
+                                 static_cast<RenderEngine::GraphicsApi>(std::get<1>(args_tuple)));
 
     // Initially use cpu access so we can decode into it with AImageDecoder.
     auto [width, height] = getDisplaySize();
@@ -257,4 +224,5 @@ void BM_blur(benchmark::State& benchState) {
     benchDrawLayers(*re, layers, benchState, "blurred");
 }
 
-BENCHMARK(BM_blur)->Apply(RunSkiaGLThreaded);
+BENCHMARK_CAPTURE(BM_blur, SkiaGLThreaded, RenderEngine::Threaded::YES,
+                  RenderEngine::GraphicsApi::GL);

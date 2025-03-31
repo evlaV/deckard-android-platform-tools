@@ -131,8 +131,8 @@ void RegsArm64::IterateRegisters(std::function<void(const char*, uint64_t)> fn) 
   fn("pst", regs_[ARM64_REG_PSTATE]);
 }
 
-Regs* RegsArm64::Read(void* remote_data) {
-  arm64_user_regs* user = reinterpret_cast<arm64_user_regs*>(remote_data);
+Regs* RegsArm64::Read(const void* remote_data) {
+  const arm64_user_regs* user = reinterpret_cast<const arm64_user_regs*>(remote_data);
 
   RegsArm64* regs = new RegsArm64();
   memcpy(regs->RawData(), &user->regs[0], (ARM64_REG_R30 + 1) * sizeof(uint64_t));
@@ -152,11 +152,10 @@ Regs* RegsArm64::CreateFromUcontext(void* ucontext) {
 }
 
 bool RegsArm64::StepIfSignalHandler(uint64_t elf_offset, Elf* elf, Memory* process_memory) {
-  uint64_t data;
-  Memory* elf_memory = elf->memory();
   // Read from elf memory since it is usually more expensive to read from
   // process memory.
-  if (!elf_memory->ReadFully(elf_offset, &data, sizeof(data))) {
+  uint64_t data;
+  if (!elf->memory()->ReadFully(elf_offset, &data, sizeof(data))) {
     return false;
   }
 

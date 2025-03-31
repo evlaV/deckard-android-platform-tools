@@ -25,12 +25,13 @@
 #include <variant>
 #include <vector>
 
-#include <android-base/function_ref.h>
-#include <android-base/unique_fd.h>
 #include <utils/Errors.h>
 
+#include <binder/Common.h>
+#include <binder/Functional.h>
 #include <binder/RpcCertificateFormat.h>
 #include <binder/RpcThreads.h>
+#include <binder/unique_fd.h>
 
 #include <sys/uio.h>
 
@@ -51,7 +52,7 @@ class RpcTransportCtxTipcTrusty;
 
 // Represents a socket connection.
 // No thread-safety is guaranteed for these APIs.
-class RpcTransport {
+class LIBBINDER_EXPORTED RpcTransport {
 public:
     virtual ~RpcTransport() = default;
 
@@ -85,13 +86,14 @@ public:
      *   error - interrupted (failure or trigger)
      */
     [[nodiscard]] virtual status_t interruptableWriteFully(
-            FdTrigger *fdTrigger, iovec *iovs, int niovs,
-            const std::optional<android::base::function_ref<status_t()>> &altPoll,
-            const std::vector<std::variant<base::unique_fd, base::borrowed_fd>> *ancillaryFds) = 0;
+            FdTrigger* fdTrigger, iovec* iovs, int niovs,
+            const std::optional<binder::impl::SmallFunction<status_t()>>& altPoll,
+            const std::vector<std::variant<binder::unique_fd, binder::borrowed_fd>>*
+                    ancillaryFds) = 0;
     [[nodiscard]] virtual status_t interruptableReadFully(
-            FdTrigger *fdTrigger, iovec *iovs, int niovs,
-            const std::optional<android::base::function_ref<status_t()>> &altPoll,
-            std::vector<std::variant<base::unique_fd, base::borrowed_fd>> *ancillaryFds) = 0;
+            FdTrigger* fdTrigger, iovec* iovs, int niovs,
+            const std::optional<binder::impl::SmallFunction<status_t()>>& altPoll,
+            std::vector<std::variant<binder::unique_fd, binder::borrowed_fd>>* ancillaryFds) = 0;
 
     /**
      *  Check whether any threads are blocked while polling the transport
@@ -122,7 +124,7 @@ private:
 
 // Represents the context that generates the socket connection.
 // All APIs are thread-safe. See RpcTransportCtxRaw and RpcTransportCtxTls for details.
-class RpcTransportCtx {
+class LIBBINDER_EXPORTED RpcTransportCtx {
 public:
     virtual ~RpcTransportCtx() = default;
 
@@ -153,7 +155,7 @@ private:
 
 // A factory class that generates RpcTransportCtx.
 // All APIs are thread-safe.
-class RpcTransportCtxFactory {
+class LIBBINDER_EXPORTED RpcTransportCtxFactory {
 public:
     virtual ~RpcTransportCtxFactory() = default;
     // Creates server context.
@@ -170,17 +172,17 @@ protected:
     RpcTransportCtxFactory() = default;
 };
 
-struct RpcTransportFd final {
+struct LIBBINDER_EXPORTED RpcTransportFd final {
 private:
     mutable bool isPolling{false};
 
     void setPollingState(bool state) const { isPolling = state; }
 
 public:
-    base::unique_fd fd;
+    binder::unique_fd fd;
 
     RpcTransportFd() = default;
-    explicit RpcTransportFd(base::unique_fd &&descriptor)
+    explicit RpcTransportFd(binder::unique_fd&& descriptor)
           : isPolling(false), fd(std::move(descriptor)) {}
 
     RpcTransportFd(RpcTransportFd &&transportFd) noexcept
@@ -192,7 +194,7 @@ public:
         return *this;
     }
 
-    RpcTransportFd &operator=(base::unique_fd &&descriptor) noexcept {
+    RpcTransportFd& operator=(binder::unique_fd&& descriptor) noexcept {
         fd = std::move(descriptor);
         isPolling = false;
         return *this;

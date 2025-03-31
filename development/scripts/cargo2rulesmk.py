@@ -583,8 +583,8 @@ class Crate(object):
         if not self.defaults:
             self.dump_edition_flags_libs()
 
-        # TODO(perlarsen): improve and clean up dependency handling
-        library_deps = []
+        # NOTE: a crate may list the same dependency as required and optional
+        library_deps = set()
         for dependency in self.dependencies:
             if dependency["kind"] in ["dev", "build"]:
                 continue
@@ -593,31 +593,23 @@ class Crate(object):
                 if (rename := dependency["rename"])
                 else dependency["name"]
             )
+            if dependency["target"]:
+                print(
+                    f"### WARNING: ignoring target-specific dependency: {name}")
+                continue
             path = CUSTOM_MODULE_CRATES.get(
                 name, f"external/rust/crates/{name}"
             )
-            abspath = os.path.normpath(os.path.join(TOP_DIR, path))
-            # just check for directory, not whether it contains rules.mk, since
-            # we do not generate makefile rules in topological order
-            if os.path.isdir(abspath):
-                library_deps.append(path)
-            elif dependency["optional"]:
-                if feats := [
-                    f
+            if dependency["optional"]:
+                if not any(
+                    name in self.feature_dependencies.get(f, [])
                     for f in self.features
-                    if name in self.feature_dependencies.get(f, [])
-                ]:
-                    print(
-                        f"### WARNING: missing dependency {name} needed by features "
-                        + ", ".join(feats)
-                    )
-                    return
-            else:
-                print(f"### WARNING: missing non-optional dependency: {path}")
-                return
+                ):
+                    continue
+            library_deps.add(path)
         if library_deps:
             self.write("MODULE_LIBRARY_DEPS := \\")
-            for path in library_deps:
+            for path in sorted(library_deps):
                 self.write(f"\t{path} \\")
             self.write("")
         if crate_type == "test" and not self.default_srcs:
@@ -878,8 +870,11 @@ class Runner(object):
             cmd_v_flag = " -vv " if self.args.vv else " -v "
             cmd = self.cargo_path + cmd_v_flag
             cmd += c + features + cmd_tail_target + cmd_tail_redir
-            if self.args.rustflags and c != "clean":
-                cmd = 'RUSTFLAGS="' + self.args.rustflags + '" ' + cmd
+            if c != "clean":
+                rustflags = self.args.rustflags if self.args.rustflags else ""
+                # linting issues shouldn't prevent us from generating rules.mk
+                rustflags = f'RUSTFLAGS="{rustflags} --cap-lints allow" '
+                cmd = rustflags + cmd
             self.run_cmd(cmd, cargo_out)
         if self.args.tests:
             cmd = (

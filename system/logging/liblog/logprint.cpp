@@ -1088,59 +1088,64 @@ int android_log_processBinaryLogBuffer(
 }
 
 /*
- * Convert to printable from message to p buffer, return string length. If p is
- * NULL, do not copy, but still return the expected string length.
+ * Convert to printable from src to dst buffer, returning dst bytes used.
+ * If dst is NULL, do not copy, but still return the dst bytes required.
  */
-size_t convertPrintable(char* p, const char* message, size_t messageLen) {
-  char* begin = p;
-  bool print = p != NULL;
-  mbstate_t mb_state = {};
+size_t convertPrintable(char* dst0, const char* src0, size_t n) {
+  char* dst = dst0;
+  const unsigned char* src = reinterpret_cast<const unsigned char*>(src0);
+  mbstate_t mbs = {};
 
-  while (messageLen) {
-    char buf[6];
-    ssize_t len = sizeof(buf) - 1;
-    if ((size_t)len > messageLen) {
-      len = messageLen;
+  bool print = (dst != nullptr);
+
+  while (n > 0) {
+    // ASCII fast path to cover most logging; space and tab aren't escaped,
+    // but backslash is.
+    if ((*src >= ' ' && *src < 0x7f && *src != '\\') || *src == '\t') {
+      if (print) *dst = *src;
+      dst++;
+      src++;
+      n--;
+      continue;
     }
-    len = mbrtowc(nullptr, message, len, &mb_state);
 
-    if (len <= 0) {
-      snprintf(buf, sizeof(buf), "\\x%02X", static_cast<unsigned char>(*message));
-      len = 1;
+    // Unprintable fast path #1: single-character C escapes.
+    if ((*src >= '\a' && *src <= '\r') || *src == '\\') {
+      if (print) {
+        dst[0] = '\\';
+        dst[1] = (*src == '\\') ? '\\' : "abtnvfr"[*src - '\a'];
+      }
+      dst += 2;
+      src++;
+      n--;
+      continue;
+    }
+    // Unprintable fast path #2: everything else below space, plus DEL.
+    if (*src < ' ' || *src == 0x7f) {
+      if (print) sprintf(dst, "\\x%02X", *src);
+      dst += 4;
+      src++;
+      n--;
+      continue;
+    }
+
+    // Are we at the start of a valid UTF-8 encoding?
+    ssize_t len = mbrtowc(nullptr, reinterpret_cast<const char*>(src), n, &mbs);
+    if (len > 0) {
+      if (print) memcpy(dst, src, len);
+      dst += len;
+      src += len;
+      n -= len;
     } else {
-      buf[0] = '\0';
-      if (len == 1) {
-        if (*message == '\a') {
-          strcpy(buf, "\\a");
-        } else if (*message == '\b') {
-          strcpy(buf, "\\b");
-        } else if (*message == '\t') {
-          strcpy(buf, "\t"); /* Do not escape tabs */
-        } else if (*message == '\v') {
-          strcpy(buf, "\\v");
-        } else if (*message == '\f') {
-          strcpy(buf, "\\f");
-        } else if (*message == '\r') {
-          strcpy(buf, "\\r");
-        } else if (*message == '\\') {
-          strcpy(buf, "\\\\");
-        } else if ((*message < ' ') || (*message & 0x80)) {
-          snprintf(buf, sizeof(buf), "\\x%02X", static_cast<unsigned char>(*message));
-        }
-      }
-      if (!buf[0]) {
-        strncpy(buf, message, len);
-        buf[len] = '\0';
-      }
+      // Assume it's just one bad byte, and try again after escaping it.
+      if (print) sprintf(dst, "\\x%02X", *src);
+      dst += 4;
+      src++;
+      n--;
     }
-    if (print) {
-      strcpy(p, buf);
-    }
-    p += strlen(buf);
-    message += len;
-    messageLen -= len;
   }
-  return p - begin;
+  if (print) *dst = '\0';
+  return dst - dst0;
 }
 
 #ifdef __ANDROID__
@@ -1211,8 +1216,6 @@ static void convertMonotonic(struct timespec* result, const AndroidLogEntry* ent
       while (getline(&line, &len, p) > 0) {
         static const char suspend[] = "PM: suspend entry ";
         static const char resume[] = "PM: suspend exit ";
-        static const char healthd[] = "healthd";
-        static const char battery[] = ": battery ";
         static const char suspended[] = "suspended for ";
         struct timespec monotonic;
         struct tm tm;
@@ -1242,11 +1245,6 @@ static void convertMonotonic(struct timespec* result, const AndroidLogEntry* ent
           e += sizeof(suspend) - 1;
         } else if ((e = strstr(line, resume))) {
           e += sizeof(resume) - 1;
-        } else if (((e = strstr(line, healthd))) &&
-                   ((e = strstr(e + sizeof(healthd) - 1, battery)))) {
-          /* NB: healthd is roughly 150us late, worth the price to
-           * deal with ntp-induced or hardware clock drift. */
-          e += sizeof(battery) - 1;
         } else if ((e = strstr(line, suspended))) {
           e += sizeof(suspended) - 1;
           e = readSeconds(e, &time);

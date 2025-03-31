@@ -145,8 +145,9 @@ python_binary_host {
     compile_multilib: "first",
 }
 
+// Default common to both standard and baremetal versions of libavb.
 cc_defaults {
-    name: "libavb_defaults",
+    name: "libavb_base_defaults",
     defaults: [
         "avb_defaults",
         "avb_sources",
@@ -158,11 +159,13 @@ cc_defaults {
     export_header_lib_headers: ["avb_headers"],
 }
 
-// Build libavb - this is a static library that depends
-// on only libc and libcrypto, but no other dependencies.
-cc_library_static {
-    name: "libavb",
-    defaults: ["libavb_defaults"],
+// Defaults for standard libavb; depends on only libc and libcrypto.
+//
+// The standard targets enable more logging and uses the standard versions of
+// the dependencies; see the baremetal variant for a slimmer alternative.
+cc_defaults {
+    name: "libavb_standard_defaults",
+    defaults: ["libavb_base_defaults"],
     host_supported: true,
     ramdisk_available: true,
     vendor_ramdisk_available: true,
@@ -182,19 +185,60 @@ cc_library_static {
             cflags: ["-fno-stack-protector"],
         },
     },
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.virt",
+    ],
 }
 
-// A variant of the library that can run in baremetal environments.
+// libavb
+cc_library_static {
+    name: "libavb",
+    defaults: ["libavb_standard_defaults"],
+}
+
+// libavb + cert
+//
+// The cert extensions provides some additional support for minimal
+// certificate-based signing.
+cc_library_static {
+    name: "libavb_cert",
+    defaults: [
+        "avb_cert_sources",
+        "libavb_standard_defaults",
+    ],
+}
+
+// Defaults for a variant of libavb that can run in baremetal environments.
 //
 // The debug feature isn't enabled, removing verbose logging and assertions.
-cc_library_static {
-    name: "libavb_baremetal",
-    defaults: ["libavb_defaults"],
+// Also uses the baremetal variant of the dependencies.
+//
+// This does still require a handful of Posix APIs as used by the sysdeps
+// implementation.
+cc_defaults {
+    name: "libavb_baremetal_defaults",
+    defaults: ["libavb_base_defaults"],
     cflags: ["-UAVB_ENABLE_DEBUG"],
     static_libs: [
         "libcrypto_baremetal",
     ],
     srcs: ["libavb/avb_sysdeps_posix.c"],
+}
+
+// Baremetal libavb
+cc_library_static {
+    name: "libavb_baremetal",
+    defaults: ["libavb_baremetal_defaults"],
+}
+
+// Baremetal libavb + cert
+cc_library_static {
+    name: "libavb_cert_baremetal",
+    defaults: [
+        "avb_cert_sources",
+        "libavb_baremetal_defaults",
+    ],
 }
 
 // Build libavb_user for the target - in addition to libavb, it
@@ -258,8 +302,8 @@ cc_library_host_static {
 }
 
 cc_defaults {
-    name: "avb_atx_sources",
-    srcs: ["libavb_atx/avb_atx_validate.c"],
+    name: "avb_cert_sources",
+    srcs: ["libavb_cert/avb_cert_validate.c"],
 }
 
 cc_library_host_static {
@@ -273,8 +317,8 @@ cc_library_host_static {
 }
 
 cc_defaults {
-    name: "avb_things_example_sources",
-    srcs: ["examples/things/avb_atx_slot_verify.c"],
+    name: "avb_cert_example_sources",
+    srcs: ["examples/cert/avb_cert_slot_verify.c"],
 }
 
 cc_defaults {
@@ -282,8 +326,8 @@ cc_defaults {
     defaults: [
         "avb_defaults",
         "avb_sources",
-        "avb_atx_sources",
-        "avb_things_example_sources",
+        "avb_cert_sources",
+        "avb_cert_example_sources",
     ],
     required: [
         "simg2img",
@@ -318,8 +362,8 @@ cc_defaults {
     ],
     srcs: [
         "test/avb_ab_flow_unittest.cc",
-        "test/avb_atx_validate_unittest.cc",
-        "test/avb_atx_slot_verify_unittest.cc",
+        "test/avb_cert_validate_unittest.cc",
+        "test/avb_cert_slot_verify_unittest.cc",
         "test/avb_crypto_ops_unittest.cc",
         "test/avb_slot_verify_unittest.cc",
         "test/avb_unittest_util.cc",
@@ -397,98 +441,8 @@ cc_library_headers {
             enabled: true,
         },
     },
-}
-
-// Rust bindgen wrappers to allow calling into libavb from Rust.
-//
-// The auto-generated wrappers are Rust unsafe and somewhat difficult to work
-// with so are not exposed outside of this directory; instead we will provide
-// a safe higher-level Rust API.
-rust_defaults {
-    name: "libavb_bindgen.defaults",
-    wrapper_src: "rust/bindgen/avb.h",
-    crate_name: "avb_bindgen",
-    edition: "2021",
-    visibility: [
-        ":__subpackages__",
-        // TODO(b/290110273): add the Rust public API layer here and adjust
-        // Virtualization packages to depend on it instead of the raw bindgen.
-        "//packages/modules/Virtualization:__subpackages__",
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.virt",
     ],
-    source_stem: "bindings",
-    bindgen_flags: [
-        "--constified-enum-module AvbDescriptorTag",
-        "--default-enum-style rust",
-        "--allowlist-type=AvbDescriptorTag",
-        "--allowlist-function=.*",
-        "--allowlist-var=AVB.*",
-        "--use-core",
-        "--raw-line=#![no_std]",
-        "--ctypes-prefix=core::ffi",
-    ],
-    cflags: ["-DBORINGSSL_NO_CXX"],
-}
-
-rust_bindgen {
-    name: "libavb_bindgen",
-    defaults: ["libavb_bindgen.defaults"],
-    host_supported: true,
-    static_libs: [
-        "libavb",
-    ],
-    shared_libs: [
-        "libcrypto",
-    ],
-}
-
-rust_bindgen {
-    name: "libavb_bindgen_nostd",
-    defaults: ["libavb_bindgen.defaults"],
-    static_libs: [
-        "libavb_baremetal",
-        "libcrypto_baremetal",
-    ],
-}
-
-rust_test {
-    name: "libavb_bindgen_test",
-    srcs: [":libavb_bindgen"],
-    crate_name: "avb_bindgen_test",
-    edition: "2021",
-    test_suites: ["general-tests"],
-    auto_gen_config: true,
-    clippy_lints: "none",
-    lints: "none",
-}
-
-// Rust library wrapping libavb C implementation.
-rust_defaults {
-    name: "libavb_rs.defaults",
-    srcs: ["rust/src/lib.rs"],
-    // Require unsafe blocks for inside unsafe functions.
-    flags: ["-Dunsafe_op_in_unsafe_fn"],
-    rustlibs: [
-        "libavb_bindgen_nostd",
-        "libtinyvec_nostd",
-    ],
-    whole_static_libs: [
-        "libavb_baremetal",
-    ],
-}
-
-rust_library_rlib {
-    name: "libavb_rs_nostd",
-    crate_name: "avb",
-    prefer_rlib: true,
-    defaults: ["libavb_rs.defaults"],
-    no_stdlibs: true,
-    stdlibs: [
-        "libcore.rust_sysroot",
-    ],
-}
-
-rust_test {
-    name: "libavb_rs_test",
-    defaults: ["libavb_rs.defaults"],
-    test_suites: ["general-tests"],
 }

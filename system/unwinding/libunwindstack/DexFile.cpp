@@ -67,7 +67,7 @@ std::shared_ptr<DexFile> DexFile::CreateFromDisk(uint64_t addr, uint64_t size, M
   }
 
   // Load the file from disk and cache it.
-  std::unique_ptr<Memory> memory = Memory::CreateFileMemory(map->name(), offset_in_file, size);
+  auto memory = Memory::CreateFileMemory(map->name(), offset_in_file, size);
   if (memory == nullptr) {
     return nullptr;  // failed to map the file.
   }
@@ -76,7 +76,7 @@ std::shared_ptr<DexFile> DexFile::CreateFromDisk(uint64_t addr, uint64_t size, M
   if (dex == nullptr) {
     return nullptr;  // invalid DEX file.
   }
-  dex_api.reset(new DexFileApi{std::move(dex), std::move(memory), std::mutex()});
+  dex_api.reset(new DexFileApi{std::move(dex), memory, std::mutex()});
   cache_entry = dex_api;
   return std::shared_ptr<DexFile>(new DexFile(addr, size, std::move(dex_api)));
 }
@@ -108,11 +108,9 @@ std::shared_ptr<DexFile> DexFile::Create(uint64_t base_addr, uint64_t file_size,
   }
 
   // Fallback: make copy in local buffer.
-  std::unique_ptr<MemoryBuffer> copy(new MemoryBuffer);
-  if (!copy->Resize(file_size)) {
-    return nullptr;
-  }
-  if (!memory->ReadFully(base_addr, copy->GetPtr(0), file_size)) {
+  std::unique_ptr<MemoryBuffer> copy(new MemoryBuffer(file_size));
+  uint8_t* dst_ptr = copy->GetPtr(0);
+  if (dst_ptr == nullptr || !memory->ReadFully(base_addr, dst_ptr, file_size)) {
     return nullptr;
   }
   std::unique_ptr<art_api::dex::DexFile> dex;

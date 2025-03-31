@@ -16,12 +16,13 @@
 
 #define LOG_TAG "binderRpcTest"
 
-#include <android-base/stringprintf.h>
 #include <binder/RpcTransportTipcTrusty.h>
 #include <trusty-gtest.h>
 #include <trusty_ipc.h>
 
 #include "binderRpcTestFixture.h"
+
+using android::binder::unique_fd;
 
 namespace android {
 
@@ -44,7 +45,7 @@ std::unique_ptr<RpcTransportCtxFactory> BinderRpc::newFactory(RpcSecurity rpcSec
         case RpcSecurity::RAW:
             return RpcTransportCtxFactoryTipcTrusty::make();
         default:
-            LOG_ALWAYS_FATAL("Unknown RpcSecurity %d", rpcSecurity);
+            LOG_ALWAYS_FATAL("Unknown RpcSecurity %d", static_cast<int>(rpcSecurity));
     }
 }
 
@@ -75,7 +76,7 @@ std::unique_ptr<ProcessSession> BinderRpc::createRpcTestSocketServerProcessEtc(
             auto port = trustyIpcPort(serverVersion);
             int rc = connect(port.c_str(), IPC_CONNECT_WAIT_FOR_PORT);
             LOG_ALWAYS_FATAL_IF(rc < 0, "Failed to connect to service: %d", rc);
-            return base::unique_fd(rc);
+            return unique_fd(rc);
         });
         if (options.allowConnectFailure && status != OK) {
             ret->sessions.clear();
@@ -109,8 +110,8 @@ static std::vector<BinderRpc::ParamType> getTrustyBinderRpcParams() {
     return ret;
 }
 
-INSTANTIATE_TEST_CASE_P(Trusty, BinderRpc, ::testing::ValuesIn(getTrustyBinderRpcParams()),
-                        BinderRpc::PrintParamInfo);
+INSTANTIATE_TEST_SUITE_P(Trusty, BinderRpc, ::testing::ValuesIn(getTrustyBinderRpcParams()),
+                         BinderRpc::PrintParamInfo);
 
 } // namespace android
 

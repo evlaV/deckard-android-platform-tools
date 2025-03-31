@@ -34,6 +34,7 @@
 
 #pragma once
 
+#include <exception>
 #include <iostream>     // std::ostream
 #include <jni.h>        // jni typedefs, JniNativeMethod.
 #include <type_traits>  // std::common_type, std::remove_cv

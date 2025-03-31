@@ -18,6 +18,7 @@
 
 #include <inttypes.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <string>
 #include <vector>
@@ -283,4 +284,109 @@ TEST(process_map, ReadMapFileAsyncSafe_buffer_too_small_could_parse) {
 
   ASSERT_FALSE(parsed);
   EXPECT_EQ(0UL, num_calls);
+}
+
+class ProcessMapMappedFileSize : public ::testing::Test {
+  protected:
+    void SetUp() override {
+      ASSERT_NE(tf.fd, -1) << "open failed: " << strerror(errno);
+      ASSERT_EQ(ftruncate(tf.fd, kFileSize), 0) << "ftruncate failed: " << strerror(errno);
+    }
+
+    void TearDown() override {
+      ASSERT_EQ(munmap(reinterpret_cast<void*>(map.start), map.end-map.start), 0)
+                << "munmap failed: " << strerror(errno);
+    }
+
+    uint64_t PageAlign(uint64_t x) {
+      const uint64_t kPageSize = getpagesize();
+      return (x + kPageSize - 1) & ~(kPageSize - 1);
+    }
+
+    bool CreateFileMapping(uint64_t size, uint64_t offset) {
+      void *addr = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, tf.fd, offset);
+      if (addr == MAP_FAILED) {
+        return false;
+      }
+
+      map.start = reinterpret_cast<uint64_t>(addr);
+      map.end = PageAlign(map.start + size);
+      map.pgoff = offset;
+
+      return true;
+    }
+
+    TemporaryFile tf;
+    const size_t kFileSize = 65536;
+    android::procinfo::MapInfo map = android::procinfo::MapInfo(0 /* start */, 0 /* end */,
+                                                                PROT_READ, 0 /* pgoff */,
+                                                                0 /* inode */, tf.path, false);
+};
+
+TEST_F(ProcessMapMappedFileSize, map_size_greater_than_file_size) {
+  uint64_t size = 2 * kFileSize;
+  uint64_t offset = 0;
+
+  ASSERT_TRUE(CreateFileMapping(size, offset));
+  uint64_t mapped_file_size = android::procinfo::MappedFileSize(map);
+
+  ASSERT_EQ(mapped_file_size, kFileSize);
+}
+
+TEST_F(ProcessMapMappedFileSize, map_size_less_than_file_size) {
+  uint64_t size = kFileSize / 2;
+  uint64_t offset = 0;
+
+  ASSERT_TRUE(CreateFileMapping(size, offset));
+  uint64_t mapped_file_size = android::procinfo::MappedFileSize(map);
+
+  ASSERT_EQ(mapped_file_size, size);
+}
+
+TEST_F(ProcessMapMappedFileSize, map_size_equal_file_size) {
+  uint64_t size = kFileSize;
+  uint64_t offset = 0;
+
+  ASSERT_TRUE(CreateFileMapping(size, offset));
+  uint64_t mapped_file_size = android::procinfo::MappedFileSize(map);
+
+  ASSERT_EQ(mapped_file_size, kFileSize);
+
+}
+
+TEST_F(ProcessMapMappedFileSize, offset_greater_than_file_size) {
+  uint64_t size = kFileSize;
+  uint64_t offset = kFileSize * 2;
+
+  ASSERT_TRUE(CreateFileMapping(size, offset));
+  uint64_t mapped_file_size = android::procinfo::MappedFileSize(map);
+
+  ASSERT_EQ(mapped_file_size, 0UL);
+}
+
+TEST_F(ProcessMapMappedFileSize, invalid_map_name) {
+  uint64_t size = kFileSize;
+  uint64_t offset = 0;
+
+  ASSERT_TRUE(CreateFileMapping(size, offset));
+
+  // Name is empty
+  map.name = "";
+  uint64_t mapped_file_size = android::procinfo::MappedFileSize(map);
+  ASSERT_EQ(mapped_file_size, 0UL);
+
+  // Is device path
+  map.name = "/dev/";
+  mapped_file_size = android::procinfo::MappedFileSize(map);
+  ASSERT_EQ(mapped_file_size, 0UL);
+
+  // Does not start with '/'
+  map.name = "[anon:bss]";
+  mapped_file_size = android::procinfo::MappedFileSize(map);
+  ASSERT_EQ(mapped_file_size, 0UL);
+
+  // File non-existent
+  map.name = "/tmp/non_existent_file";
+  mapped_file_size = android::procinfo::MappedFileSize(map);
+  ASSERT_EQ(mapped_file_size, 0UL);
 }

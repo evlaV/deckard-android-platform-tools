@@ -16,7 +16,6 @@
 
 #include "fs_mgr.h"
 
-#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -41,6 +40,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -701,6 +701,29 @@ static void SetReadAheadSize(const std::string& entry_block_device, off64_t size
 }
 
 //
+// Mechanism to allow fsck to be triggered by setting ro.preventative_fsck
+// Introduced to address b/305658663
+// If the property value is not equal to the flag file contents, trigger
+// fsck and store the property value in the flag file
+// If we want to trigger again, simply change the property value
+//
+static bool check_if_preventative_fsck_needed(const FstabEntry& entry) {
+    const char* flag_file = "/metadata/vold/preventative_fsck";
+    if (entry.mount_point != "/data") return false;
+
+    // Don't error check - both default to empty string, which is OK
+    std::string prop = android::base::GetProperty("ro.preventative_fsck", "");
+    std::string flag;
+    android::base::ReadFileToString(flag_file, &flag);
+    if (prop == flag) return false;
+    // fsck is run immediately, so assume it runs or there is some deeper problem
+    if (!android::base::WriteStringToFile(prop, flag_file))
+        PERROR << "Failed to write file " << flag_file;
+    LINFO << "Run preventative fsck on /data";
+    return true;
+}
+
+//
 // Prepare the filesystem on the given block device to be mounted.
 //
 // If the "check" option was given in the fstab record, or it seems that the
@@ -750,7 +773,7 @@ static int prepare_fs_for_mount(const std::string& blk_device, const FstabEntry&
         }
     }
 
-    if (entry.fs_mgr_flags.check ||
+    if (check_if_preventative_fsck_needed(entry) || entry.fs_mgr_flags.check ||
         (fs_stat & (FS_STAT_UNCLEAN_SHUTDOWN | FS_STAT_QUOTA_ENABLED))) {
         check_fs(blk_device, entry.fs_type, mount_point, &fs_stat);
     }
@@ -796,9 +819,13 @@ bool fs_mgr_is_device_unlocked() {
 // __mount(): wrapper around the mount() system call which also
 // sets the underlying block device to read-only if the mount is read-only.
 // See "man 2 mount" for return values.
-static int __mount(const std::string& source, const std::string& target, const FstabEntry& entry) {
+static int __mount(const std::string& source, const std::string& target, const FstabEntry& entry,
+                   bool read_only = false) {
     errno = 0;
     unsigned long mountflags = entry.flags;
+    if (read_only) {
+        mountflags |= MS_RDONLY;
+    }
     int ret = 0;
     int save_errno = 0;
     int gc_allowance = 0;
@@ -828,7 +855,14 @@ static int __mount(const std::string& source, const std::string& target, const F
                   << ",type=" << entry.fs_type << ", gc_allowance=" << gc_allowance << "%)=" << ret
                   << "(" << save_errno << ")";
         }
-        ret = mount(source.c_str(), target.c_str(), entry.fs_type.c_str(), mountflags,
+
+        // Let's get the raw dm target, if it's a symlink, since some existing applications
+        // rely on /proc/mounts to find the userdata's dm target path. Don't break that assumption.
+        std::string real_source;
+        if (!android::base::Realpath(source, &real_source)) {
+            real_source = source;
+        }
+        ret = mount(real_source.c_str(), target.c_str(), entry.fs_type.c_str(), mountflags,
                     opts.c_str());
         save_errno = errno;
         if (try_f2fs_gc_allowance) gc_allowance += 10;
@@ -885,6 +919,10 @@ static bool fs_match(const std::string& in1, const std::string& in2) {
     return true;
 }
 
+static bool should_use_metadata_encryption(const FstabEntry& entry) {
+    return !entry.metadata_key_dir.empty() && entry.fs_mgr_flags.file_encryption;
+}
+
 // Tries to mount any of the consecutive fstab entries that match
 // the mountpoint of the one given by fstab[start_idx].
 //
@@ -892,8 +930,7 @@ static bool fs_match(const std::string& in1, const std::string& in2) {
 // attempted_idx: On return, will indicate which fstab entry
 //     succeeded. In case of failure, it will be the start_idx.
 // Sets errno to match the 1st mount failure on failure.
-static bool mount_with_alternatives(Fstab& fstab, int start_idx, int* end_idx,
-                                    int* attempted_idx) {
+static bool mount_with_alternatives(Fstab& fstab, int start_idx, int* end_idx, int* attempted_idx) {
     unsigned long i;
     int mount_errno = 0;
     bool mounted = false;
@@ -931,8 +968,15 @@ static bool mount_with_alternatives(Fstab& fstab, int start_idx, int* end_idx,
         }
 
         int retry_count = 2;
+        const auto read_only = should_use_metadata_encryption(fstab[i]);
+        if (read_only) {
+            LOG(INFO) << "Mount point " << fstab[i].blk_device << " @ " << fstab[i].mount_point
+                      << " uses metadata encryption, which means we need to unmount it later and "
+                         "call encryptFstab/encrypt_inplace. To avoid file operations before "
+                         "encryption, we will mount it as read-only first";
+        }
         while (retry_count-- > 0) {
-            if (!__mount(fstab[i].blk_device, fstab[i].mount_point, fstab[i])) {
+            if (!__mount(fstab[i].blk_device, fstab[i].mount_point, fstab[i], read_only)) {
                 *attempted_idx = i;
                 mounted = true;
                 if (i != start_idx) {
@@ -1022,10 +1066,6 @@ static bool TranslateExtLabels(FstabEntry* entry) {
     }
 
     return false;
-}
-
-static bool should_use_metadata_encryption(const FstabEntry& entry) {
-    return !entry.metadata_key_dir.empty() && entry.fs_mgr_flags.file_encryption;
 }
 
 // Check to see if a mountable volume has encryption requirements
@@ -1237,17 +1277,27 @@ class CheckpointManager {
 };
 
 std::string fs_mgr_find_bow_device(const std::string& block_device) {
-    if (block_device.substr(0, 5) != "/dev/") {
-        LOG(ERROR) << "Expected block device, got " << block_device;
-        return std::string();
+    // handle symlink such as "/dev/block/mapper/userdata"
+    std::string real_path;
+    if (!android::base::Realpath(block_device, &real_path)) {
+        real_path = block_device;
     }
 
-    std::string sys_dir = std::string("/sys/") + block_device.substr(5);
-
+    struct stat st;
+    if (stat(real_path.c_str(), &st) < 0) {
+        PLOG(ERROR) << "stat failed: " << real_path;
+        return std::string();
+    }
+    if (!S_ISBLK(st.st_mode)) {
+        PLOG(ERROR) << real_path << " is not block device";
+        return std::string();
+    }
+    std::string sys_dir = android::base::StringPrintf("/sys/dev/block/%u:%u", major(st.st_rdev),
+                                                      minor(st.st_rdev));
     for (;;) {
         std::string name;
         if (!android::base::ReadFileToString(sys_dir + "/dm/name", &name)) {
-            PLOG(ERROR) << block_device << " is not dm device";
+            PLOG(ERROR) << real_path << " is not dm device";
             return std::string();
         }
 
@@ -1381,6 +1431,8 @@ MountAllResult fs_mgr_mount_all(Fstab* fstab, int mount_mode) {
         return {FS_MGR_MNTALL_FAIL, userdata_mounted};
     }
 
+    bool scratch_can_be_mounted = true;
+
     // Keep i int to prevent unsigned integer overflow from (i = top_idx - 1),
     // where top_idx is 0. It will give SIGABRT
     for (int i = 0; i < static_cast<int>(fstab->size()); i++) {
@@ -1499,9 +1551,13 @@ MountAllResult fs_mgr_mount_all(Fstab* fstab, int mount_mode) {
                 }
                 encryptable = status;
                 if (status == FS_MGR_MNTALL_DEV_NEEDS_METADATA_ENCRYPTION) {
+                    fs_mgr_set_blk_ro(attempted_entry.blk_device, false);
                     if (!call_vdc({"cryptfs", "encryptFstab", attempted_entry.blk_device,
                                    attempted_entry.mount_point, wiped ? "true" : "false",
-                                   attempted_entry.fs_type, attempted_entry.zoned_device},
+                                   attempted_entry.fs_type,
+                                   attempted_entry.fs_mgr_flags.is_zoned ? "true" : "false",
+                                   std::to_string(attempted_entry.length),
+                                   android::base::Join(attempted_entry.user_devices, ' ')},
                                   nullptr)) {
                         LERROR << "Encryption failed";
                         set_type_property(encryptable);
@@ -1513,6 +1569,9 @@ MountAllResult fs_mgr_mount_all(Fstab* fstab, int mount_mode) {
             if (current_entry.mount_point == "/data") {
                 userdata_mounted = true;
             }
+
+            MountOverlayfs(attempted_entry, &scratch_can_be_mounted);
+
             // Success!  Go get the next one.
             continue;
         }
@@ -1541,7 +1600,10 @@ MountAllResult fs_mgr_mount_all(Fstab* fstab, int mount_mode) {
 
                 if (!call_vdc({"cryptfs", "encryptFstab", current_entry.blk_device,
                                current_entry.mount_point, "true" /* shouldFormat */,
-                               current_entry.fs_type, current_entry.zoned_device},
+                               current_entry.fs_type,
+                               current_entry.fs_mgr_flags.is_zoned ? "true" : "false",
+                               std::to_string(current_entry.length),
+                               android::base::Join(current_entry.user_devices, ' ')},
                               nullptr)) {
                     LERROR << "Encryption failed";
                 } else {
@@ -1566,7 +1628,9 @@ MountAllResult fs_mgr_mount_all(Fstab* fstab, int mount_mode) {
         if (mount_errno != EBUSY && mount_errno != EACCES &&
             should_use_metadata_encryption(attempted_entry)) {
             if (!call_vdc({"cryptfs", "mountFstab", attempted_entry.blk_device,
-                           attempted_entry.mount_point, attempted_entry.zoned_device},
+                           attempted_entry.mount_point,
+                           current_entry.fs_mgr_flags.is_zoned ? "true" : "false",
+                           android::base::Join(current_entry.user_devices, ' ')},
                           nullptr)) {
                 ++error_count;
             } else if (current_entry.mount_point == "/data") {
@@ -1594,12 +1658,21 @@ MountAllResult fs_mgr_mount_all(Fstab* fstab, int mount_mode) {
             continue;
         }
     }
+    if (userdata_mounted) {
+        Fstab mounted_fstab;
+        if (!ReadFstabFromFile("/proc/mounts", &mounted_fstab)) {
+            LOG(ERROR) << "Could't load fstab from /proc/mounts , unable to set ro.fstype.data . "
+                          "init.rc actions depending on this prop would not run, boot might fail.";
+        } else {
+            for (const auto& entry : mounted_fstab) {
+                if (entry.mount_point == "/data") {
+                    android::base::SetProperty("ro.fstype.data", entry.fs_type);
+                }
+            }
+        }
+    }
 
     set_type_property(encryptable);
-
-#if ALLOW_ADBD_DISABLE_VERITY == 1  // "userdebug" build
-    fs_mgr_overlayfs_mount_all(fstab);
-#endif
 
     if (error_count) {
         return {FS_MGR_MNTALL_FAIL, userdata_mounted};
@@ -1937,6 +2010,8 @@ int fs_mgr_do_mount(Fstab* fstab, const std::string& n_name, const std::string& 
                 if (retry_count <= 0) break;  // run check_fs only once
                 if (!first_mount_errno) first_mount_errno = errno;
                 mount_errors++;
+                PERROR << "Cannot mount filesystem on " << n_blk_device << " at " << mount_point
+                       << " with fstype " << fstab_entry.fs_type;
                 fs_stat |= FS_STAT_FULL_MOUNT_FAILED;
                 // try again after fsck
                 check_fs(n_blk_device, fstab_entry.fs_type, mount_point, &fs_stat);

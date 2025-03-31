@@ -365,7 +365,7 @@ public:
                         if (event.events & EPOLLIN) {
                             int rc = TEMP_FAILURE_RETRY(read(framework_fd_.get(), buf, sizeof(buf)));
                             if (rc == -1) {
-                                LOG(FATAL) << "adbd_auth: failed to read from framework fd";
+                                PLOG(FATAL) << "adbd_auth: failed to read from framework fd";
                             } else if (rc == 0) {
                                 LOG(INFO) << "adbd_auth: hit EOF on framework fd";
                                 std::lock_guard<std::mutex> lock(mutex_);

@@ -26,6 +26,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <string>
+
 #include <unwindstack/DwarfSection.h>
 #include <unwindstack/DwarfStructs.h>
 #include <unwindstack/Elf.h>
@@ -62,7 +64,7 @@ void DumpArm(Elf* elf, ElfInterfaceArm* interface) {
         printf("    Cannot find entry for address.\n");
         continue;
       }
-      ArmExidx arm(nullptr, interface->memory(), nullptr);
+      ArmExidx arm(nullptr, interface->memory().get(), nullptr);
       arm.set_log(ARM_LOG_FULL);
       arm.set_log_skip_execution(true);
       arm.set_log_indent(2);
@@ -103,7 +105,8 @@ void DumpDwarfSection(Elf* elf, DwarfSection* section, uint64_t) {
 }
 
 int GetElfInfo(const char* file, uint64_t offset) {
-  Elf elf(Memory::CreateFileMemory(file, offset).release());
+  auto elf_memory = Memory::CreateFileMemory(file, offset);
+  Elf elf(elf_memory);
   if (!elf.Init() || !elf.valid()) {
     printf("%s is not a valid elf file.\n", file);
     return 1;

@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#ifndef _LIBINPUT_INPUT_TRANSPORT_H
-#define _LIBINPUT_INPUT_TRANSPORT_H
+#pragma once
 
 #pragma GCC system_header
 
@@ -36,16 +35,15 @@
 #include <android-base/result.h>
 #include <android-base/unique_fd.h>
 
+#include <android/os/InputChannelCore.h>
 #include <binder/IBinder.h>
-#include <binder/Parcelable.h>
 #include <input/Input.h>
+#include <input/InputVerifier.h>
 #include <sys/stat.h>
 #include <ui/Transform.h>
 #include <utils/BitSet.h>
 #include <utils/Errors.h>
-#include <utils/RefBase.h>
 #include <utils/Timers.h>
-
 
 namespace android {
 class Parcel;
@@ -231,18 +229,15 @@ struct InputMessage {
  * input messages across processes.  Each channel has a descriptive name for debugging purposes.
  *
  * Each endpoint has its own InputChannel object that specifies its file descriptor.
+ * For parceling, this relies on android::os::InputChannelCore, defined in aidl.
  *
  * The input channel is closed when all references to it are released.
  */
-class InputChannel : public Parcelable {
+class InputChannel : private android::os::InputChannelCore {
 public:
-    static std::unique_ptr<InputChannel> create(const std::string& name,
-                                                android::base::unique_fd fd, sp<IBinder> token);
-    InputChannel() = default;
-    InputChannel(const InputChannel& other)
-          : mName(other.mName), mFd(::dup(other.mFd)), mToken(other.mToken){};
-    InputChannel(const std::string name, android::base::unique_fd fd, sp<IBinder> token);
-    ~InputChannel() override;
+    static std::unique_ptr<InputChannel> create(android::os::InputChannelCore&& parceledChannel);
+    ~InputChannel();
+
     /**
      * Create a pair of input channels.
      * The two returned input channels are equivalent, and are labeled as "server" and "client"
@@ -254,9 +249,8 @@ public:
                                          std::unique_ptr<InputChannel>& outServerChannel,
                                          std::unique_ptr<InputChannel>& outClientChannel);
 
-    inline std::string getName() const { return mName; }
-    inline const android::base::unique_fd& getFd() const { return mFd; }
-    inline sp<IBinder> getToken() const { return mToken; }
+    inline std::string getName() const { return name; }
+    inline int getFd() const { return fd.get(); }
 
     /* Send a message to the other endpoint.
      *
@@ -283,13 +277,37 @@ public:
      */
     status_t receiveMessage(InputMessage* msg);
 
+    /* Tells whether there is a message in the channel available to be received.
+     *
+     * This is only a performance hint and may return false negative results. Clients should not
+     * rely on availability of the message based on the return value.
+     */
+    bool probablyHasInput() const;
+
+    /* Wait until there is a message in the channel.
+     *
+     * The |timeout| specifies how long to block waiting for an input event to appear. Negative
+     * values are not allowed.
+     *
+     * In some cases returning before timeout expiration can happen without a message available.
+     * This could happen after the channel was closed on the other side. Another possible reason
+     * is incorrect setup of the channel.
+     */
+    void waitForMessage(std::chrono::milliseconds timeout) const;
+
     /* Return a new object that has a duplicate of this channel's fd. */
     std::unique_ptr<InputChannel> dup() const;
 
-    void copyTo(InputChannel& outChannel) const;
+    void copyTo(android::os::InputChannelCore& outChannel) const;
 
-    status_t readFromParcel(const android::Parcel* parcel) override;
-    status_t writeToParcel(android::Parcel* parcel) const override;
+    /**
+     * Similar to "copyTo", but it takes ownership of the provided InputChannel (and after this is
+     * called, it destroys it).
+     * @param from the InputChannel that should be converted to InputChannelCore
+     * @param outChannel the pre-allocated InputChannelCore to which to transfer the 'from' channel
+     */
+    static void moveChannel(std::unique_ptr<InputChannel> from,
+                            android::os::InputChannelCore& outChannel);
 
     /**
      * The connection token is used to identify the input connection, i.e.
@@ -305,26 +323,11 @@ public:
      */
     sp<IBinder> getConnectionToken() const;
 
-    bool operator==(const InputChannel& inputChannel) const {
-        struct stat lhs, rhs;
-        if (fstat(mFd.get(), &lhs) != 0) {
-            return false;
-        }
-        if (fstat(inputChannel.getFd(), &rhs) != 0) {
-            return false;
-        }
-        // If file descriptors are pointing to same inode they are duplicated fds.
-        return inputChannel.getName() == getName() && inputChannel.getConnectionToken() == mToken &&
-                lhs.st_ino == rhs.st_ino;
-    }
-
 private:
-    base::unique_fd dupFd() const;
+    static std::unique_ptr<InputChannel> create(const std::string& name,
+                                                android::base::unique_fd fd, sp<IBinder> token);
 
-    std::string mName;
-    android::base::unique_fd mFd;
-
-    sp<IBinder> mToken;
+    InputChannel(const std::string name, android::base::unique_fd fd, sp<IBinder> token);
 };
 
 /*
@@ -339,7 +342,7 @@ public:
     ~InputPublisher();
 
     /* Gets the underlying input channel. */
-    inline std::shared_ptr<InputChannel> getChannel() { return mChannel; }
+    inline InputChannel& getChannel() const { return *mChannel; }
 
     /* Publishes a key event to the input channel.
      *
@@ -445,6 +448,7 @@ public:
 
 private:
     std::shared_ptr<InputChannel> mChannel;
+    InputVerifier mInputVerifier;
 };
 
 /*
@@ -452,8 +456,11 @@ private:
  */
 class InputConsumer {
 public:
-    /* Creates a consumer associated with an input channel. */
+    /* Create a consumer associated with an input channel. */
     explicit InputConsumer(const std::shared_ptr<InputChannel>& channel);
+    /* Create a consumer associated with an input channel, override resampling system property */
+    explicit InputConsumer(const std::shared_ptr<InputChannel>& channel,
+                           bool enableTouchResampling);
 
     /* Destroys the consumer and releases its input channel. */
     ~InputConsumer();
@@ -513,6 +520,13 @@ public:
      * whether consume() should be called again later on with consumeBatches == true.
      */
     int32_t getPendingBatchSource() const;
+
+    /* Returns true when there is *likely* a pending batch or a pending event in the channel.
+     *
+     * This is only a performance hint and may return false negative results. Clients should not
+     * rely on availability of the message based on the return value.
+     */
+    bool probablyHasInput() const;
 
     std::string dump() const;
 
@@ -665,11 +679,8 @@ private:
     static void addSample(MotionEvent* event, const InputMessage* msg);
     static bool canAddSample(const Batch& batch, const InputMessage* msg);
     static ssize_t findSampleNoLaterThan(const Batch& batch, nsecs_t time);
-    static bool shouldResampleTool(int32_t toolType);
 
     static bool isTouchResamplingEnabled();
 };
 
 } // namespace android
-
-#endif // _LIBINPUT_INPUT_TRANSPORT_H

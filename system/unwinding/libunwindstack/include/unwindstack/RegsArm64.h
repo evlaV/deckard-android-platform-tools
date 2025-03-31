@@ -62,7 +62,7 @@ class RegsArm64 : public RegsImpl<uint64_t> {
 
   Regs* Clone() override final;
 
-  static Regs* Read(void* data);
+  static Regs* Read(const void* data);
 
   static Regs* CreateFromUcontext(void* ucontext);
 

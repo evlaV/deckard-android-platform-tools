@@ -20,6 +20,8 @@
 
 #include <android/binder_auto_utils.h>
 
+#include "../../Utils.h"
+
 using ::android::sp;
 using ::android::wp;
 
@@ -156,7 +158,9 @@ binder_status_t IFoo::addService(const char* instance) {
 }
 
 sp<IFoo> IFoo::getService(const char* instance, AIBinder** outBinder) {
+    LIBBINDER_IGNORE("-Wdeprecated-declarations")
     AIBinder* binder = AServiceManager_getService(instance);  // maybe nullptr
+    LIBBINDER_IGNORE_END()
     if (binder == nullptr) {
         return nullptr;
     }

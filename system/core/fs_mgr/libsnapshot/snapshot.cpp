@@ -20,16 +20,18 @@
 #include <sys/file.h>
 #include <sys/types.h>
 #include <sys/unistd.h>
+#include <sys/xattr.h>
 
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <thread>
-#include <unordered_set>
 
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
 #include <android-base/properties.h>
+#include <android-base/stringprintf.h>
 #include <android-base/strings.h>
 #include <android-base/unique_fd.h>
 #include <cutils/sockets.h>
@@ -45,7 +47,6 @@
 #include <android/snapshot/snapshot.pb.h>
 #include <libsnapshot/snapshot_stats.h>
 #include "device_info.h"
-#include "libsnapshot_cow/parser_v2.h"
 #include "partition_cow_creator.h"
 #include "snapshot_metadata_updater.h"
 #include "utility.h"
@@ -82,14 +83,30 @@ using RepeatedPtrField = google::protobuf::RepeatedPtrField<T>;
 using std::chrono::duration_cast;
 using namespace std::chrono_literals;
 using namespace std::string_literals;
+using android::base::Realpath;
+using android::base::StringPrintf;
 
 static constexpr char kBootSnapshotsWithoutSlotSwitch[] =
         "/metadata/ota/snapshot-boot-without-slot-switch";
 static constexpr char kBootIndicatorPath[] = "/metadata/ota/snapshot-boot";
 static constexpr char kRollbackIndicatorPath[] = "/metadata/ota/rollback-indicator";
+static constexpr char kSnapuserdFromSystem[] = "/metadata/ota/snapuserd-from-system";
 static constexpr auto kUpdateStateCheckInterval = 2s;
+static constexpr char kOtaFileContext[] = "u:object_r:ota_metadata_file:s0";
 
-MergeFailureCode CheckMergeConsistency(const std::string& name, const SnapshotStatus& status);
+/*
+ * The readahead size is set to 32kb so that
+ * there is no significant memory pressure (/proc/pressure/memory) during boot.
+ * After OTA, during boot, partitions are scanned before marking slot as successful.
+ * This scan will trigger readahead both on source and COW block device thereby
+ * leading to Inactive(file) pages to be very high.
+ *
+ * A lower value may help reduce memory pressure further, however, that will
+ * increase the boot time. Thus, for device which don't care about OTA boot
+ * time, they could use O_DIRECT functionality wherein the I/O to the source
+ * block device will be O_DIRECT.
+ */
+static constexpr auto kReadAheadSizeKb = 32;
 
 // Note: IImageManager is an incomplete type in the header, so the default
 // destructor doesn't work.
@@ -120,9 +137,7 @@ std::unique_ptr<SnapshotManager> SnapshotManager::NewForFirstStageMount(IDeviceI
 }
 
 SnapshotManager::SnapshotManager(IDeviceInfo* device)
-    : dm_(device->GetDeviceMapper()), device_(device), metadata_dir_(device_->GetMetadataDir()) {
-    merge_consistency_checker_ = android::snapshot::CheckMergeConsistency;
-}
+    : dm_(device->GetDeviceMapper()), device_(device), metadata_dir_(device_->GetMetadataDir()) {}
 
 static std::string GetCowName(const std::string& snapshot_name) {
     return snapshot_name + "-cow";
@@ -252,7 +267,6 @@ std::string SnapshotManager::ReadUpdateSourceSlotSuffix() {
     auto boot_file = GetSnapshotBootIndicatorPath();
     std::string contents;
     if (!android::base::ReadFileToString(boot_file, &contents)) {
-        PLOG(WARNING) << "Cannot read " << boot_file;
         return {};
     }
     return contents;
@@ -309,7 +323,7 @@ bool SnapshotManager::RemoveAllUpdateState(LockedFile* lock, const std::function
     std::vector<std::string> files = {
             GetSnapshotBootIndicatorPath(),          GetRollbackIndicatorPath(),
             GetForwardMergeIndicatorPath(),          GetOldPartitionMetadataPath(),
-            GetBootSnapshotsWithoutSlotSwitchPath(),
+            GetBootSnapshotsWithoutSlotSwitchPath(), GetSnapuserdFromSystemPath(),
     };
     for (const auto& file : files) {
         RemoveFileIfExists(file);
@@ -407,6 +421,8 @@ bool SnapshotManager::CreateSnapshot(LockedFile* lock, PartitionCowCreator* cow_
     status->set_metadata_sectors(0);
     status->set_using_snapuserd(cow_creator->using_snapuserd);
     status->set_compression_algorithm(cow_creator->compression_algorithm);
+    status->set_compression_factor(cow_creator->compression_factor);
+    status->set_read_ahead_size(cow_creator->read_ahead_size);
     if (cow_creator->enable_threading) {
         status->set_enable_threading(cow_creator->enable_threading);
     }
@@ -494,8 +510,6 @@ bool SnapshotManager::MapDmUserCow(LockedFile* lock, const std::string& name,
         // When snapshots are on current slot, we determine the size
         // of block device based on the number of COW operations. We cannot
         // use base device as it will be from older image.
-        size_t num_ops = 0;
-        uint64_t dev_sz = 0;
         unique_fd fd(open(cow_file.c_str(), O_RDONLY | O_CLOEXEC));
         if (fd < 0) {
             PLOG(ERROR) << "Failed to open " << cow_file;
@@ -508,13 +522,18 @@ bool SnapshotManager::MapDmUserCow(LockedFile* lock, const std::string& name,
             return false;
         }
 
+        uint64_t dev_sz = 0;
         const auto& header = reader.GetHeader();
-        if (header.prefix.major_version > 2) {
-            LOG(ERROR) << "COW format not supported";
-            return false;
+        if (header.prefix.major_version == 2) {
+            const size_t num_ops = reader.get_num_total_data_ops();
+            dev_sz = (num_ops * header.block_size);
+        } else {
+            // create_snapshot will skip in-place copy ops. Hence, fetch this
+            // information directly from v3 header.
+            const auto& v3_header = reader.header_v3();
+            dev_sz = v3_header.op_count_max * v3_header.block_size;
         }
-        num_ops = reader.get_num_total_data_ops();
-        dev_sz = (num_ops * header.block_size);
+
         base_sectors = dev_sz >> 9;
     } else {
         // For userspace snapshots, the size of the base device is taken as the
@@ -1128,8 +1147,8 @@ auto SnapshotManager::CheckMergeState(const std::function<bool()>& before_cancel
     return result;
 }
 
-auto SnapshotManager::CheckMergeState(LockedFile* lock, const std::function<bool()>& before_cancel)
-        -> MergeResult {
+auto SnapshotManager::CheckMergeState(LockedFile* lock,
+                                      const std::function<bool()>& before_cancel) -> MergeResult {
     SnapshotUpdateStatus update_status = ReadSnapshotUpdateStatus(lock);
     switch (update_status.state()) {
         case UpdateState::None:
@@ -1365,13 +1384,6 @@ auto SnapshotManager::CheckTargetMergeState(LockedFile* lock, const std::string&
         }
     }
 
-    // Merge is complete at this point
-
-    auto code = CheckMergeConsistency(lock, name, snapshot_status);
-    if (code != MergeFailureCode::Ok) {
-        return MergeResult(UpdateState::MergeFailed, code);
-    }
-
     // Merging is done. First, update the status file to indicate the merge
     // is complete. We do this before calling OnSnapshotMergeComplete, even
     // though this means the write is potentially wasted work (since in the
@@ -1399,80 +1411,6 @@ static std::string GetMappedCowDeviceName(const std::string& snapshot,
         return GetCowImageDeviceName(snapshot);
     }
     return GetCowName(snapshot);
-}
-
-MergeFailureCode SnapshotManager::CheckMergeConsistency(LockedFile* lock, const std::string& name,
-                                                        const SnapshotStatus& status) {
-    CHECK(lock);
-
-    return merge_consistency_checker_(name, status);
-}
-
-MergeFailureCode CheckMergeConsistency(const std::string& name, const SnapshotStatus& status) {
-    if (!status.using_snapuserd()) {
-        // Do not try to verify old-style COWs yet.
-        return MergeFailureCode::Ok;
-    }
-
-    auto& dm = DeviceMapper::Instance();
-
-    std::string cow_image_name = GetMappedCowDeviceName(name, status);
-    std::string cow_image_path;
-    if (!dm.GetDmDevicePathByName(cow_image_name, &cow_image_path)) {
-        LOG(ERROR) << "Failed to get path for cow device: " << cow_image_name;
-        return MergeFailureCode::GetCowPathConsistencyCheck;
-    }
-
-    // First pass, count # of ops.
-    size_t num_ops = 0;
-    {
-        unique_fd fd(open(cow_image_path.c_str(), O_RDONLY | O_CLOEXEC));
-        if (fd < 0) {
-            PLOG(ERROR) << "Failed to open " << cow_image_name;
-            return MergeFailureCode::OpenCowConsistencyCheck;
-        }
-
-        CowReader reader;
-        if (!reader.Parse(std::move(fd))) {
-            LOG(ERROR) << "Failed to parse cow " << cow_image_path;
-            return MergeFailureCode::ParseCowConsistencyCheck;
-        }
-
-        num_ops = reader.get_num_total_data_ops();
-    }
-
-    // Second pass, try as hard as we can to get the actual number of blocks
-    // the system thinks is merged.
-    unique_fd fd(open(cow_image_path.c_str(), O_RDONLY | O_DIRECT | O_SYNC | O_CLOEXEC));
-    if (fd < 0) {
-        PLOG(ERROR) << "Failed to open direct " << cow_image_name;
-        return MergeFailureCode::OpenCowDirectConsistencyCheck;
-    }
-
-    void* addr;
-    size_t page_size = getpagesize();
-    if (posix_memalign(&addr, page_size, page_size) < 0) {
-        PLOG(ERROR) << "posix_memalign with page size " << page_size;
-        return MergeFailureCode::MemAlignConsistencyCheck;
-    }
-
-    // COWs are always at least 2MB, this is guaranteed in snapshot creation.
-    std::unique_ptr<void, decltype(&::free)> buffer(addr, ::free);
-    if (!android::base::ReadFully(fd, buffer.get(), page_size)) {
-        PLOG(ERROR) << "Direct read failed " << cow_image_name;
-        return MergeFailureCode::DirectReadConsistencyCheck;
-    }
-
-    auto header = reinterpret_cast<CowHeader*>(buffer.get());
-    if (header->num_merge_ops != num_ops) {
-        LOG(ERROR) << "COW consistency check failed, expected " << num_ops << " to be merged, "
-                   << "but " << header->num_merge_ops << " were actually recorded.";
-        LOG(ERROR) << "Aborting merge progress for snapshot " << name
-                   << ", will try again next boot";
-        return MergeFailureCode::WrongMergeCountConsistencyCheck;
-    }
-
-    return MergeFailureCode::Ok;
 }
 
 MergeFailureCode SnapshotManager::MergeSecondPhaseSnapshots(LockedFile* lock) {
@@ -1522,6 +1460,10 @@ std::string SnapshotManager::GetSnapshotBootIndicatorPath() {
 
 std::string SnapshotManager::GetRollbackIndicatorPath() {
     return metadata_dir_ + "/" + android::base::Basename(kRollbackIndicatorPath);
+}
+
+std::string SnapshotManager::GetSnapuserdFromSystemPath() {
+    return metadata_dir_ + "/" + android::base::Basename(kSnapuserdFromSystem);
 }
 
 std::string SnapshotManager::GetForwardMergeIndicatorPath() {
@@ -1764,6 +1706,13 @@ bool SnapshotManager::PerformInitTransition(InitTransition transition,
         if (UpdateUsesIouring(lock.get())) {
             snapuserd_argv->emplace_back("-io_uring");
         }
+        if (UpdateUsesODirect(lock.get())) {
+            snapuserd_argv->emplace_back("-o_direct");
+        }
+        uint cow_op_merge_size = GetUpdateCowOpMergeSize(lock.get());
+        if (cow_op_merge_size != 0) {
+            snapuserd_argv->emplace_back("-cow_op_merge_size=" + std::to_string(cow_op_merge_size));
+        }
     }
 
     size_t num_cows = 0;
@@ -1832,6 +1781,8 @@ bool SnapshotManager::PerformInitTransition(InitTransition transition,
                                base_path_merge;
                 snapuserd_argv->emplace_back(std::move(message));
             }
+            SetReadAheadSize(cow_image_device, snapshot_status.read_ahead_size());
+            SetReadAheadSize(source_device, snapshot_status.read_ahead_size());
 
             // Do not attempt to connect to the new snapuserd yet, it hasn't
             // been started. We do however want to wait for the misc device
@@ -2179,6 +2130,112 @@ bool SnapshotManager::UpdateUsesIouring(LockedFile* lock) {
     return update_status.io_uring_enabled();
 }
 
+bool SnapshotManager::UpdateUsesODirect(LockedFile* lock) {
+    SnapshotUpdateStatus update_status = ReadSnapshotUpdateStatus(lock);
+    return update_status.o_direct();
+}
+
+uint32_t SnapshotManager::GetUpdateCowOpMergeSize(LockedFile* lock) {
+    SnapshotUpdateStatus update_status = ReadSnapshotUpdateStatus(lock);
+    return update_status.cow_op_merge_size();
+}
+
+bool SnapshotManager::MarkSnapuserdFromSystem() {
+    auto path = GetSnapuserdFromSystemPath();
+
+    if (!android::base::WriteStringToFile("1", path)) {
+        PLOG(ERROR) << "Unable to write to vendor update path: " << path;
+        return false;
+    }
+
+    unique_fd fd(open(path.c_str(), O_PATH));
+    if (fd < 0) {
+        PLOG(ERROR) << "Failed to open file: " << path;
+        return false;
+    }
+
+    /*
+     * This function is invoked by first stage init and hence we need to
+     * explicitly set the correct selinux label for this file as update_engine
+     * will try to remove this file later on once the snapshot merge is
+     * complete.
+     */
+    if (fsetxattr(fd.get(), XATTR_NAME_SELINUX, kOtaFileContext, strlen(kOtaFileContext) + 1, 0) <
+        0) {
+        PLOG(ERROR) << "fsetxattr for the path: " << path << " failed";
+    }
+
+    return true;
+}
+
+/*
+ * Please see b/304829384 for more details.
+ *
+ * In Android S, we use dm-snapshot for mounting snapshots and snapshot-merge
+ * process. If the vendor partition continues to be on Android S, then
+ * "snapuserd" binary in first stage ramdisk will be from vendor partition.
+ * Thus, we need to maintain backward compatibility.
+ *
+ * Now, We take a two step approach to maintain the backward compatibility:
+ *
+ * 1: During OTA installation, we will continue to use "user-space" snapshots
+ * for OTA installation as both update-engine and snapuserd binary will be from system partition.
+ * However, during installation, we mark "legacy_snapuserd" in
+ * SnapshotUpdateStatus file to mark that this is a path to support backward compatibility.
+ * Thus, this function will return "false" during OTA installation.
+ *
+ * 2: Post OTA reboot, there are two key steps:
+ *    a: During first stage init, "init" and "snapuserd" could be from vendor
+ *    partition. This could be from Android S. Thus, the snapshot mount path
+ *    will be based off dm-snapshot.
+ *
+ *    b: Post selinux transition, "init" and "update-engine" will be "system"
+ *    partition. Now, since the snapshots are mounted off dm-snapshot,
+ *    update-engine interaction with "snapuserd" should work based off
+ *    dm-snapshots.
+ *
+ *    TL;DR: update-engine will use the "system" snapuserd for installing new
+ *    updates (this is safe as there is no "vendor" snapuserd running during
+ *    installation). Post reboot, update-engine will use the legacy path when
+ *    communicating with "vendor" snapuserd that was started in first-stage
+ *    init. Hence, this function checks:
+ *         i: Are we in post OTA reboot
+ *         ii: Is the Vendor from Android 12
+ *         iii: If both (i) and (ii) are true, then use the dm-snapshot based
+ *         approach.
+ *
+ * 3: Post OTA reboot, if the vendor partition was updated from Android 12 to
+ * any other release post Android 12, then snapuserd binary will be "system"
+ * partition as post Android 12, init_boot will contain a copy of snapuserd
+ * binary. Thus, during first stage init, if init is able to communicate to
+ * daemon, that gives us a signal that the binary is from "system" copy. Hence,
+ * there is no need to fallback to legacy dm-snapshot. Thus, init will use a
+ * marker in /metadata to signal that the snapuserd binary from first stage init
+ * can handle userspace snapshots.
+ *
+ */
+bool SnapshotManager::IsLegacySnapuserdPostReboot() {
+    auto slot = GetCurrentSlot();
+    if (slot == Slot::Target) {
+        /*
+            If this marker is present, the daemon can handle userspace snapshots.
+            During post-OTA reboot, this implies that the vendor partition is
+            Android 13 or higher. If the snapshots were created on an
+            Android 12 vendor, this means the vendor partition has been updated.
+        */
+        if (access(GetSnapuserdFromSystemPath().c_str(), F_OK) == 0) {
+            is_snapshot_userspace_ = true;
+            return false;
+        }
+        // If the marker isn't present and if the vendor is still in Android 12
+        if (is_legacy_snapuserd_.has_value() && is_legacy_snapuserd_.value() == true) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool SnapshotManager::UpdateUsesUserSnapshots() {
     // This and the following function is constantly
     // invoked during snapshot merge. We want to avoid
@@ -2190,7 +2247,12 @@ bool SnapshotManager::UpdateUsesUserSnapshots() {
     // during merge phase. Hence, once we know that
     // the value is read from disk the very first time,
     // it is safe to read successive checks from memory.
+
     if (is_snapshot_userspace_.has_value()) {
+        // Check if legacy snapuserd is running post OTA reboot
+        if (IsLegacySnapuserdPostReboot()) {
+            return false;
+        }
         return is_snapshot_userspace_.value();
     }
 
@@ -2201,13 +2263,16 @@ bool SnapshotManager::UpdateUsesUserSnapshots() {
 }
 
 bool SnapshotManager::UpdateUsesUserSnapshots(LockedFile* lock) {
-    // See UpdateUsesUserSnapshots()
-    if (is_snapshot_userspace_.has_value()) {
-        return is_snapshot_userspace_.value();
+    if (!is_snapshot_userspace_.has_value()) {
+        SnapshotUpdateStatus update_status = ReadSnapshotUpdateStatus(lock);
+        is_snapshot_userspace_ = update_status.userspace_snapshots();
+        is_legacy_snapuserd_ = update_status.legacy_snapuserd();
     }
 
-    SnapshotUpdateStatus update_status = ReadSnapshotUpdateStatus(lock);
-    is_snapshot_userspace_ = update_status.userspace_snapshots();
+    if (IsLegacySnapuserdPostReboot()) {
+        return false;
+    }
+
     return is_snapshot_userspace_.value();
 }
 
@@ -2837,10 +2902,12 @@ bool SnapshotManager::UnmapAllSnapshots() {
 }
 
 bool SnapshotManager::UnmapAllSnapshots(LockedFile* lock) {
+    LOG(INFO) << "Lock acquired for " << __FUNCTION__;
     std::vector<std::string> snapshots;
     if (!ListSnapshots(lock, &snapshots)) {
         return false;
     }
+    LOG(INFO) << "Found " << snapshots.size() << " partitions with snapshots";
 
     for (const auto& snapshot : snapshots) {
         if (!UnmapPartitionWithSnapshot(lock, snapshot)) {
@@ -2848,6 +2915,7 @@ bool SnapshotManager::UnmapAllSnapshots(LockedFile* lock) {
             return false;
         }
     }
+    LOG(INFO) << "Unmapped " << snapshots.size() << " partitions with snapshots";
 
     // Terminate the daemon and release the snapuserd_client_ object.
     // If we need to re-connect with the daemon, EnsureSnapuserdConnected()
@@ -2861,8 +2929,9 @@ bool SnapshotManager::UnmapAllSnapshots(LockedFile* lock) {
     return true;
 }
 
-auto SnapshotManager::OpenFile(const std::string& file, int lock_flags)
-        -> std::unique_ptr<LockedFile> {
+auto SnapshotManager::OpenFile(const std::string& file,
+                               int lock_flags) -> std::unique_ptr<LockedFile> {
+    const auto start = std::chrono::system_clock::now();
     unique_fd fd(open(file.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
     if (fd < 0) {
         PLOG(ERROR) << "Open failed: " << file;
@@ -2875,6 +2944,11 @@ auto SnapshotManager::OpenFile(const std::string& file, int lock_flags)
     // For simplicity, we want to CHECK that lock_mode == LOCK_EX, in some
     // calls, so strip extra flags.
     int lock_mode = lock_flags & (LOCK_EX | LOCK_SH);
+    const auto end = std::chrono::system_clock::now();
+    const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    if (duration_ms >= 1000ms) {
+        LOG(INFO) << "Taking lock on " << file << " took " << duration_ms.count() << "ms";
+    }
     return std::make_unique<LockedFile>(file, std::move(fd), lock_mode);
 }
 
@@ -3025,6 +3099,9 @@ bool SnapshotManager::WriteUpdateState(LockedFile* lock, UpdateState state,
         status.set_merge_phase(old_status.merge_phase());
         status.set_userspace_snapshots(old_status.userspace_snapshots());
         status.set_io_uring_enabled(old_status.io_uring_enabled());
+        status.set_legacy_snapuserd(old_status.legacy_snapuserd());
+        status.set_o_direct(old_status.o_direct());
+        status.set_cow_op_merge_size(old_status.cow_op_merge_size());
     }
     return WriteSnapshotUpdateStatus(lock, status);
 }
@@ -3271,6 +3348,8 @@ Return SnapshotManager::CreateUpdateSnapshots(const DeltaArchiveManifest& manife
     // Deduce supported features.
     bool userspace_snapshots = CanUseUserspaceSnapshots();
     bool legacy_compression = GetLegacyCompressionEnabledProperty();
+    bool is_legacy_snapuserd = IsVendorFromAndroid12();
+
     if (!vabc_disable_reason.empty()) {
         if (userspace_snapshots) {
             LOG(INFO) << "Userspace snapshots disabled: " << vabc_disable_reason;
@@ -3280,6 +3359,7 @@ Return SnapshotManager::CreateUpdateSnapshots(const DeltaArchiveManifest& manife
         }
         userspace_snapshots = false;
         legacy_compression = false;
+        is_legacy_snapuserd = false;
     }
 
     if (legacy_compression || userspace_snapshots) {
@@ -3292,20 +3372,30 @@ Return SnapshotManager::CreateUpdateSnapshots(const DeltaArchiveManifest& manife
         }
     }
 
+    if (!userspace_snapshots && is_legacy_snapuserd && legacy_compression) {
+        userspace_snapshots = true;
+        LOG(INFO) << "Vendor from Android 12. Enabling userspace snapshot for OTA install";
+    }
+
     const bool using_snapuserd = userspace_snapshots || legacy_compression;
     if (!using_snapuserd) {
         LOG(INFO) << "Using legacy Virtual A/B (dm-snapshot)";
     }
 
     std::string compression_algorithm;
+    uint64_t compression_factor{};
     if (using_snapuserd) {
         compression_algorithm = dap_metadata.vabc_compression_param();
+        compression_factor = dap_metadata.compression_factor();
         if (compression_algorithm.empty()) {
             // Older OTAs don't set an explicit compression type, so default to gz.
             compression_algorithm = "gz";
         }
+        LOG(INFO) << "using compression algorithm: " << compression_algorithm
+                  << ", max compressible block size: " << compression_factor;
     }
-
+    auto read_ahead_size =
+            android::base::GetUintProperty<uint>("ro.virtual_ab.read_ahead_size", kReadAheadSizeKb);
     PartitionCowCreator cow_creator{
             .target_metadata = target_metadata.get(),
             .target_suffix = target_suffix,
@@ -3316,7 +3406,10 @@ Return SnapshotManager::CreateUpdateSnapshots(const DeltaArchiveManifest& manife
             .extra_extents = {},
             .using_snapuserd = using_snapuserd,
             .compression_algorithm = compression_algorithm,
+            .compression_factor = compression_factor,
+            .read_ahead_size = read_ahead_size,
     };
+
     if (dap_metadata.vabc_feature_set().has_threaded()) {
         cow_creator.enable_threading = dap_metadata.vabc_feature_set().threaded();
     }
@@ -3383,6 +3476,16 @@ Return SnapshotManager::CreateUpdateSnapshots(const DeltaArchiveManifest& manife
             status.set_io_uring_enabled(true);
             LOG(INFO) << "io_uring for snapshots enabled";
         }
+        if (GetODirectEnabledProperty()) {
+            status.set_o_direct(true);
+            LOG(INFO) << "o_direct for source image enabled";
+        }
+        if (is_legacy_snapuserd) {
+            status.set_legacy_snapuserd(true);
+            LOG(INFO) << "Setting legacy_snapuserd to true";
+        }
+        status.set_cow_op_merge_size(
+                android::base::GetUintProperty<uint32_t>("ro.virtual_ab.cow_op_merge_size", 0));
     } else if (legacy_compression) {
         LOG(INFO) << "Virtual A/B using legacy snapuserd";
     } else {
@@ -3390,12 +3493,13 @@ Return SnapshotManager::CreateUpdateSnapshots(const DeltaArchiveManifest& manife
     }
 
     is_snapshot_userspace_.emplace(userspace_snapshots);
+    is_legacy_snapuserd_.emplace(is_legacy_snapuserd);
 
     if (!device()->IsTestDevice() && using_snapuserd) {
         // Terminate stale daemon if any
         std::unique_ptr<SnapuserdClient> snapuserd_client = std::move(snapuserd_client_);
         if (!snapuserd_client) {
-            snapuserd_client = SnapuserdClient::Connect(kSnapuserdSocket, 5s);
+            snapuserd_client = SnapuserdClient::TryConnect(kSnapuserdSocket, 5s);
         }
         if (snapuserd_client) {
             snapuserd_client->DetachSnapuserd();
@@ -3598,6 +3702,11 @@ Return SnapshotManager::InitializeUpdateSnapshots(
             return Return::Error();
         }
 
+        if (!android::fs_mgr::WaitForFile(cow_path, 6s)) {
+            LOG(ERROR) << "Timed out waiting for device to appear: " << cow_path;
+            return Return::Error();
+        }
+
         if (it->second.using_snapuserd()) {
             unique_fd fd(open(cow_path.c_str(), O_RDWR | O_CLOEXEC));
             if (fd < 0) {
@@ -3611,6 +3720,10 @@ Return SnapshotManager::InitializeUpdateSnapshots(
                 options.scratch_space = false;
             }
             options.compression = it->second.compression_algorithm();
+            if (cow_version >= 3) {
+                options.op_count_max = it->second.estimated_ops_buffer_size();
+                options.max_blocks = {it->second.device_size() / options.block_size};
+            }
 
             auto writer = CreateCowWriter(cow_version, options, std::move(fd));
             if (!writer->Finalize()) {
@@ -3721,7 +3834,9 @@ std::unique_ptr<ICowWriter> SnapshotManager::OpenCompressedSnapshotWriter(
     cow_options.compression = status.compression_algorithm();
     cow_options.max_blocks = {status.device_size() / cow_options.block_size};
     cow_options.batch_write = status.batched_writes();
-    cow_options.num_compress_threads = status.enable_threading() ? 2 : 0;
+    cow_options.num_compress_threads = status.enable_threading() ? 2 : 1;
+    cow_options.op_count_max = status.estimated_ops_buffer_size();
+    cow_options.compression_factor = status.compression_factor();
     // Disable scratch space for vts tests
     if (device()->IsTestDevice()) {
         cow_options.scratch_space = false;
@@ -3743,7 +3858,7 @@ std::unique_ptr<ICowWriter> SnapshotManager::OpenCompressedSnapshotWriter(
         return nullptr;
     }
 
-    CowHeader header;
+    CowHeaderV3 header;
     if (!ReadCowHeader(cow_fd, &header)) {
         LOG(ERROR) << "OpenCompressedSnapshotWriter: read header failed";
         return nullptr;
@@ -3805,6 +3920,8 @@ bool SnapshotManager::Dump(std::ostream& os) {
     ss << "Using snapuserd: " << update_status.using_snapuserd() << std::endl;
     ss << "Using userspace snapshots: " << update_status.userspace_snapshots() << std::endl;
     ss << "Using io_uring: " << update_status.io_uring_enabled() << std::endl;
+    ss << "Using o_direct: " << update_status.o_direct() << std::endl;
+    ss << "Cow op merge size (0 for uncapped): " << update_status.cow_op_merge_size() << std::endl;
     ss << "Using XOR compression: " << GetXorCompressionEnabledProperty() << std::endl;
     ss << "Current slot: " << device_->GetSlotSuffix() << std::endl;
     ss << "Boot indicator: booting from " << GetCurrentSlot() << " slot" << std::endl;
@@ -3849,6 +3966,7 @@ bool SnapshotManager::Dump(std::ostream& os) {
         ss << "    allocated sectors: " << status.sectors_allocated() << std::endl;
         ss << "    metadata sectors: " << status.metadata_sectors() << std::endl;
         ss << "    compression: " << status.compression_algorithm() << std::endl;
+        ss << "    compression factor: " << status.compression_factor() << std::endl;
         ss << "    merge phase: " << DecideMergePhase(status) << std::endl;
     }
     os << ss.rdbuf();
@@ -4419,32 +4537,30 @@ std::string SnapshotManager::ReadSourceBuildFingerprint() {
 }
 
 bool SnapshotManager::IsUserspaceSnapshotUpdateInProgress() {
-    auto slot = GetCurrentSlot();
-    if (slot == Slot::Target) {
-        // Merge in-progress
-        if (IsSnapuserdRequired()) {
+    // We cannot grab /metadata/ota lock here as this
+    // is in reboot path. See b/308900853
+    //
+    // Check if any of the partitions are mounted
+    // off dm-user block device. If so, then we are certain
+    // that OTA update in progress.
+    auto current_suffix = device_->GetSlotSuffix();
+    auto& dm = DeviceMapper::Instance();
+    auto dm_block_devices = dm.FindDmPartitions();
+    if (dm_block_devices.empty()) {
+        LOG(ERROR) << "No dm-enabled block device is found.";
+        return false;
+    }
+    for (auto& partition : dm_block_devices) {
+        std::string partition_name = partition.first + current_suffix;
+        DeviceMapper::TargetInfo snap_target;
+        if (!GetSingleTarget(partition_name, TableQuery::Status, &snap_target)) {
+            return false;
+        }
+        auto type = DeviceMapper::GetTargetType(snap_target.spec);
+        if (type == "user") {
             return true;
         }
     }
-
-    // Let's check more deeper to see if snapshots are mounted
-    auto lock = LockExclusive();
-    if (!lock) {
-        return false;
-    }
-
-    std::vector<std::string> snapshots;
-    if (!ListSnapshots(lock.get(), &snapshots)) {
-        return false;
-    }
-
-    for (const auto& snapshot : snapshots) {
-        // Active snapshot and daemon is alive
-        if (IsSnapshotDevice(snapshot) && EnsureSnapuserdConnected(2s)) {
-            return true;
-        }
-    }
-
     return false;
 }
 
@@ -4484,6 +4600,32 @@ bool SnapshotManager::PrepareDeviceToBootWithoutSnapshot() {
         return false;
     }
     return true;
+}
+
+void SnapshotManager::SetReadAheadSize(const std::string& entry_block_device, off64_t size_kb) {
+    std::string block_device;
+    if (!Realpath(entry_block_device, &block_device)) {
+        PLOG(ERROR) << "Failed to realpath " << entry_block_device;
+        return;
+    }
+
+    static constexpr std::string_view kDevBlockPrefix("/dev/block/");
+    if (!android::base::StartsWith(block_device, kDevBlockPrefix)) {
+        LOG(ERROR) << block_device << " is not a block device";
+        return;
+    }
+
+    std::string block_name = block_device.substr(kDevBlockPrefix.length());
+    std::string sys_partition =
+            android::base::StringPrintf("/sys/class/block/%s/partition", block_name.c_str());
+    struct stat info;
+    if (lstat(sys_partition.c_str(), &info) == 0) {
+        block_name += "/..";
+    }
+    std::string sys_ra = android::base::StringPrintf("/sys/class/block/%s/queue/read_ahead_kb",
+                                                     block_name.c_str());
+    std::string size = std::to_string(size_kb);
+    android::base::WriteStringToFile(size, sys_ra.c_str());
 }
 
 }  // namespace snapshot

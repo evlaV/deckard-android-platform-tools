@@ -18,7 +18,9 @@
 
 #include <stdint.h>
 
+#include <memory>
 #include <unordered_map>
+#include <vector>
 
 #include <unwindstack/DwarfSection.h>
 
@@ -26,6 +28,7 @@ namespace unwindstack {
 
 // Forward declarations.
 class Memory;
+struct SectionInfo;
 
 template <typename AddressType>
 class DwarfEhFrameWithHdr : public DwarfSectionImpl<AddressType> {
@@ -40,7 +43,7 @@ class DwarfEhFrameWithHdr : public DwarfSectionImpl<AddressType> {
     uint64_t offset;
   };
 
-  DwarfEhFrameWithHdr(Memory* memory) : DwarfSectionImpl<AddressType>(memory) {}
+  DwarfEhFrameWithHdr(std::shared_ptr<Memory>& memory) : DwarfSectionImpl<AddressType>(memory) {}
   virtual ~DwarfEhFrameWithHdr() = default;
 
   uint64_t GetCieOffsetFromFde32(uint32_t pointer) override {
@@ -56,8 +59,8 @@ class DwarfEhFrameWithHdr : public DwarfSectionImpl<AddressType> {
     return pc + memory_.cur_offset() - 4;
   }
 
-  bool EhFrameInit(uint64_t offset, uint64_t size, int64_t section_bias);
-  bool Init(uint64_t offset, uint64_t size, int64_t section_bias) override;
+  bool EhFrameInit(const SectionInfo& info);
+  bool Init(const SectionInfo& info) override;
 
   const DwarfFde* GetFdeFromPc(uint64_t pc) override;
 

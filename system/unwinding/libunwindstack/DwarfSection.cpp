@@ -41,7 +41,7 @@
 
 namespace unwindstack {
 
-DwarfSection::DwarfSection(Memory* memory) : memory_(memory) {}
+DwarfSection::DwarfSection(std::shared_ptr<Memory>& memory) : memory_(memory) {}
 
 bool DwarfSection::Step(uint64_t pc, Regs* regs, Memory* process_memory, bool* finished,
                         bool* is_signal_frame) {
@@ -450,7 +450,7 @@ bool DwarfSectionImpl<AddressType>::EvalRegister(const DwarfLocation* loc, uint3
       *reg_ptr = eval_info->cfa + loc->values[0];
       break;
     case DWARF_LOCATION_REGISTER: {
-      uint32_t cur_reg = loc->values[0];
+      uint16_t cur_reg = eval_info->regs_info.regs->Convert(loc->values[0]);
       if (cur_reg >= eval_info->regs_info.Total()) {
         last_error_.code = DWARF_ERROR_ILLEGAL_VALUE;
         return false;
@@ -600,9 +600,12 @@ bool DwarfSectionImpl<AddressType>::GetCfaLocationInfo(uint64_t pc, const DwarfF
       last_error_ = cfa.last_error();
       return false;
     }
-    cie_loc_regs_[fde->cie_offset] = *loc_regs;
+    DwarfLocations* cie_loc_regs = &cie_loc_regs_[fde->cie_offset];
+    *cie_loc_regs = *loc_regs;
+    cfa.set_cie_loc_regs(cie_loc_regs);
+  } else {
+    cfa.set_cie_loc_regs(&reg_entry->second);
   }
-  cfa.set_cie_loc_regs(&cie_loc_regs_[fde->cie_offset]);
   if (!cfa.GetLocationInfo(pc, fde->cfa_instructions_offset, fde->cfa_instructions_end, loc_regs)) {
     last_error_ = cfa.last_error();
     return false;
@@ -629,15 +632,18 @@ bool DwarfSectionImpl<AddressType>::Log(uint8_t indent, uint64_t pc, const Dwarf
 }
 
 template <typename AddressType>
-bool DwarfSectionImpl<AddressType>::Init(uint64_t offset, uint64_t size, int64_t section_bias) {
-  section_bias_ = section_bias;
-  entries_offset_ = offset;
-  entries_end_ = offset + size;
+bool DwarfSectionImpl<AddressType>::Init(const SectionInfo& info) {
+  if (info.flags & SHF_COMPRESSED) {
+    return false;
+  }
+  section_bias_ = info.bias;
+  entries_offset_ = info.offset;
+  entries_end_ = info.offset + info.size;
 
   memory_.clear_func_offset();
   memory_.clear_text_offset();
-  memory_.set_cur_offset(offset);
-  pc_offset_ = offset;
+  memory_.set_cur_offset(info.offset);
+  pc_offset_ = info.offset;
 
   return true;
 }
@@ -703,8 +709,7 @@ bool DwarfSectionImpl<AddressType>::GetNextCieOrFde(uint64_t& next_entries_offse
   }
 
   if (entry_is_cie) {
-    auto entry = cie_entries_.find(start_offset);
-    if (entry == cie_entries_.end()) {
+    if (!cie_entries_.contains(start_offset)) {
       DwarfCie* cie = &cie_entries_[start_offset];
       cie->lsda_encoding = DW_EH_PE_omit;
       cie->cfa_instructions_end = next_entries_offset;

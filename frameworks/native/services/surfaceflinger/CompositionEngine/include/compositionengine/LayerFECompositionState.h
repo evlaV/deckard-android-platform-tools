@@ -18,6 +18,7 @@
 
 #include <cstdint>
 
+#include <android/gui/CachingHint.h>
 #include <gui/HdrMetadata.h>
 #include <math/mat4.h>
 #include <ui/BlurRegion.h>
@@ -25,6 +26,7 @@
 #include <ui/LayerStack.h>
 #include <ui/Rect.h>
 #include <ui/Region.h>
+#include <ui/ShadowSettings.h>
 #include <ui/Transform.h>
 
 // TODO(b/129481165): remove the #pragma below and fix conversion issues
@@ -131,8 +133,7 @@ struct LayerFECompositionState {
     // The bounds of the layer in layer local coordinates
     FloatRect geomLayerBounds;
 
-    // length of the shadow in screen space
-    float shadowRadius{0.f};
+    ShadowSettings shadowSettings;
 
     // List of regions that require blur
     std::vector<BlurRegion> blurRegions;
@@ -163,7 +164,6 @@ struct LayerFECompositionState {
 
     // The buffer and related state
     sp<GraphicBuffer> buffer;
-    int bufferSlot{BufferQueue::INVALID_BUFFER_SLOT};
     sp<Fence> acquireFence = Fence::NO_FENCE;
     Region surfaceDamage;
     uint64_t frameNumber = 0;
@@ -210,6 +210,10 @@ struct LayerFECompositionState {
     // The dimming flag
     bool dimmingEnabled{true};
 
+    float currentHdrSdrRatio = 1.f;
+    float desiredHdrSdrRatio = 1.f;
+
+    gui::CachingHint cachingHint = gui::CachingHint::Enabled;
     virtual ~LayerFECompositionState();
 
     // Debugging

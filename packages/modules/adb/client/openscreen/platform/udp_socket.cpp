@@ -399,7 +399,7 @@ class AdbUdpSocket : public UdpSocket {
             return;
         }
 
-        LOG(INFO) << "SendMessage ip=" << dest.ToString();
+        VLOG(MDNS) << "SendMessage ip=" << dest.ToString() << ", size=" << length;
         adb_iovec iov;
         iov.iov_len = length;
         iov.iov_base = const_cast<void*>(data);
@@ -493,12 +493,22 @@ class AdbUdpSocket : public UdpSocket {
         // This is effectively a boolean passed to setsockopt() to allow a future
         // bind() on the same socket to succeed, even if the address is already in
         // use. This is pretty much universally the desired behavior.
-        const int reuse_addr = 1;
-        if (adb_setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse_addr, sizeof(reuse_addr)) == -1) {
+        const int reuse = 1;
+        if (adb_setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) == -1) {
             OnError(Error::Code::kSocketOptionSettingFailure);
             LOG(WARNING) << "Failed to set SO_REUSEADDR";
             return;
         }
+
+#if defined(__APPLE__)
+        // On Mac, SO_REUSEADDR is not enough to allow a bind() on a reusable multicast socket.
+        // We need to also set the option SO_REUSEPORT.
+        if (adb_setsockopt(fd_, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) == -1) {
+            OnError(Error::Code::kSocketOptionSettingFailure);
+            LOG(WARNING) << "Failed to set SO_REUSEPORT";
+            return;
+        }
+#endif
 
         switch (local_endpoint_.address.version()) {
             case UdpSocket::Version::kV4: {
@@ -568,6 +578,7 @@ class AdbUdpSocket : public UdpSocket {
             client_->OnRead(this, ChooseError(errno, Error::Code::kSocketReadFailure));
             return;
         }
+        VLOG(MDNS) << "mDNS received bytes=" << *bytes_available;
 
         UdpPacket packet(*bytes_available);
         packet.set_socket(this);
@@ -656,7 +667,7 @@ ErrorOr<std::unique_ptr<UdpSocket>> UdpSocket::Create(TaskRunner* task_runner,
         return Error::Code::kInitializationFailure;
     }
 
-    LOG(INFO) << "UDP socket created for " << local_endpoint;
+    VLOG(MDNS) << "UDP socket created for " << local_endpoint;
     std::unique_ptr<UdpSocket> udp_socket(new AdbUdpSocket(client, local_endpoint, std::move(fd)));
     return udp_socket;
 }

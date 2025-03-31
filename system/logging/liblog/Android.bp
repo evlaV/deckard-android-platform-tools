@@ -86,6 +86,7 @@ cc_library_headers {
 // ========================================================
 cc_defaults {
     name: "liblog.defaults",
+    defaults: ["bug_24465209_workaround"],
     host_supported: true,
     ramdisk_available: true,
     vendor_ramdisk_available: true,
@@ -101,11 +102,6 @@ cc_defaults {
             sanitize: {
                 address: false,
             },
-        },
-        android_arm: {
-            // TODO: This is to work around b/24465209. Remove after root cause is fixed
-            pack_relocations: false,
-            ldflags: ["-Wl,--hash-style=both"],
         },
         windows: {
             enabled: true,
@@ -184,7 +180,7 @@ cc_library_static {
     ],
     visibility: [
         "//bionic/linker",
-        "//frameworks/libs/native_bridge_support/linker",
+        "//frameworks/libs/native_bridge_support/android_api/linker",
         "//system/apex/libs/libapexutil",
         "//system/core/debuggerd",
         "//system/linkerconfig",
@@ -195,7 +191,10 @@ ndk_headers {
     name: "liblog_ndk_headers",
     from: "include/android",
     to: "android",
-    srcs: ["include/android/log.h"],
+    srcs: [
+        "include/android/log.h",
+        "include/android/log_macros.h",
+    ],
     license: "NOTICE",
 }
 
@@ -229,6 +228,8 @@ rust_bindgen {
         "--allowlist-function=__android_log_security",
         "--allowlist-type=log_id",
     ],
+    vendor_available: true,
+    product_available: true,
 }
 
 rust_test {

@@ -21,10 +21,11 @@
 
 #include <algorithm>
 #include <iterator>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
+
+#include <ftl/details/type_traits.h>
 
 namespace android::ftl {
 
@@ -80,10 +81,6 @@ class SmallVector final : details::ArrayTraits<T>, details::ArrayComparators<Sma
   using Static = StaticVector<T, N>;
   using Dynamic = SmallVector<T, 0>;
 
-  // TODO: Replace with std::remove_cvref_t in C++20.
-  template <typename U>
-  using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<U>>;
-
  public:
   FTL_ARRAY_TRAIT(T, value_type);
   FTL_ARRAY_TRAIT(T, size_type);
@@ -104,7 +101,7 @@ class SmallVector final : details::ArrayTraits<T>, details::ArrayComparators<Sma
 
   // Constructs at most N elements. See StaticVector for underlying constructors.
   template <typename Arg, typename... Args,
-            typename = std::enable_if_t<!is_small_vector<remove_cvref_t<Arg>>{}>>
+            typename = std::enable_if_t<!is_small_vector<details::remove_cvref_t<Arg>>{}>>
   SmallVector(Arg&& arg, Args&&... args)
       : vector_(std::in_place_type<Static>, std::forward<Arg>(arg), std::forward<Args>(args)...) {}
 
@@ -127,30 +124,29 @@ class SmallVector final : details::ArrayTraits<T>, details::ArrayComparators<Sma
   DISPATCH(size_type, size, const)
   DISPATCH(bool, empty, const)
 
-  // noexcept to suppress warning about zero variadic macro arguments.
-  DISPATCH(iterator, begin, noexcept)
+  DISPATCH(iterator, begin, )
   DISPATCH(const_iterator, begin, const)
   DISPATCH(const_iterator, cbegin, const)
 
-  DISPATCH(iterator, end, noexcept)
+  DISPATCH(iterator, end, )
   DISPATCH(const_iterator, end, const)
   DISPATCH(const_iterator, cend, const)
 
-  DISPATCH(reverse_iterator, rbegin, noexcept)
+  DISPATCH(reverse_iterator, rbegin, )
   DISPATCH(const_reverse_iterator, rbegin, const)
   DISPATCH(const_reverse_iterator, crbegin, const)
 
-  DISPATCH(reverse_iterator, rend, noexcept)
+  DISPATCH(reverse_iterator, rend, )
   DISPATCH(const_reverse_iterator, rend, const)
   DISPATCH(const_reverse_iterator, crend, const)
 
-  DISPATCH(iterator, last, noexcept)
+  DISPATCH(iterator, last, )
   DISPATCH(const_iterator, last, const)
 
-  DISPATCH(reference, front, noexcept)
+  DISPATCH(reference, front, )
   DISPATCH(const_reference, front, const)
 
-  DISPATCH(reference, back, noexcept)
+  DISPATCH(reference, back, )
   DISPATCH(const_reference, back, const)
 
   reference operator[](size_type i) {
@@ -214,13 +210,13 @@ class SmallVector final : details::ArrayTraits<T>, details::ArrayComparators<Sma
   //
   // The last() and end() iterators are invalidated.
   //
-  DISPATCH(void, pop_back, noexcept)
+  DISPATCH(void, pop_back, )
 
   // Removes all elements.
   //
   // All iterators are invalidated.
   //
-  DISPATCH(void, clear, noexcept)
+  DISPATCH(void, clear, )
 
 #undef DISPATCH
 

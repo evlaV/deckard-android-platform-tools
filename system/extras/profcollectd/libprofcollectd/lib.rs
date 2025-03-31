@@ -21,6 +21,7 @@ mod report;
 mod scheduler;
 mod service;
 mod simpleperf_etm_trace_provider;
+mod simpleperf_lbr_trace_provider;
 mod trace_provider;
 
 #[cfg(feature = "test")]
@@ -51,7 +52,7 @@ impl IProviderStatusCallback for ProviderStatusCallback {
         const TIMEOUT_TO_COLLECT_BOOT_PROFILE: Duration = Duration::from_secs(3);
         let elapsed = Instant::now().duration_since(self.service_start_time);
         if elapsed < TIMEOUT_TO_COLLECT_BOOT_PROFILE {
-            trace_once("boot").map_err(err_to_binder_status)?;
+            trace_system("boot").map_err(err_to_binder_status)?;
         }
         schedule().map_err(err_to_binder_status)?;
         Ok(())
@@ -84,7 +85,7 @@ pub fn init_service(schedule_now: bool) -> Result<()> {
 }
 
 fn get_profcollectd_service() -> Result<binder::Strong<dyn IProfCollectd::IProfCollectd>> {
-    binder::get_interface(PROFCOLLECTD_SERVICE_NAME)
+    binder::wait_for_interface(PROFCOLLECTD_SERVICE_NAME)
         .context("Failed to get profcollectd binder service, is profcollectd running?")
 }
 
@@ -101,8 +102,8 @@ pub fn terminate() -> Result<()> {
 }
 
 /// Immediately schedule a one-off trace.
-pub fn trace_once(tag: &str) -> Result<()> {
-    get_profcollectd_service()?.trace_once(tag)?;
+pub fn trace_system(tag: &str) -> Result<()> {
+    get_profcollectd_service()?.trace_system(tag)?;
     Ok(())
 }
 
@@ -125,11 +126,12 @@ pub fn reset() -> Result<()> {
 
 /// Inits logging for Android
 pub fn init_logging() {
-    let min_log_level = if cfg!(feature = "test") { log::Level::Info } else { log::Level::Error };
+    let max_log_level =
+        if cfg!(feature = "test") { log::LevelFilter::Info } else { log::LevelFilter::Error };
     android_logger::init_once(
         android_logger::Config::default()
             .with_tag("profcollectd")
-            .with_min_level(min_log_level)
-            .with_log_id(android_logger::LogId::System),
+            .with_max_level(max_log_level)
+            .with_log_buffer(android_logger::LogId::System),
     );
 }

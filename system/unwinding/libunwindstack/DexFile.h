@@ -54,7 +54,7 @@ class DexFile {
   // The underlying C API. It might be shared by multiple DexFiles (with different base_addr).
   struct DexFileApi {
     std::unique_ptr<art_api::dex::DexFile> dex_;
-    std::unique_ptr<Memory> memory_;  // Keep alive the memory object backing the dex file data.
+    std::shared_ptr<Memory> memory_;  // Keep alive the memory object backing the dex file data.
     std::mutex lock_;                 // The C API is not thread-safe so we need to lock it.
   };
 

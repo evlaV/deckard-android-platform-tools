@@ -18,70 +18,104 @@
 #define LOG_TAG "PowerAdvisorTest"
 
 #include <DisplayHardware/PowerAdvisor.h>
-#include <compositionengine/Display.h>
-#include <ftl/fake_guard.h>
+#include <binder/Status.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <powermanager/PowerHalWrapper.h>
 #include <ui/DisplayId.h>
 #include <chrono>
+#include <future>
 #include "TestableSurfaceFlinger.h"
-#include "mock/DisplayHardware/MockAidlPowerHalWrapper.h"
+#include "mock/DisplayHardware/MockIPowerHintSession.h"
+#include "mock/DisplayHardware/MockPowerHalController.h"
 
 using namespace android;
 using namespace android::Hwc2::mock;
 using namespace android::hardware::power;
 using namespace std::chrono_literals;
 using namespace testing;
+using namespace android::power;
 
 namespace android::Hwc2::impl {
 
 class PowerAdvisorTest : public testing::Test {
 public:
     void SetUp() override;
-    void startPowerHintSession();
-    void fakeBasicFrameTiming(nsecs_t startTime, nsecs_t vsyncPeriod);
-    void setExpectedTiming(nsecs_t startTime, nsecs_t vsyncPeriod);
-    nsecs_t getFenceWaitDelayDuration(bool skipValidate);
+    void startPowerHintSession(bool returnValidSession = true);
+    void fakeBasicFrameTiming(TimePoint startTime, Duration vsyncPeriod);
+    void setExpectedTiming(Duration totalFrameTargetDuration, TimePoint expectedPresentTime);
+    Duration getFenceWaitDelayDuration(bool skipValidate);
+    Duration getErrorMargin();
+    void setTimingTestingMode(bool testinMode);
+    void allowReportActualToAcquireMutex();
+    bool sessionExists();
 
 protected:
     TestableSurfaceFlinger mFlinger;
     std::unique_ptr<PowerAdvisor> mPowerAdvisor;
-    NiceMock<MockAidlPowerHalWrapper>* mMockAidlWrapper;
-    nsecs_t kErrorMargin = std::chrono::nanoseconds(1ms).count();
+    MockPowerHalController* mMockPowerHalController;
+    std::shared_ptr<MockIPowerHintSession> mMockPowerHintSession;
 };
 
-void PowerAdvisorTest::SetUp() FTL_FAKE_GUARD(mPowerAdvisor->mPowerHalMutex) {
-    std::unique_ptr<MockAidlPowerHalWrapper> mockAidlWrapper =
-            std::make_unique<NiceMock<MockAidlPowerHalWrapper>>();
-    mPowerAdvisor = std::make_unique<PowerAdvisor>(*mFlinger.flinger());
-    ON_CALL(*mockAidlWrapper.get(), supportsPowerHintSession()).WillByDefault(Return(true));
-    ON_CALL(*mockAidlWrapper.get(), startPowerHintSession()).WillByDefault(Return(true));
-    mPowerAdvisor->mHalWrapper = std::move(mockAidlWrapper);
-    mMockAidlWrapper =
-            reinterpret_cast<NiceMock<MockAidlPowerHalWrapper>*>(mPowerAdvisor->mHalWrapper.get());
+bool PowerAdvisorTest::sessionExists() {
+    std::scoped_lock lock(mPowerAdvisor->mHintSessionMutex);
+    return mPowerAdvisor->mHintSession != nullptr;
 }
 
-void PowerAdvisorTest::startPowerHintSession() {
-    const std::vector<int32_t> threadIds = {1, 2, 3};
-    mPowerAdvisor->enablePowerHint(true);
-    mPowerAdvisor->startPowerHintSession(threadIds);
+void PowerAdvisorTest::SetUp() {
+    mPowerAdvisor = std::make_unique<impl::PowerAdvisor>(*mFlinger.flinger());
+    mPowerAdvisor->mPowerHal = std::make_unique<NiceMock<MockPowerHalController>>();
+    mMockPowerHalController =
+            reinterpret_cast<MockPowerHalController*>(mPowerAdvisor->mPowerHal.get());
+    ON_CALL(*mMockPowerHalController, getHintSessionPreferredRate)
+            .WillByDefault(Return(HalResult<int64_t>::fromStatus(binder::Status::ok(), 16000)));
 }
 
-void PowerAdvisorTest::setExpectedTiming(nsecs_t totalFrameTarget, nsecs_t expectedPresentTime) {
-    mPowerAdvisor->setTotalFrameTargetWorkDuration(totalFrameTarget);
+void PowerAdvisorTest::startPowerHintSession(bool returnValidSession) {
+    mMockPowerHintSession = ndk::SharedRefBase::make<NiceMock<MockIPowerHintSession>>();
+    if (returnValidSession) {
+        ON_CALL(*mMockPowerHalController, createHintSession)
+                .WillByDefault(
+                        Return(HalResult<std::shared_ptr<IPowerHintSession>>::
+                                       fromStatus(binder::Status::ok(), mMockPowerHintSession)));
+    } else {
+        ON_CALL(*mMockPowerHalController, createHintSession)
+                .WillByDefault(Return(HalResult<std::shared_ptr<IPowerHintSession>>::
+                                              fromStatus(binder::Status::ok(), nullptr)));
+    }
+    mPowerAdvisor->enablePowerHintSession(true);
+    mPowerAdvisor->startPowerHintSession({1, 2, 3});
+    ON_CALL(*mMockPowerHintSession, updateTargetWorkDuration)
+            .WillByDefault(Return(testing::ByMove(ndk::ScopedAStatus::ok())));
+}
+
+void PowerAdvisorTest::setExpectedTiming(Duration totalFrameTargetDuration,
+                                         TimePoint expectedPresentTime) {
+    mPowerAdvisor->setTotalFrameTargetWorkDuration(totalFrameTargetDuration);
     mPowerAdvisor->setExpectedPresentTime(expectedPresentTime);
 }
 
-void PowerAdvisorTest::fakeBasicFrameTiming(nsecs_t startTime, nsecs_t vsyncPeriod) {
+void PowerAdvisorTest::fakeBasicFrameTiming(TimePoint startTime, Duration vsyncPeriod) {
     mPowerAdvisor->setCommitStart(startTime);
-    mPowerAdvisor->setFrameDelay(0);
-    mPowerAdvisor->setTargetWorkDuration(vsyncPeriod);
+    mPowerAdvisor->setFrameDelay(0ns);
+    mPowerAdvisor->updateTargetWorkDuration(vsyncPeriod);
 }
 
-nsecs_t PowerAdvisorTest::getFenceWaitDelayDuration(bool skipValidate) {
+void PowerAdvisorTest::setTimingTestingMode(bool testingMode) {
+    mPowerAdvisor->mTimingTestingMode = testingMode;
+}
+
+void PowerAdvisorTest::allowReportActualToAcquireMutex() {
+    mPowerAdvisor->mDelayReportActualMutexAcquisitonPromise.set_value(true);
+}
+
+Duration PowerAdvisorTest::getFenceWaitDelayDuration(bool skipValidate) {
     return (skipValidate ? PowerAdvisor::kFenceWaitStartDelaySkippedValidate
-                         : PowerAdvisor::kFenceWaitStartDelayValidated)
-            .count();
+                         : PowerAdvisor::kFenceWaitStartDelayValidated);
+}
+
+Duration PowerAdvisorTest::getErrorMargin() {
+    return mPowerAdvisor->sTargetSafetyMargin;
 }
 
 namespace {
@@ -93,11 +127,11 @@ TEST_F(PowerAdvisorTest, hintSessionUseHwcDisplay) {
     std::vector<DisplayId> displayIds{PhysicalDisplayId::fromPort(42u)};
 
     // 60hz
-    const nsecs_t vsyncPeriod = std::chrono::nanoseconds(1s).count() / 60;
-    const nsecs_t presentDuration = std::chrono::nanoseconds(5ms).count();
-    const nsecs_t postCompDuration = std::chrono::nanoseconds(1ms).count();
+    const Duration vsyncPeriod{std::chrono::nanoseconds(1s) / 60};
+    const Duration presentDuration = 5ms;
+    const Duration postCompDuration = 1ms;
 
-    nsecs_t startTime = 100;
+    TimePoint startTime{100ns};
 
     // advisor only starts on frame 2 so do an initial no-op frame
     fakeBasicFrameTiming(startTime, vsyncPeriod);
@@ -109,16 +143,19 @@ TEST_F(PowerAdvisorTest, hintSessionUseHwcDisplay) {
     // increment the frame
     startTime += vsyncPeriod;
 
-    const nsecs_t expectedDuration = kErrorMargin + presentDuration + postCompDuration;
-    EXPECT_CALL(*mMockAidlWrapper, sendActualWorkDuration(Eq(expectedDuration), _)).Times(1);
-
+    const Duration expectedDuration = getErrorMargin() + presentDuration + postCompDuration;
+    EXPECT_CALL(*mMockPowerHintSession,
+                reportActualWorkDuration(ElementsAre(
+                        Field(&WorkDuration::durationNanos, Eq(expectedDuration.ns())))))
+            .Times(1)
+            .WillOnce(Return(testing::ByMove(ndk::ScopedAStatus::ok())));
     fakeBasicFrameTiming(startTime, vsyncPeriod);
     setExpectedTiming(vsyncPeriod, startTime + vsyncPeriod);
     mPowerAdvisor->setDisplays(displayIds);
-    mPowerAdvisor->setHwcValidateTiming(displayIds[0], startTime + 1000000, startTime + 1500000);
-    mPowerAdvisor->setHwcPresentTiming(displayIds[0], startTime + 2000000, startTime + 2500000);
+    mPowerAdvisor->setHwcValidateTiming(displayIds[0], startTime + 1ms, startTime + 1500us);
+    mPowerAdvisor->setHwcPresentTiming(displayIds[0], startTime + 2ms, startTime + 2500us);
     mPowerAdvisor->setSfPresentTiming(startTime, startTime + presentDuration);
-    mPowerAdvisor->sendActualWorkDuration();
+    mPowerAdvisor->reportActualWorkDuration();
 }
 
 TEST_F(PowerAdvisorTest, hintSessionSubtractsHwcFenceTime) {
@@ -128,12 +165,12 @@ TEST_F(PowerAdvisorTest, hintSessionSubtractsHwcFenceTime) {
     std::vector<DisplayId> displayIds{PhysicalDisplayId::fromPort(42u)};
 
     // 60hz
-    const nsecs_t vsyncPeriod = std::chrono::nanoseconds(1s).count() / 60;
-    const nsecs_t presentDuration = std::chrono::nanoseconds(5ms).count();
-    const nsecs_t postCompDuration = std::chrono::nanoseconds(1ms).count();
-    const nsecs_t hwcBlockedDuration = std::chrono::nanoseconds(500us).count();
+    const Duration vsyncPeriod{std::chrono::nanoseconds(1s) / 60};
+    const Duration presentDuration = 5ms;
+    const Duration postCompDuration = 1ms;
+    const Duration hwcBlockedDuration = 500us;
 
-    nsecs_t startTime = 100;
+    TimePoint startTime{100ns};
 
     // advisor only starts on frame 2 so do an initial no-op frame
     fakeBasicFrameTiming(startTime, vsyncPeriod);
@@ -145,19 +182,23 @@ TEST_F(PowerAdvisorTest, hintSessionSubtractsHwcFenceTime) {
     // increment the frame
     startTime += vsyncPeriod;
 
-    const nsecs_t expectedDuration = kErrorMargin + presentDuration +
+    const Duration expectedDuration = getErrorMargin() + presentDuration +
             getFenceWaitDelayDuration(false) - hwcBlockedDuration + postCompDuration;
-    EXPECT_CALL(*mMockAidlWrapper, sendActualWorkDuration(Eq(expectedDuration), _)).Times(1);
+    EXPECT_CALL(*mMockPowerHintSession,
+                reportActualWorkDuration(ElementsAre(
+                        Field(&WorkDuration::durationNanos, Eq(expectedDuration.ns())))))
+            .Times(1)
+            .WillOnce(Return(testing::ByMove(ndk::ScopedAStatus::ok())));
 
     fakeBasicFrameTiming(startTime, vsyncPeriod);
     setExpectedTiming(vsyncPeriod, startTime + vsyncPeriod);
     mPowerAdvisor->setDisplays(displayIds);
-    mPowerAdvisor->setHwcValidateTiming(displayIds[0], startTime + 1000000, startTime + 1500000);
-    mPowerAdvisor->setHwcPresentTiming(displayIds[0], startTime + 2000000, startTime + 3000000);
+    mPowerAdvisor->setHwcValidateTiming(displayIds[0], startTime + 1ms, startTime + 1500us);
+    mPowerAdvisor->setHwcPresentTiming(displayIds[0], startTime + 2ms, startTime + 3ms);
     // now report the fence as having fired during the display HWC time
-    mPowerAdvisor->setSfPresentTiming(startTime + 2000000 + hwcBlockedDuration,
+    mPowerAdvisor->setSfPresentTiming(startTime + 2ms + hwcBlockedDuration,
                                       startTime + presentDuration);
-    mPowerAdvisor->sendActualWorkDuration();
+    mPowerAdvisor->reportActualWorkDuration();
 }
 
 TEST_F(PowerAdvisorTest, hintSessionUsingSecondaryVirtualDisplays) {
@@ -168,12 +209,12 @@ TEST_F(PowerAdvisorTest, hintSessionUsingSecondaryVirtualDisplays) {
                                       GpuVirtualDisplayId(1)};
 
     // 60hz
-    const nsecs_t vsyncPeriod = std::chrono::nanoseconds(1s).count() / 60;
+    const Duration vsyncPeriod{std::chrono::nanoseconds(1s) / 60};
     // make present duration much later than the hwc display by itself will account for
-    const nsecs_t presentDuration = std::chrono::nanoseconds(10ms).count();
-    const nsecs_t postCompDuration = std::chrono::nanoseconds(1ms).count();
+    const Duration presentDuration{10ms};
+    const Duration postCompDuration{1ms};
 
-    nsecs_t startTime = 100;
+    TimePoint startTime{100ns};
 
     // advisor only starts on frame 2 so do an initial no-op frame
     fakeBasicFrameTiming(startTime, vsyncPeriod);
@@ -185,18 +226,148 @@ TEST_F(PowerAdvisorTest, hintSessionUsingSecondaryVirtualDisplays) {
     // increment the frame
     startTime += vsyncPeriod;
 
-    const nsecs_t expectedDuration = kErrorMargin + presentDuration + postCompDuration;
-    EXPECT_CALL(*mMockAidlWrapper, sendActualWorkDuration(Eq(expectedDuration), _)).Times(1);
+    const Duration expectedDuration = getErrorMargin() + presentDuration + postCompDuration;
+    EXPECT_CALL(*mMockPowerHintSession,
+                reportActualWorkDuration(ElementsAre(
+                        Field(&WorkDuration::durationNanos, Eq(expectedDuration.ns())))))
+            .Times(1)
+            .WillOnce(Return(testing::ByMove(ndk::ScopedAStatus::ok())));
 
     fakeBasicFrameTiming(startTime, vsyncPeriod);
     setExpectedTiming(vsyncPeriod, startTime + vsyncPeriod);
     mPowerAdvisor->setDisplays(displayIds);
 
     // don't report timing for the gpu displays since they don't use hwc
-    mPowerAdvisor->setHwcValidateTiming(displayIds[0], startTime + 1000000, startTime + 1500000);
-    mPowerAdvisor->setHwcPresentTiming(displayIds[0], startTime + 2000000, startTime + 2500000);
+    mPowerAdvisor->setHwcValidateTiming(displayIds[0], startTime + 1ms, startTime + 1500us);
+    mPowerAdvisor->setHwcPresentTiming(displayIds[0], startTime + 2ms, startTime + 2500us);
     mPowerAdvisor->setSfPresentTiming(startTime, startTime + presentDuration);
-    mPowerAdvisor->sendActualWorkDuration();
+    mPowerAdvisor->reportActualWorkDuration();
+}
+
+TEST_F(PowerAdvisorTest, hintSessionValidWhenNullFromPowerHAL) {
+    mPowerAdvisor->onBootFinished();
+
+    startPowerHintSession(false);
+
+    std::vector<DisplayId> displayIds{PhysicalDisplayId::fromPort(42u)};
+
+    // 60hz
+    const Duration vsyncPeriod{std::chrono::nanoseconds(1s) / 60};
+    const Duration presentDuration = 5ms;
+    const Duration postCompDuration = 1ms;
+
+    TimePoint startTime{100ns};
+
+    // advisor only starts on frame 2 so do an initial no-op frame
+    fakeBasicFrameTiming(startTime, vsyncPeriod);
+    setExpectedTiming(vsyncPeriod, startTime + vsyncPeriod);
+    mPowerAdvisor->setDisplays(displayIds);
+    mPowerAdvisor->setSfPresentTiming(startTime, startTime + presentDuration);
+    mPowerAdvisor->setCompositeEnd(startTime + presentDuration + postCompDuration);
+
+    // increment the frame
+    startTime += vsyncPeriod;
+
+    const Duration expectedDuration = getErrorMargin() + presentDuration + postCompDuration;
+    EXPECT_CALL(*mMockPowerHintSession,
+                reportActualWorkDuration(ElementsAre(
+                        Field(&WorkDuration::durationNanos, Eq(expectedDuration.ns())))))
+            .Times(0);
+    fakeBasicFrameTiming(startTime, vsyncPeriod);
+    setExpectedTiming(vsyncPeriod, startTime + vsyncPeriod);
+    mPowerAdvisor->setDisplays(displayIds);
+    mPowerAdvisor->setHwcValidateTiming(displayIds[0], startTime + 1ms, startTime + 1500us);
+    mPowerAdvisor->setHwcPresentTiming(displayIds[0], startTime + 2ms, startTime + 2500us);
+    mPowerAdvisor->setSfPresentTiming(startTime, startTime + presentDuration);
+    mPowerAdvisor->reportActualWorkDuration();
+}
+
+TEST_F(PowerAdvisorTest, hintSessionOnlyCreatedOnce) {
+    EXPECT_CALL(*mMockPowerHalController, createHintSession(_, _, _, _)).Times(1);
+    mPowerAdvisor->onBootFinished();
+    startPowerHintSession();
+    mPowerAdvisor->startPowerHintSession({1, 2, 3});
+}
+
+TEST_F(PowerAdvisorTest, hintSessionTestNotifyReportRace) {
+    // notifyDisplayUpdateImminentAndCpuReset or notifyCpuLoadUp gets called in background
+    // reportActual gets called during callback and sees true session, passes ensure
+    // first notify finishes, setting value to true. Another async method gets called, acquires the
+    // lock between reportactual finishing ensure and acquiring the lock itself, and sets session to
+    // nullptr. reportActual acquires the lock, and the session is now null, so it does nullptr
+    // deref
+
+    mPowerAdvisor->onBootFinished();
+    startPowerHintSession();
+
+    // --- fake a bunch of timing data
+    std::vector<DisplayId> displayIds{PhysicalDisplayId::fromPort(42u)};
+    // 60hz
+    const Duration vsyncPeriod{std::chrono::nanoseconds(1s) / 60};
+    const Duration presentDuration = 5ms;
+    const Duration postCompDuration = 1ms;
+    TimePoint startTime{100ns};
+    // advisor only starts on frame 2 so do an initial no-op frame
+    fakeBasicFrameTiming(startTime, vsyncPeriod);
+    setExpectedTiming(vsyncPeriod, startTime + vsyncPeriod);
+    mPowerAdvisor->setDisplays(displayIds);
+    mPowerAdvisor->setSfPresentTiming(startTime, startTime + presentDuration);
+    mPowerAdvisor->setCompositeEnd(startTime + presentDuration + postCompDuration);
+    // increment the frame
+    startTime += vsyncPeriod;
+    fakeBasicFrameTiming(startTime, vsyncPeriod);
+    setExpectedTiming(vsyncPeriod, startTime + vsyncPeriod);
+    mPowerAdvisor->setDisplays(displayIds);
+    mPowerAdvisor->setHwcValidateTiming(displayIds[0], startTime + 1ms, startTime + 1500us);
+    mPowerAdvisor->setHwcPresentTiming(displayIds[0], startTime + 2ms, startTime + 2500us);
+    mPowerAdvisor->setSfPresentTiming(startTime, startTime + presentDuration);
+    // --- Done faking timing data
+
+    setTimingTestingMode(true);
+    std::promise<bool> letSendHintFinish;
+
+    ON_CALL(*mMockPowerHintSession, sendHint).WillByDefault([&letSendHintFinish] {
+        letSendHintFinish.get_future().wait();
+        return ndk::ScopedAStatus::fromExceptionCode(-127);
+    });
+
+    ON_CALL(*mMockPowerHintSession, reportActualWorkDuration).WillByDefault([] {
+        return ndk::ScopedAStatus::fromExceptionCode(-127);
+    });
+
+    ON_CALL(*mMockPowerHalController, createHintSession)
+            .WillByDefault(Return(
+                    HalResult<std::shared_ptr<IPowerHintSession>>::
+                            fromStatus(ndk::ScopedAStatus::fromExceptionCode(-127), nullptr)));
+
+    // First background call, to notice the session is down
+    auto firstHint = std::async(std::launch::async, [this] {
+        mPowerAdvisor->notifyCpuLoadUp();
+        return true;
+    });
+    std::this_thread::sleep_for(10ms);
+
+    // Call reportActual while callback is resolving to try and sneak past ensure
+    auto reportActual =
+            std::async(std::launch::async, [this] { mPowerAdvisor->reportActualWorkDuration(); });
+
+    std::this_thread::sleep_for(10ms);
+    // Let the first call finish
+    letSendHintFinish.set_value(true);
+    letSendHintFinish = std::promise<bool>{};
+    firstHint.wait();
+
+    // Do the second notify call, to ensure the session is nullptr
+    auto secondHint = std::async(std::launch::async, [this] {
+        mPowerAdvisor->notifyCpuLoadUp();
+        return true;
+    });
+    letSendHintFinish.set_value(true);
+    secondHint.wait();
+    // Let report finish, potentially dereferencing
+    allowReportActualToAcquireMutex();
+    reportActual.wait();
+    EXPECT_EQ(sessionExists(), false);
 }
 
 } // namespace

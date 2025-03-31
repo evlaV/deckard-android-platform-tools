@@ -14,6 +14,7 @@
 
 use anyhow::Result;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 /// Build module.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -83,6 +84,12 @@ impl BpProperties {
         self.map.insert(k.to_string(), v.into());
     }
 
+    pub fn set_if_nonempty<T: Into<BpValue>>(&mut self, k: &str, v: Vec<T>) {
+        if !v.is_empty() {
+            self.set(k, v);
+        }
+    }
+
     pub fn object(&mut self, k: &str) -> &mut BpProperties {
         let v =
             self.map.entry(k.to_string()).or_insert_with(|| BpValue::Object(BpProperties::new()));
@@ -101,24 +108,41 @@ impl BpProperties {
             "defaults",
             "stem",
             "host_supported",
-            "prefer_rlib",
+            "host_cross_supported",
             "crate_name",
             "cargo_env_compat",
             "cargo_pkg_version",
+            "crate_root",
             "srcs",
             "test_suites",
             "auto_gen_config",
             "test_options",
             "edition",
             "features",
+            "cfgs",
+            "flags",
             "rustlibs",
             "proc_macros",
             "static_libs",
+            "whole_static_libs",
             "shared_libs",
+            "aliases",
             "arch",
             "target",
             "ld_flags",
+            "compile_multilib",
+            "include_dirs",
             "apex_available",
+            "prefer_rlib",
+            "no_stdlibs",
+            "stdlibs",
+            "native_bridge_supported",
+            "product_available",
+            "recovery_available",
+            "vendor_available",
+            "vendor_ramdisk_available",
+            "ramdisk_available",
+            "min_sdk_version",
             "visibility",
         ];
         let mut props: Vec<(&String, &BpValue)> = self.map.iter().collect();
@@ -178,6 +202,12 @@ impl From<&str> for BpValue {
 impl From<String> for BpValue {
     fn from(x: String) -> Self {
         BpValue::String(x)
+    }
+}
+
+impl From<PathBuf> for BpValue {
+    fn from(x: PathBuf) -> Self {
+        BpValue::String(x.to_string_lossy().into_owned())
     }
 }
 

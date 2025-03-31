@@ -43,5 +43,5 @@ JNIEXPORT int AFileDescriptor_getFd(JNIEnv* env, jobject fileDescriptor) {
 
 JNIEXPORT void AFileDescriptor_setFd(JNIEnv* env, jobject fileDescriptor, int fd) {
     EnsureArgumentIsFileDescriptor(env, fileDescriptor);
-    (*env)->SetIntField(env, fileDescriptor, JniConstants_FileDescriptor_descriptor(env), fd);
+    (*env)->CallVoidMethod(env, fileDescriptor, JniConstants_FileDescriptor_setInt$(env), fd);
 }

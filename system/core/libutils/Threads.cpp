@@ -34,12 +34,7 @@
 #include <sys/prctl.h>
 #endif
 
-#include <utils/Log.h>
-
-#if defined(__ANDROID__)
-#include <processgroup/processgroup.h>
-#include <processgroup/sched_policy.h>
-#endif
+#include <log/log.h>
 
 #if defined(__ANDROID__)
 # define __android_unused

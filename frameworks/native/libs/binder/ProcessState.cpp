@@ -18,20 +18,19 @@
 
 #include <binder/ProcessState.h>
 
-#include <android-base/result.h>
-#include <android-base/scopeguard.h>
 #include <android-base/strings.h>
 #include <binder/BpBinder.h>
+#include <binder/Functional.h>
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 #include <binder/Stability.h>
 #include <cutils/atomic.h>
 #include <utils/AndroidThreads.h>
-#include <utils/Log.h>
 #include <utils/String8.h>
 #include <utils/Thread.h>
 
 #include "Static.h"
+#include "Utils.h"
 #include "binder_module.h"
 
 #include <errno.h>
@@ -59,6 +58,9 @@ const char* kDefaultDriver = "/dev/binder";
 // -------------------------------------------------------------------------
 
 namespace android {
+
+using namespace android::binder::impl;
+using android::binder::unique_fd;
 
 class PoolThread : public Thread
 {
@@ -189,7 +191,7 @@ void ProcessState::childPostFork() {
 
 void ProcessState::startThreadPool()
 {
-    AutoMutex _l(mLock);
+    std::unique_lock<std::mutex> _l(mLock);
     if (!mThreadPoolStarted) {
         if (mMaxThreads == 0) {
             // see also getThreadPoolMaxTotalThreadCount
@@ -203,7 +205,7 @@ void ProcessState::startThreadPool()
 
 bool ProcessState::becomeContextManager()
 {
-    AutoMutex _l(mLock);
+    std::unique_lock<std::mutex> _l(mLock);
 
     flat_binder_object obj {
         .flags = FLAT_BINDER_FLAG_TXN_SECURITY_CTX,
@@ -310,7 +312,7 @@ sp<IBinder> ProcessState::getStrongProxyForHandle(int32_t handle)
 {
     sp<IBinder> result;
 
-    AutoMutex _l(mLock);
+    std::unique_lock<std::mutex> _l(mLock);
 
     if (handle == 0 && the_context_object != nullptr) return the_context_object;
 
@@ -374,7 +376,7 @@ sp<IBinder> ProcessState::getStrongProxyForHandle(int32_t handle)
 
 void ProcessState::expungeHandle(int32_t handle, IBinder* binder)
 {
-    AutoMutex _l(mLock);
+    std::unique_lock<std::mutex> _l(mLock);
 
     handle_entry* e = lookupHandleLocked(handle);
 
@@ -404,9 +406,7 @@ void ProcessState::spawnPooledThread(bool isMain)
         ALOGV("Spawning new pooled thread, name=%s\n", name.c_str());
         sp<Thread> t = sp<PoolThread>::make(isMain);
         t->run(name.c_str());
-        pthread_mutex_lock(&mThreadCountLock);
         mKernelStartedThreads++;
-        pthread_mutex_unlock(&mThreadCountLock);
     }
     // TODO: if startThreadPool is called on another thread after the process
     // starts up, the kernel might think that it already requested those
@@ -429,19 +429,19 @@ status_t ProcessState::setThreadPoolMaxThreadCount(size_t maxThreads) {
 }
 
 size_t ProcessState::getThreadPoolMaxTotalThreadCount() const {
-    pthread_mutex_lock(&mThreadCountLock);
-    base::ScopeGuard detachGuard = [&]() { pthread_mutex_unlock(&mThreadCountLock); };
-
     if (mThreadPoolStarted) {
-        LOG_ALWAYS_FATAL_IF(mKernelStartedThreads > mMaxThreads + 1,
-                            "too many kernel-started threads: %zu > %zu + 1", mKernelStartedThreads,
-                            mMaxThreads);
+        size_t kernelStarted = mKernelStartedThreads;
+        size_t max = mMaxThreads;
+        size_t current = mCurrentThreads;
+
+        LOG_ALWAYS_FATAL_IF(kernelStarted > max + 1,
+                            "too many kernel-started threads: %zu > %zu + 1", kernelStarted, max);
 
         // calling startThreadPool starts a thread
         size_t threads = 1;
 
         // the kernel is configured to start up to mMaxThreads more threads
-        threads += mMaxThreads;
+        threads += max;
 
         // Users may call IPCThreadState::joinThreadPool directly. We don't
         // currently have a way to count this directly (it could be added by
@@ -451,8 +451,8 @@ size_t ProcessState::getThreadPoolMaxTotalThreadCount() const {
         // in IPCThreadState, temporarily forget about the extra join threads.
         // This is okay, because most callers of this method only care about
         // having 0, 1, or more threads.
-        if (mCurrentThreads > mKernelStartedThreads) {
-            threads += mCurrentThreads - mKernelStartedThreads;
+        if (current > kernelStarted) {
+            threads += current - kernelStarted;
         }
 
         return threads;
@@ -460,10 +460,9 @@ size_t ProcessState::getThreadPoolMaxTotalThreadCount() const {
 
     // must not be initialized or maybe has poll thread setup, we
     // currently don't track this in libbinder
-    LOG_ALWAYS_FATAL_IF(mKernelStartedThreads != 0,
-                        "Expecting 0 kernel started threads but have"
-                        " %zu",
-                        mKernelStartedThreads);
+    size_t kernelStarted = mKernelStartedThreads;
+    LOG_ALWAYS_FATAL_IF(kernelStarted != 0, "Expecting 0 kernel started threads but have %zu",
+                        kernelStarted);
     return mCurrentThreads;
 }
 
@@ -489,6 +488,7 @@ bool ProcessState::isDriverFeatureEnabled(const DriverFeature feature) {
     if (read(fd, &on, sizeof(on)) == -1) {
         ALOGE("%s: error reading to %s: %s", __func__,
                  names[static_cast<int>(feature)], strerror(errno));
+        close(fd);
         return false;
     }
     close(fd);
@@ -512,31 +512,32 @@ String8 ProcessState::getDriverName() {
     return mDriverName;
 }
 
-static base::Result<int> open_driver(const char* driver) {
-    int fd = open(driver, O_RDWR | O_CLOEXEC);
-    if (fd < 0) {
-        return base::ErrnoError() << "Opening '" << driver << "' failed";
+static unique_fd open_driver(const char* driver, String8* error) {
+    auto fd = unique_fd(open(driver, O_RDWR | O_CLOEXEC));
+    if (!fd.ok()) {
+        error->appendFormat("%d (%s) Opening '%s' failed", errno, strerror(errno), driver);
+        return {};
     }
     int vers = 0;
-    status_t result = ioctl(fd, BINDER_VERSION, &vers);
+    int result = ioctl(fd.get(), BINDER_VERSION, &vers);
     if (result == -1) {
-        close(fd);
-        return base::ErrnoError() << "Binder ioctl to obtain version failed";
+        error->appendFormat("%d (%s) Binder ioctl to obtain version failed", errno,
+                            strerror(errno));
+        return {};
     }
     if (result != 0 || vers != BINDER_CURRENT_PROTOCOL_VERSION) {
-        close(fd);
-        return base::Error() << "Binder driver protocol(" << vers
-                             << ") does not match user space protocol("
-                             << BINDER_CURRENT_PROTOCOL_VERSION
-                             << ")! ioctl() return value: " << result;
+        error->appendFormat("Binder driver protocol(%d) does not match user space protocol(%d)! "
+                            "ioctl() return value: %d",
+                            vers, BINDER_CURRENT_PROTOCOL_VERSION, result);
+        return {};
     }
     size_t maxThreads = DEFAULT_MAX_BINDER_THREADS;
-    result = ioctl(fd, BINDER_SET_MAX_THREADS, &maxThreads);
+    result = ioctl(fd.get(), BINDER_SET_MAX_THREADS, &maxThreads);
     if (result == -1) {
         ALOGE("Binder ioctl to set max threads failed: %s", strerror(errno));
     }
     uint32_t enable = DEFAULT_ENABLE_ONEWAY_SPAM_DETECTION;
-    result = ioctl(fd, BINDER_ENABLE_ONEWAY_SPAM_DETECTION, &enable);
+    result = ioctl(fd.get(), BINDER_ENABLE_ONEWAY_SPAM_DETECTION, &enable);
     if (result == -1) {
         ALOGE_IF(ProcessState::isDriverFeatureEnabled(
                      ProcessState::DriverFeature::ONEWAY_SPAM_DETECTION),
@@ -549,40 +550,38 @@ ProcessState::ProcessState(const char* driver)
       : mDriverName(String8(driver)),
         mDriverFD(-1),
         mVMStart(MAP_FAILED),
-        mThreadCountLock(PTHREAD_MUTEX_INITIALIZER),
-        mThreadCountDecrement(PTHREAD_COND_INITIALIZER),
         mExecutingThreadsCount(0),
-        mWaitingForThreads(0),
         mMaxThreads(DEFAULT_MAX_BINDER_THREADS),
         mCurrentThreads(0),
         mKernelStartedThreads(0),
-        mStarvationStartTimeMs(0),
+        mStarvationStartTime(never()),
         mForked(false),
         mThreadPoolStarted(false),
         mThreadPoolSeq(1),
         mCallRestriction(CallRestriction::NONE) {
-    base::Result<int> opened = open_driver(driver);
+    String8 error;
+    unique_fd opened = open_driver(driver, &error);
 
     if (opened.ok()) {
         // mmap the binder, providing a chunk of virtual address space to receive transactions.
         mVMStart = mmap(nullptr, BINDER_VM_SIZE, PROT_READ, MAP_PRIVATE | MAP_NORESERVE,
-                        opened.value(), 0);
+                        opened.get(), 0);
         if (mVMStart == MAP_FAILED) {
-            close(opened.value());
             // *sigh*
-            opened = base::Error()
-                    << "Using " << driver << " failed: unable to mmap transaction memory.";
+            ALOGE("Using %s failed: unable to mmap transaction memory.", driver);
+            opened.reset();
             mDriverName.clear();
         }
     }
 
 #ifdef __ANDROID__
-    LOG_ALWAYS_FATAL_IF(!opened.ok(), "Binder driver '%s' could not be opened. Terminating: %s",
-                        driver, opened.error().message().c_str());
+    LOG_ALWAYS_FATAL_IF(!opened.ok(),
+                        "Binder driver '%s' could not be opened. Error: %s. Terminating.",
+                        error.c_str(), driver);
 #endif
 
     if (opened.ok()) {
-        mDriverFD = opened.value();
+        mDriverFD = opened.release();
     }
 }
 

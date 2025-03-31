@@ -18,6 +18,7 @@
 
 #include <pthread.h>
 
+#include "android-base/properties.h"
 #include "snapuserd_core.h"
 #include "utility.h"
 
@@ -29,11 +30,13 @@ using namespace android::dm;
 using android::base::unique_fd;
 
 ReadAhead::ReadAhead(const std::string& cow_device, const std::string& backing_device,
-                     const std::string& misc_name, std::shared_ptr<SnapshotHandler> snapuserd) {
+                     const std::string& misc_name, std::shared_ptr<SnapshotHandler> snapuserd,
+                     uint32_t cow_op_merge_size) {
     cow_device_ = cow_device;
     backing_store_device_ = backing_device;
     misc_name_ = misc_name;
     snapuserd_ = snapuserd;
+    cow_op_merge_size_ = cow_op_merge_size;
 }
 
 void ReadAhead::CheckOverlap(const CowOperation* cow_op) {
@@ -62,8 +65,11 @@ int ReadAhead::PrepareNextReadAhead(uint64_t* source_offset, int* pending_ops,
                                     std::vector<uint64_t>& blocks,
                                     std::vector<const CowOperation*>& xor_op_vec) {
     int num_ops = *pending_ops;
-    int nr_consecutive = 0;
+    if (cow_op_merge_size_ != 0) {
+        num_ops = std::min(static_cast<int>(cow_op_merge_size_), *pending_ops);
+    }
 
+    int nr_consecutive = 0;
     bool is_ops_present = (!RAIterDone() && num_ops);
 
     if (!is_ops_present) {
@@ -77,7 +83,7 @@ int ReadAhead::PrepareNextReadAhead(uint64_t* source_offset, int* pending_ops,
         SNAP_LOG(ERROR) << "PrepareNextReadAhead operation has no source offset: " << *cow_op;
         return nr_consecutive;
     }
-    if (cow_op->type == kCowXorOp) {
+    if (cow_op->type() == kCowXorOp) {
         xor_op_vec.push_back(cow_op);
     }
 
@@ -106,7 +112,7 @@ int ReadAhead::PrepareNextReadAhead(uint64_t* source_offset, int* pending_ops,
             break;
         }
 
-        if (op->type == kCowXorOp) {
+        if (op->type() == kCowXorOp) {
             xor_op_vec.push_back(op);
         }
 
@@ -206,6 +212,7 @@ bool ReadAhead::ReconstructDataFromCow() {
         return false;
     }
 
+    snapuserd_->RaThreadStarted();
     SNAP_LOG(INFO) << "ReconstructDataFromCow success";
     notify_read_ahead_failed.Cancel();
     return true;
@@ -716,9 +723,13 @@ bool ReadAhead::ReadAheadIOStart() {
     total_ra_blocks_completed_ += total_blocks_merged_;
     snapuserd_->SetMergedBlockCountForNextCommit(total_blocks_merged_);
 
-    // Flush the data only if we have a overlapping blocks in the region
+    // Flush the scratch data - Technically, we should flush only for overlapping
+    // blocks; However, since this region is mmap'ed, the dirty pages can still
+    // get flushed to disk at any random point in time. Instead, make sure
+    // the data in scratch is in the correct state before merge thread resumes.
+    //
     // Notify the Merge thread to resume merging this window
-    if (!snapuserd_->ReadAheadIOCompleted(overlap_)) {
+    if (!snapuserd_->ReadAheadIOCompleted(true)) {
         SNAP_LOG(ERROR) << "ReadAheadIOCompleted failed...";
         snapuserd_->ReadAheadIOFailed();
         return false;
@@ -773,8 +784,12 @@ bool ReadAhead::RunThread() {
 
     InitializeIouring();
 
-    if (!SetThreadPriority(kNiceValueForMergeThreads)) {
+    if (!SetThreadPriority(ANDROID_PRIORITY_BACKGROUND)) {
         SNAP_PLOG(ERROR) << "Failed to set thread priority";
+    }
+
+    if (!SetProfiles({"CPUSET_SP_BACKGROUND"})) {
+        SNAP_PLOG(ERROR) << "Failed to assign task profile to readahead thread";
     }
 
     SNAP_LOG(INFO) << "ReadAhead processing.";

@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <unordered_map>
 
 #include "TimeStats.h"
@@ -68,6 +69,8 @@ SurfaceflingerStatsLayerInfo_GameMode gameModeToProto(GameMode gameMode) {
             return SurfaceflingerStatsLayerInfo::GAME_MODE_PERFORMANCE;
         case GameMode::Battery:
             return SurfaceflingerStatsLayerInfo::GAME_MODE_BATTERY;
+        case GameMode::Custom:
+            return SurfaceflingerStatsLayerInfo::GAME_MODE_CUSTOM;
         default:
             return SurfaceflingerStatsLayerInfo::GAME_MODE_UNSPECIFIED;
     }
@@ -88,7 +91,7 @@ SurfaceflingerStatsLayerInfo_SetFrameRateVote frameRateVoteToProto(
 }
 } // namespace
 
-bool TimeStats::populateGlobalAtom(std::string* pulledData) {
+bool TimeStats::populateGlobalAtom(std::vector<uint8_t>* pulledData) {
     std::lock_guard<std::mutex> lock(mMutex);
 
     if (mTimeStats.statsStartLegacy == 0) {
@@ -103,7 +106,8 @@ bool TimeStats::populateGlobalAtom(std::string* pulledData) {
         atom->set_client_composition_frames(mTimeStats.clientCompositionFramesLegacy);
         atom->set_display_on_millis(mTimeStats.displayOnTimeLegacy);
         atom->set_animation_millis(mTimeStats.presentToPresentLegacy.totalTime());
-        atom->set_event_connection_count(mTimeStats.displayEventConnectionsCountLegacy);
+        // Deprecated
+        atom->set_event_connection_count(0);
         *atom->mutable_frame_duration() =
                 histogramToProto(mTimeStats.frameDurationLegacy.hist, mMaxPulledHistogramBuckets);
         *atom->mutable_render_engine_timing() =
@@ -136,10 +140,11 @@ bool TimeStats::populateGlobalAtom(std::string* pulledData) {
     // Always clear data.
     clearGlobalLocked();
 
-    return atomList.SerializeToString(pulledData);
+    pulledData->resize(atomList.ByteSizeLong());
+    return atomList.SerializeToArray(pulledData->data(), atomList.ByteSizeLong());
 }
 
-bool TimeStats::populateLayerAtom(std::string* pulledData) {
+bool TimeStats::populateLayerAtom(std::vector<uint8_t>* pulledData) {
     std::lock_guard<std::mutex> lock(mMutex);
 
     std::vector<TimeStatsHelper::TimeStatsLayer*> dumpStats;
@@ -176,6 +181,12 @@ bool TimeStats::populateLayerAtom(std::string* pulledData) {
         if (present2PresentHist != layer->deltas.cend()) {
             *atom->mutable_present_to_present() =
                     histogramToProto(present2PresentHist->second.hist, mMaxPulledHistogramBuckets);
+        }
+        const auto& present2PresentDeltaHist = layer->deltas.find("present2presentDelta");
+        if (present2PresentDeltaHist != layer->deltas.cend()) {
+            *atom->mutable_present_to_present_delta() =
+                    histogramToProto(present2PresentDeltaHist->second.hist,
+                                     mMaxPulledHistogramBuckets);
         }
         const auto& post2presentHist = layer->deltas.find("post2present");
         if (post2presentHist != layer->deltas.cend()) {
@@ -227,7 +238,8 @@ bool TimeStats::populateLayerAtom(std::string* pulledData) {
     // Always clear data.
     clearLayersLocked();
 
-    return atomList.SerializeToString(pulledData);
+    pulledData->resize(atomList.ByteSizeLong());
+    return atomList.SerializeToArray(pulledData->data(), atomList.ByteSizeLong());
 }
 
 TimeStats::TimeStats() : TimeStats(std::nullopt, std::nullopt) {}
@@ -243,7 +255,7 @@ TimeStats::TimeStats(std::optional<size_t> maxPulledLayers,
     }
 }
 
-bool TimeStats::onPullAtom(const int atomId, std::string* pulledData) {
+bool TimeStats::onPullAtom(const int atomId, std::vector<uint8_t>* pulledData) {
     bool success = false;
     if (atomId == 10062) { // SURFACEFLINGER_STATS_GLOBAL_INFO
         success = populateGlobalAtom(pulledData);
@@ -345,16 +357,6 @@ void TimeStats::incrementRefreshRateSwitches() {
     mTimeStats.refreshRateSwitchesLegacy++;
 }
 
-void TimeStats::recordDisplayEventConnectionCount(int32_t count) {
-    if (!mEnabled.load()) return;
-
-    ATRACE_CALL();
-
-    std::lock_guard<std::mutex> lock(mMutex);
-    mTimeStats.displayEventConnectionsCountLegacy =
-            std::max(mTimeStats.displayEventConnectionsCountLegacy, count);
-}
-
 static int32_t toMs(nsecs_t nanos) {
     int64_t millis =
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::nanoseconds(nanos))
@@ -448,6 +450,7 @@ void TimeStats::flushAvailableRecordsToStatsLocked(int32_t layerId, Fps displayR
 
     LayerRecord& layerRecord = mTimeStatsTracker[layerId];
     TimeRecord& prevTimeRecord = layerRecord.prevTimeRecord;
+    std::optional<int32_t>& prevPresentToPresentMs = layerRecord.prevPresentToPresentMs;
     std::deque<TimeRecord>& timeRecords = layerRecord.timeRecords;
     const int32_t refreshRateBucket =
             clampToNearestBucket(displayRefreshRate, REFRESH_RATE_BUCKET_WIDTH);
@@ -525,6 +528,12 @@ void TimeStats::flushAvailableRecordsToStatsLocked(int32_t layerId, Fps displayR
             ALOGV("[%d]-[%" PRIu64 "]-present2present[%d]", layerId,
                   timeRecords[0].frameTime.frameNumber, presentToPresentMs);
             timeStatsLayer.deltas["present2present"].insert(presentToPresentMs);
+            if (prevPresentToPresentMs) {
+                const int32_t presentToPresentDeltaMs =
+                        std::abs(presentToPresentMs - *prevPresentToPresentMs);
+                timeStatsLayer.deltas["present2presentDelta"].insert(presentToPresentDeltaMs);
+            }
+            prevPresentToPresentMs = presentToPresentMs;
         }
         prevTimeRecord = timeRecords[0];
         timeRecords.pop_front();
@@ -1054,7 +1063,6 @@ void TimeStats::clearGlobalLocked() {
     mTimeStats.compositionStrategyPredictedLegacy = 0;
     mTimeStats.compositionStrategyPredictionSucceededLegacy = 0;
     mTimeStats.refreshRateSwitchesLegacy = 0;
-    mTimeStats.displayEventConnectionsCountLegacy = 0;
     mTimeStats.displayOnTimeLegacy = 0;
     mTimeStats.presentToPresentLegacy.hist.clear();
     mTimeStats.frameDurationLegacy.hist.clear();

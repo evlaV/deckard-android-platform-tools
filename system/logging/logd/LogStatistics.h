@@ -494,13 +494,6 @@ class LogStatistics {
     // Subtract the total size of the element from statistics.
     void Subtract(LogStatisticsElement entry) EXCLUDES(lock_);
 
-    void WorstTwoUids(log_id id, size_t threshold, int* worst, size_t* worst_sizes,
-                      size_t* second_worst_sizes) const EXCLUDES(lock_);
-    void WorstTwoTags(size_t threshold, int* worst, size_t* worst_sizes,
-                      size_t* second_worst_sizes) const EXCLUDES(lock_);
-    void WorstTwoSystemPids(log_id id, size_t worst_uid_sizes, int* worst,
-                            size_t* second_worst_sizes) const EXCLUDES(lock_);
-
     bool ShouldPrune(log_id id, unsigned long max_size, unsigned long* prune_rows) const
             EXCLUDES(lock_);
 
@@ -537,9 +530,6 @@ class LogStatistics {
     }
 
   private:
-    template <typename TKey, typename TEntry>
-    void WorstTwoWithThreshold(const LogHashtable<TKey, TEntry>& table, size_t threshold,
-                               int* worst, size_t* worst_sizes, size_t* second_worst_sizes) const;
     template <typename TKey, typename TEntry>
     std::string FormatTable(const LogHashtable<TKey, TEntry>& table, uid_t uid, pid_t pid,
                             const std::string& name = std::string(""),

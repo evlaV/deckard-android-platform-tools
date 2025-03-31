@@ -180,22 +180,8 @@ cc_library {
         "//apex_available:platform",
         "com.android.adbd",
     ],
-}
-
-//###########################
-
-cc_binary {
-    name: "dnssd",
-    defaults: ["mdnsresponder_default_cflags"],
-    srcs: [
-        "Clients/dns-sd.c",
-        "Clients/ClientCommon.c",
-    ],
-
-    system_shared_libs: ["libc", "libdl"],
-    shared_libs: [
-        "libmdnssd",
-        "libcutils",
-        "liblog",
+    visibility: [
+        "//bootable/recovery/minadbd:__subpackages__",
+        "//packages/modules/adb:__subpackages__",
     ],
 }

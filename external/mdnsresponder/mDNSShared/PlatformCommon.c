@@ -66,7 +66,12 @@ mDNSexport void mDNSPlatformSourceAddrForDest(mDNSAddr *const src, const mDNSAdd
 		addr.a6.sin6_addr     = *(struct in6_addr*)&dst->ip.v6;
 		addr.a6.sin6_scope_id = 0;
 		}
-	else return;
+	else
+		{
+		// __ANDROID__ : Fix fd leak
+		goto exit;
+		}
+
 
 	if ((connect(sock, &addr.s, inner_len)) < 0)
 		{ LogMsg("mDNSPlatformSourceAddrForDest: connect %#a failed errno %d (%s)", dst, errno, strerror(errno)); goto exit; }

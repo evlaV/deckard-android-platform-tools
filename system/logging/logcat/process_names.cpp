@@ -73,6 +73,11 @@ std::string ProcessNames::Get(uint64_t pid) {
 
     // Cache miss!
     std::string name = Resolve(pid);
-    cache.put(pid, name);
+    // When an app starts, after it forks from zygote process, the process name remains
+    // zygote/zygote64, then <pre-initialized>, then the package/process name is set.
+    // We don't cache until we know the final value.
+    if (name != "<pre-initialized>" && !name.starts_with("zygote")) {
+        cache.put(pid, name);
+    }
     return name;
 }

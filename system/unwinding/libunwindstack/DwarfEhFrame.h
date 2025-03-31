@@ -18,6 +18,8 @@
 
 #include <stdint.h>
 
+#include <memory>
+
 #include <unwindstack/DwarfSection.h>
 #include <unwindstack/Memory.h>
 
@@ -26,7 +28,7 @@ namespace unwindstack {
 template <typename AddressType>
 class DwarfEhFrame : public DwarfSectionImpl<AddressType> {
  public:
-  DwarfEhFrame(Memory* memory) : DwarfSectionImpl<AddressType>(memory) {}
+  DwarfEhFrame(std::shared_ptr<Memory>& memory) : DwarfSectionImpl<AddressType>(memory) {}
   virtual ~DwarfEhFrame() = default;
 
   uint64_t GetCieOffsetFromFde32(uint32_t pointer) override {

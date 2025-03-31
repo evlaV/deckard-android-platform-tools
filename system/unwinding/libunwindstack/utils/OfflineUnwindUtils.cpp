@@ -39,12 +39,14 @@
 #include <unwindstack/JitDebug.h>
 #include <unwindstack/MachineArm.h>
 #include <unwindstack/MachineArm64.h>
+#include <unwindstack/MachineRiscv64.h>
 #include <unwindstack/MachineX86.h>
 #include <unwindstack/MachineX86_64.h>
 #include <unwindstack/Maps.h>
 #include <unwindstack/Regs.h>
 #include <unwindstack/RegsArm.h>
 #include <unwindstack/RegsArm64.h>
+#include <unwindstack/RegsRiscv64.h>
 #include <unwindstack/RegsX86.h>
 #include <unwindstack/RegsX86_64.h>
 #include <unwindstack/Unwinder.h>
@@ -382,20 +384,16 @@ bool ReadRegs(RegsImpl<AddressType>* regs,
   while (!feof(fp)) {
     uint64_t value;
     char reg_name[100];
-    if (fscanf(fp, "%s %" SCNx64 "\n", reg_name, &value) != 2) {
+    if (fscanf(fp, "%[^:]: %" SCNx64 "\n", reg_name, &value) != 2) {
       err_stream << "Failed to read in register name/values from '" << offline_files_path
                  << "regs.txt'.";
       *error_msg = err_stream.str();
       return false;
     }
     std::string name(reg_name);
-    if (!name.empty()) {
-      // Remove the : from the end.
-      name.resize(name.size() - 1);
-    }
     auto entry = name_to_reg.find(name);
     if (entry == name_to_reg.end()) {
-      err_stream << "Unknown register named " << reg_name;
+      err_stream << "Unknown register named " << name;
       *error_msg = err_stream.str();
       return false;
     }
@@ -424,6 +422,13 @@ bool OfflineUnwindUtils::CreateRegs(ArchEnum arch, std::string* error_msg,
       RegsArm64* regs_impl = new RegsArm64;
       regs.reset(regs_impl);
       if (!ReadRegs<uint64_t>(regs_impl, arm64_regs_, error_msg, offline_files_path)) return false;
+      break;
+    }
+    case ARCH_RISCV64: {
+      RegsRiscv64* regs_impl = new RegsRiscv64;
+      regs.reset(regs_impl);
+      if (!ReadRegs<uint64_t>(regs_impl, riscv64_regs_, error_msg, offline_files_path))
+        return false;
       break;
     }
     case ARCH_X86: {
@@ -458,7 +463,7 @@ const std::string& OfflineUnwindUtils::GetAdjustedSampleName(
 
 bool OfflineUnwindUtils::IsValidUnwindSample(const std::string& sample_name,
                                              std::string* error_msg) const {
-  if (samples_.find(sample_name) == samples_.end()) {
+  if (!samples_.contains(sample_name)) {
     std::stringstream err_stream;
     err_stream << "Invalid sample name (offline file directory) '" << sample_name << "'.";
     if (sample_name == kSingleSample) {
@@ -491,6 +496,20 @@ std::unordered_map<std::string, uint32_t> OfflineUnwindUtils::arm64_regs_ = {
     {"x27", ARM64_REG_R27},    {"x28", ARM64_REG_R28}, {"x29", ARM64_REG_R29},
     {"sp", ARM64_REG_SP},      {"lr", ARM64_REG_LR},   {"pc", ARM64_REG_PC},
     {"pst", ARM64_REG_PSTATE},
+};
+
+std::unordered_map<std::string, uint32_t> OfflineUnwindUtils::riscv64_regs_ = {
+    {"pc", RISCV64_REG_PC},   {"ra", RISCV64_REG_RA}, {"sp", RISCV64_REG_SP},
+    {"gp", RISCV64_REG_GP},   {"tp", RISCV64_REG_TP}, {"a0", RISCV64_REG_A0},
+    {"a1", RISCV64_REG_A1},   {"a2", RISCV64_REG_A2}, {"a3", RISCV64_REG_A3},
+    {"a4", RISCV64_REG_A4},   {"a5", RISCV64_REG_A5}, {"a6", RISCV64_REG_A6},
+    {"a7", RISCV64_REG_A7},   {"s0", RISCV64_REG_S0}, {"s1", RISCV64_REG_S1},
+    {"s2", RISCV64_REG_S2},   {"s3", RISCV64_REG_S3}, {"s4", RISCV64_REG_S4},
+    {"s5", RISCV64_REG_S5},   {"s6", RISCV64_REG_S6}, {"s7", RISCV64_REG_S7},
+    {"s8", RISCV64_REG_S8},   {"s9", RISCV64_REG_S9}, {"s10", RISCV64_REG_S10},
+    {"s11", RISCV64_REG_S11}, {"t0", RISCV64_REG_T0}, {"t1", RISCV64_REG_T1},
+    {"t2", RISCV64_REG_T2},   {"t3", RISCV64_REG_T3}, {"t4", RISCV64_REG_T4},
+    {"t5", RISCV64_REG_T5},   {"t6", RISCV64_REG_T6}, {"vlenb", RISCV64_REG_VLENB},
 };
 
 std::unordered_map<std::string, uint32_t> OfflineUnwindUtils::x86_regs_ = {

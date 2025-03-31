@@ -83,7 +83,7 @@ ssize_t ReceiveFileDescriptorVector(borrowed_fd sockfd, void* data, size_t len, 
   }
 
   alignas(struct cmsghdr) char cmsg_buf[cmsg_space];
-  iovec iov = {.iov_base = const_cast<void*>(data), .iov_len = len};
+  iovec iov = {.iov_base = data, .iov_len = len};
   msghdr msg = {
       .msg_name = nullptr,
       .msg_namelen = 0,

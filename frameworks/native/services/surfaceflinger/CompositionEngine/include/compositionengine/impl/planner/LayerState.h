@@ -72,6 +72,8 @@ enum class LayerStateField : uint32_t {
     SolidColor            = 1u << 16,
     BackgroundBlurRadius  = 1u << 17,
     BlurRegions           = 1u << 18,
+    HasProtectedContent   = 1u << 19,
+    CachingHint           = 1u << 20,
 };
 // clang-format on
 
@@ -225,6 +227,7 @@ public:
     // Returns the bit-set of differing fields between this LayerState and another LayerState.
     // This bit-set is based on NonUniqueFields only, and excludes GraphicBuffers.
     ftl::Flags<LayerStateField> getDifferingFields(const LayerState& other) const;
+    bool isSourceCropSizeEqual(const LayerState& other) const;
 
     compositionengine::OutputLayer* getOutputLayer() const { return mOutputLayer; }
     int32_t getId() const { return mId.get(); }
@@ -245,14 +248,15 @@ public:
 
     ui::Dataspace getDataspace() const { return mOutputDataspace.get(); }
 
-    bool isProtected() const {
-        return getOutputLayer()->getLayerFE().getCompositionState()->hasProtectedContent;
-    }
+    float getHdrSdrRatio() const {
+        return getOutputLayer()->getLayerFE().getCompositionState()->currentHdrSdrRatio;
+    };
 
-    bool hasSolidColorCompositionType() const {
-        return getOutputLayer()->getLayerFE().getCompositionState()->compositionType ==
-                aidl::android::hardware::graphics::composer3::Composition::SOLID_COLOR;
-    }
+    wp<GraphicBuffer> getBuffer() const { return mBuffer.get(); }
+
+    bool isProtected() const { return mIsProtected.get(); }
+
+    gui::CachingHint getCachingHint() const { return mCachingHint.get(); }
 
     float getFps() const { return getOutputLayer()->getLayerFE().getCompositionState()->fps; }
 
@@ -482,7 +486,19 @@ private:
                                       return hash;
                                   }};
 
-    static const constexpr size_t kNumNonUniqueFields = 17;
+    OutputLayerState<bool, LayerStateField::HasProtectedContent> mIsProtected{[](auto layer) {
+        return layer->getLayerFE().getCompositionState()->hasProtectedContent;
+    }};
+
+    OutputLayerState<gui::CachingHint, LayerStateField::CachingHint>
+            mCachingHint{[](auto layer) {
+                             return layer->getLayerFE().getCompositionState()->cachingHint;
+                         },
+                         [](const gui::CachingHint& cachingHint) {
+                             return std::vector<std::string>{toString(cachingHint)};
+                         }};
+
+    static const constexpr size_t kNumNonUniqueFields = 19;
 
     std::array<StateInterface*, kNumNonUniqueFields> getNonUniqueFields() {
         std::array<const StateInterface*, kNumNonUniqueFields> constFields =
@@ -496,13 +512,11 @@ private:
     }
 
     std::array<const StateInterface*, kNumNonUniqueFields> getNonUniqueFields() const {
-        return {
-                &mDisplayFrame, &mSourceCrop,     &mBufferTransform,      &mBlendMode,
+        return {&mDisplayFrame, &mSourceCrop,     &mBufferTransform,      &mBlendMode,
                 &mAlpha,        &mLayerMetadata,  &mVisibleRegion,        &mOutputDataspace,
                 &mPixelFormat,  &mColorTransform, &mCompositionType,      &mSidebandStream,
                 &mBuffer,       &mSolidColor,     &mBackgroundBlurRadius, &mBlurRegions,
-                &mFrameNumber,
-        };
+                &mFrameNumber,  &mIsProtected,    &mCachingHint};
     }
 };
 

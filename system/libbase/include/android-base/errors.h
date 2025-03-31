@@ -139,8 +139,10 @@ struct OkOrFail {
   // template <typename U>
   // operator Result<U, E>()&& { return val_.error(); }
 
-  // Returns the string representation of the fail value.
-  static std::string ErrorMessage(const T& v);
+  // And there needs to be a method that returns the string representation of the fail value.
+  // static const std::string& ErrorMessage(const T& v);
+  // or
+  // static std::string ErrorMessage(const T& v);
 };
 
 }  // namespace base

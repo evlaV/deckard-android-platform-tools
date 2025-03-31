@@ -80,8 +80,11 @@ public:
     void setReleasedLayers(ReleasedLayers&&) override;
 
     void prepare(const CompositionRefreshArgs&, LayerFESet&) override;
-    void present(const CompositionRefreshArgs&) override;
+    ftl::Future<std::monostate> present(const CompositionRefreshArgs&) override;
+    bool supportsOffloadPresent() const override { return false; }
+    void offloadPresentNextFrame() override;
 
+    void uncacheBuffers(const std::vector<uint64_t>& bufferIdsToUncache) override;
     void rebuildLayerStacks(const CompositionRefreshArgs&, LayerFESet&) override;
     void collectVisibleLayers(const CompositionRefreshArgs&,
                               compositionengine::Output::CoverageState&) override;
@@ -89,21 +92,19 @@ public:
                                     compositionengine::Output::CoverageState&) override;
     void setReleasedLayers(const compositionengine::CompositionRefreshArgs&) override;
 
-    void updateLayerStateFromFE(const CompositionRefreshArgs&) const override;
     void updateCompositionState(const compositionengine::CompositionRefreshArgs&) override;
     void planComposition() override;
     void writeCompositionState(const compositionengine::CompositionRefreshArgs&) override;
     void updateColorProfile(const compositionengine::CompositionRefreshArgs&) override;
     void beginFrame() override;
     void prepareFrame() override;
-    GpuCompositionResult prepareFrameAsync(const CompositionRefreshArgs&) override;
+    GpuCompositionResult prepareFrameAsync() override;
     void devOptRepaintFlash(const CompositionRefreshArgs&) override;
-    void finishFrame(const CompositionRefreshArgs&, GpuCompositionResult&&) override;
+    void finishFrame(GpuCompositionResult&&) override;
     std::optional<base::unique_fd> composeSurfaces(const Region&,
-                                                   const compositionengine::CompositionRefreshArgs&,
                                                    std::shared_ptr<renderengine::ExternalTexture>,
                                                    base::unique_fd&) override;
-    void postFramebuffer() override;
+    void presentFrameAndReleaseLayers() override;
     void renderCachedSets(const CompositionRefreshArgs&) override;
     void cacheClientCompositionRequests(uint32_t) override;
     bool canPredictCompositionStrategy(const CompositionRefreshArgs&) override;
@@ -122,6 +123,7 @@ public:
     virtual std::future<bool> chooseCompositionStrategyAsync(
             std::optional<android::HWComposer::DeviceRequestedChanges>*);
     virtual void resetCompositionStrategy();
+    virtual ftl::Future<std::monostate> presentFrameAndReleaseLayersAsync();
 
 protected:
     std::unique_ptr<compositionengine::OutputLayer> createOutputLayer(const sp<LayerFE>&) const;
@@ -134,10 +136,12 @@ protected:
     };
     void applyCompositionStrategy(const std::optional<DeviceRequestedChanges>&) override{};
     bool getSkipColorTransform() const override;
-    compositionengine::Output::FrameFences presentAndGetFrameFences() override;
+    compositionengine::Output::FrameFences presentFrame() override;
+    virtual renderengine::DisplaySettings generateClientCompositionDisplaySettings(
+            const std::shared_ptr<renderengine::ExternalTexture>& buffer) const;
     std::vector<LayerFE::LayerSettings> generateClientCompositionRequests(
-          bool supportsProtectedContent, ui::Dataspace outputDataspace,
-          std::vector<LayerFE*> &outLayerFEs) override;
+            bool supportsProtectedContent, ui::Dataspace outputDataspace,
+            std::vector<LayerFE*>& outLayerFEs) override;
     void appendRegionFlashRequests(const Region&, std::vector<LayerFE::LayerSettings>&) override;
     void setExpensiveRenderingExpected(bool enabled) override;
     void setHintSessionGpuFence(std::unique_ptr<FenceTime>&& gpuFence) override;
@@ -154,15 +158,21 @@ protected:
 
     bool mustRecompose() const;
 
+    const std::string& getNamePlusId() const { return mNamePlusId; }
+
 private:
     void dirtyEntireOutput();
+    void updateCompositionStateForBorder(const compositionengine::CompositionRefreshArgs&);
     compositionengine::OutputLayer* findLayerRequestingBackgroundComposition() const;
     void finishPrepareFrame();
     ui::Dataspace getBestDataspace(ui::Dataspace*, bool*) const;
     compositionengine::Output::ColorProfile pickColorProfile(
             const compositionengine::CompositionRefreshArgs&) const;
+    void updateHwcAsyncWorker();
+    float getHdrSdrRatio(const std::shared_ptr<renderengine::ExternalTexture>& buffer) const;
 
     std::string mName;
+    std::string mNamePlusId;
 
     std::unique_ptr<compositionengine::DisplayColorProfile> mDisplayColorProfile;
     std::unique_ptr<compositionengine::RenderSurface> mRenderSurface;
@@ -172,6 +182,9 @@ private:
     std::unique_ptr<ClientCompositionRequestCache> mClientCompositionRequestCache;
     std::unique_ptr<planner::Planner> mPlanner;
     std::unique_ptr<HwcAsyncWorker> mHwComposerAsyncWorker;
+
+    bool mPredictCompositionStrategy = false;
+    bool mOffloadPresent = false;
 
     // Whether the content must be recomposed this frame.
     bool mMustRecompose = false;

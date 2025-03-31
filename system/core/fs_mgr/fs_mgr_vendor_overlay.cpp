@@ -36,7 +36,7 @@ namespace {
 
 // The order of the list means the priority to show the files in the directory.
 // The last one has the highest priority.
-const std::vector<const std::string> kVendorOverlaySourceDirs = {
+const std::vector<std::string> kVendorOverlaySourceDirs = {
         "/system/vendor_overlay/",
         "/product/vendor_overlay/",
 };
@@ -112,6 +112,7 @@ bool fs_mgr_vendor_overlay_mount_all() {
     // properties are loaded.
     static const auto vndk_version = android::base::GetProperty(kVndkVersionPropertyName, "");
     if (vndk_version.empty()) {
+        // Vendor overlay is disabled from VNDK deprecated devices.
         LINFO << "vendor overlay: vndk version not defined";
         return false;
     }

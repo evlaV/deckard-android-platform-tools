@@ -17,31 +17,35 @@
 //! ProfCollect configurations.
 
 use anyhow::Result;
-use lazy_static::lazy_static;
 use macaddr::MacAddr6;
+use once_cell::sync::Lazy;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs::{read_dir, remove_file};
 use std::path::Path;
+use std::process::Command;
 use std::str::FromStr;
 use std::time::Duration;
 
-const PROFCOLLECT_CONFIG_NAMESPACE: &str = "profcollect_native_boot";
+const PROFCOLLECT_CONFIG_NAMESPACE: &str = "aconfig_flags.profcollect_native_boot";
 const PROFCOLLECT_NODE_ID_PROPERTY: &str = "persist.profcollectd.node_id";
 
-const DEFAULT_BINARY_FILTER: &str = "^/(system|apex/.+)/(bin|lib|lib64)/.+";
+const DEFAULT_BINARY_FILTER: &str = "(^/(system|apex/.+|vendor)/(bin|lib64)/.+)|\
+    (^/data/app/.+\\.so$)|kernel.kallsyms";
 pub const REPORT_RETENTION_SECS: u64 = 14 * 24 * 60 * 60; // 14 days.
 
 // Static configs that cannot be changed.
-lazy_static! {
-    pub static ref TRACE_OUTPUT_DIR: &'static Path = Path::new("/data/misc/profcollectd/trace/");
-    pub static ref PROFILE_OUTPUT_DIR: &'static Path = Path::new("/data/misc/profcollectd/output/");
-    pub static ref REPORT_OUTPUT_DIR: &'static Path = Path::new("/data/misc/profcollectd/report/");
-    pub static ref CONFIG_FILE: &'static Path =
-        Path::new("/data/misc/profcollectd/output/config.json");
-    pub static ref LOG_FILE: &'static Path = Path::new("/data/misc/profcollectd/output/trace.log");
-}
+pub static TRACE_OUTPUT_DIR: Lazy<&'static Path> =
+    Lazy::new(|| Path::new("/data/misc/profcollectd/trace/"));
+pub static PROFILE_OUTPUT_DIR: Lazy<&'static Path> =
+    Lazy::new(|| Path::new("/data/misc/profcollectd/output/"));
+pub static REPORT_OUTPUT_DIR: Lazy<&'static Path> =
+    Lazy::new(|| Path::new("/data/misc/profcollectd/report/"));
+pub static CONFIG_FILE: Lazy<&'static Path> =
+    Lazy::new(|| Path::new("/data/misc/profcollectd/output/config.json"));
+pub static LOG_FILE: Lazy<&'static Path> =
+    Lazy::new(|| Path::new("/data/misc/profcollectd/output/trace.log"));
 
 /// Dynamic configs, stored in config.json.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Debug)]
@@ -54,12 +58,12 @@ pub struct Config {
     pub build_fingerprint: String,
     /// Interval between collections.
     pub collection_interval: Duration,
-    /// Length of time each collection lasts for.
-    pub sampling_period: Duration,
     /// An optional filter to limit which binaries to or not to profile.
     pub binary_filter: String,
     /// Maximum size of the trace directory.
-    pub max_trace_limit: u64,
+    pub max_trace_limit_mb: u64,
+    /// The kernel release version
+    pub kernel_release: String,
 }
 
 impl Config {
@@ -72,19 +76,16 @@ impl Config {
                 "collection_interval",
                 600,
             )?),
-            sampling_period: Duration::from_millis(get_device_config("sampling_period", 500)?),
             binary_filter: get_device_config("binary_filter", DEFAULT_BINARY_FILTER.to_string())?,
-            max_trace_limit: get_device_config(
-                "max_trace_limit",
-                /* 512MB */ 512 * 1024 * 1024,
-            )?,
+            max_trace_limit_mb: get_device_config("max_trace_limit_mb", 768)?,
+            kernel_release: get_kernel_release(),
         })
     }
 }
 
-impl ToString for Config {
-    fn to_string(&self) -> String {
-        serde_json::to_string(self).expect("Failed to deserialise configuration.")
+impl std::fmt::Display for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string(self).expect("Failed to deserialise configuration."))
     }
 }
 
@@ -115,12 +116,16 @@ where
     T::Err: Error + Send + Sync + 'static,
 {
     let default_value = default_value.to_string();
-    let config = flags_rust::GetServerConfigurableFlag(
-        PROFCOLLECT_CONFIG_NAMESPACE,
-        key,
-        &default_value,
-    );
+    let config =
+        flags_rust::GetServerConfigurableFlag(PROFCOLLECT_CONFIG_NAMESPACE, key, &default_value);
     Ok(T::from_str(&config)?)
+}
+
+pub fn get_sampling_period() -> Duration {
+    let default_period = 1500;
+    Duration::from_millis(
+        get_device_config("sampling_period", default_period).unwrap_or(default_period),
+    )
 }
 
 fn get_property<T>(key: &str, default_value: T) -> Result<T>
@@ -147,6 +152,15 @@ fn generate_random_node_id() -> MacAddr6 {
     MacAddr6::from(node_id)
 }
 
+fn get_kernel_release() -> String {
+    match Command::new("uname").args(["-r"]).output() {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 pub fn clear_data() -> Result<()> {
     fn remove_files(path: &Path) -> Result<()> {
         read_dir(path)?
@@ -160,5 +174,13 @@ pub fn clear_data() -> Result<()> {
     remove_files(&TRACE_OUTPUT_DIR)?;
     remove_files(&PROFILE_OUTPUT_DIR)?;
     remove_files(&REPORT_OUTPUT_DIR)?;
+    Ok(())
+}
+pub fn clear_processed_files() -> Result<()> {
+    read_dir(&PROFILE_OUTPUT_DIR as &Path)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|e| e.is_file() && e != (&CONFIG_FILE as &Path))
+        .try_for_each(remove_file)?;
     Ok(())
 }

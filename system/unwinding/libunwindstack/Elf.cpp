@@ -51,7 +51,7 @@ bool Elf::Init() {
     return false;
   }
 
-  interface_.reset(CreateInterfaceFromMemory(memory_.get()));
+  interface_.reset(CreateInterfaceFromMemory(memory_));
   if (!interface_) {
     return false;
   }
@@ -73,8 +73,8 @@ void Elf::InitGnuDebugdata() {
     return;
   }
 
-  gnu_debugdata_memory_ = interface_->CreateGnuDebugdataMemory();
-  gnu_debugdata_interface_.reset(CreateInterfaceFromMemory(gnu_debugdata_memory_.get()));
+  auto memory = interface_->CreateGnuDebugdataMemory();
+  gnu_debugdata_interface_.reset(CreateInterfaceFromMemory(memory));
   ElfInterface* gnu = gnu_debugdata_interface_.get();
   if (gnu == nullptr) {
     return;
@@ -87,8 +87,6 @@ void Elf::InitGnuDebugdata() {
     gnu->InitHeaders();
     interface_->SetGnuDebugdataInterface(gnu);
   } else {
-    // Free all of the memory associated with the gnu_debugdata section.
-    gnu_debugdata_memory_.reset(nullptr);
     gnu_debugdata_interface_.reset(nullptr);
   }
 }
@@ -280,8 +278,8 @@ bool Elf::GetTextRange(uint64_t* addr, uint64_t* size) {
   return false;
 }
 
-ElfInterface* Elf::CreateInterfaceFromMemory(Memory* memory) {
-  if (!IsValidElf(memory)) {
+ElfInterface* Elf::CreateInterfaceFromMemory(std::shared_ptr<Memory>& memory) {
+  if (!IsValidElf(memory.get())) {
     return nullptr;
   }
 

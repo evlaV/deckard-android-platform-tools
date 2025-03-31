@@ -177,6 +177,7 @@ class OfflineUnwindUtils {
 
   static std::unordered_map<std::string, uint32_t> arm_regs_;
   static std::unordered_map<std::string, uint32_t> arm64_regs_;
+  static std::unordered_map<std::string, uint32_t> riscv64_regs_;
   static std::unordered_map<std::string, uint32_t> x86_regs_;
   static std::unordered_map<std::string, uint32_t> x86_64_regs_;
 

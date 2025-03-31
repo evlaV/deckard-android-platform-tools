@@ -53,7 +53,10 @@ enum Riscv64Reg : uint16_t {
   RISCV64_REG_T4,
   RISCV64_REG_T5,
   RISCV64_REG_T6,
-  RISCV64_REG_MAX,
+  RISCV64_REG_REAL_COUNT,
+  // This is the last real register, vlenb is a special register value.
+  RISCV64_REG_VLENB = RISCV64_REG_REAL_COUNT,
+  RISCV64_REG_COUNT,
 };
 
 }  // namespace unwindstack

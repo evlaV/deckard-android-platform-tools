@@ -20,11 +20,14 @@
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 //#define LOG_NDEBUG 0
 
+#include <cutils/atomic.h>
 #include <gui/BLASTBufferQueue.h>
 #include <gui/BufferItemConsumer.h>
 #include <gui/BufferQueueConsumer.h>
 #include <gui/BufferQueueCore.h>
 #include <gui/BufferQueueProducer.h>
+
+#include <gui/FrameRateUtils.h>
 #include <gui/GLConsumer.h>
 #include <gui/IProducerListener.h>
 #include <gui/Surface.h>
@@ -33,9 +36,14 @@
 #include <utils/Trace.h>
 
 #include <private/gui/ComposerService.h>
+#include <private/gui/ComposerServiceAIDL.h>
 
+#include <android-base/thread_annotations.h>
 #include <chrono>
 
+#include <com_android_graphics_libgui_flags.h>
+
+using namespace com::android::graphics::libgui;
 using namespace std::chrono_literals;
 
 namespace {
@@ -61,6 +69,10 @@ namespace android {
 #define BBQ_TRACE(x, ...)                                                                  \
     ATRACE_FORMAT("%s - %s(f:%u,a:%u)" x, __FUNCTION__, mName.c_str(), mNumFrameAvailable, \
                   mNumAcquired, ##__VA_ARGS__)
+
+#define UNIQUE_LOCK_WITH_ASSERTION(mutex) \
+    std::unique_lock _lock{mutex};        \
+    base::ScopedLockAssertion assumeLocked(mutex);
 
 void BLASTBufferItemConsumer::onDisconnect() {
     Mutex::Autolock lock(mMutex);
@@ -92,12 +104,11 @@ void BLASTBufferItemConsumer::addAndGetFrameTimestamps(const NewFrameEventsEntry
     }
 }
 
-void BLASTBufferItemConsumer::updateFrameTimestamps(uint64_t frameNumber, nsecs_t refreshStartTime,
-                                                    const sp<Fence>& glDoneFence,
-                                                    const sp<Fence>& presentFence,
-                                                    const sp<Fence>& prevReleaseFence,
-                                                    CompositorTiming compositorTiming,
-                                                    nsecs_t latchTime, nsecs_t dequeueReadyTime) {
+void BLASTBufferItemConsumer::updateFrameTimestamps(
+        uint64_t frameNumber, uint64_t previousFrameNumber, nsecs_t refreshStartTime,
+        const sp<Fence>& glDoneFence, const sp<Fence>& presentFence,
+        const sp<Fence>& prevReleaseFence, CompositorTiming compositorTiming, nsecs_t latchTime,
+        nsecs_t dequeueReadyTime) {
     Mutex::Autolock lock(mMutex);
 
     // if the producer is not connected, don't bother updating,
@@ -108,7 +119,15 @@ void BLASTBufferItemConsumer::updateFrameTimestamps(uint64_t frameNumber, nsecs_
     std::shared_ptr<FenceTime> releaseFenceTime = std::make_shared<FenceTime>(prevReleaseFence);
 
     mFrameEventHistory.addLatch(frameNumber, latchTime);
-    mFrameEventHistory.addRelease(frameNumber, dequeueReadyTime, std::move(releaseFenceTime));
+    if (flags::frametimestamps_previousrelease()) {
+        if (previousFrameNumber > 0) {
+            mFrameEventHistory.addRelease(previousFrameNumber, dequeueReadyTime,
+                                          std::move(releaseFenceTime));
+        }
+    } else {
+        mFrameEventHistory.addRelease(frameNumber, dequeueReadyTime, std::move(releaseFenceTime));
+    }
+
     mFrameEventHistory.addPreComposition(frameNumber, refreshStartTime);
     mFrameEventHistory.addPostComposition(frameNumber, glDoneFenceTime, presentFenceTime,
                                           compositorTiming);
@@ -131,6 +150,16 @@ void BLASTBufferItemConsumer::onSidebandStreamChanged() {
         bbq->setSidebandStream(stream);
     }
 }
+
+#if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(BQ_SETFRAMERATE)
+void BLASTBufferItemConsumer::onSetFrameRate(float frameRate, int8_t compatibility,
+                                             int8_t changeFrameRateStrategy) {
+    sp<BLASTBufferQueue> bbq = mBLASTBufferQueue.promote();
+    if (bbq != nullptr) {
+        bbq->setFrameRate(frameRate, compatibility, changeFrameRateStrategy);
+    }
+}
+#endif
 
 void BLASTBufferItemConsumer::resizeFrameEventHistory(size_t newSize) {
     Mutex::Autolock lock(mMutex);
@@ -156,30 +185,30 @@ BLASTBufferQueue::BLASTBufferQueue(const std::string& name, bool updateDestinati
                                                       GraphicBuffer::USAGE_HW_COMPOSER |
                                                               GraphicBuffer::USAGE_HW_TEXTURE,
                                                       1, false, this);
-    static int32_t id = 0;
-    mName = name + "#" + std::to_string(id);
-    auto consumerName = mName + "(BLAST Consumer)" + std::to_string(id);
-    mQueuedBufferTrace = "QueuedBuffer - " + mName + "BLAST#" + std::to_string(id);
-    id++;
+    static std::atomic<uint32_t> nextId = 0;
+    mProducerId = nextId++;
+    mName = name + "#" + std::to_string(mProducerId);
+    auto consumerName = mName + "(BLAST Consumer)" + std::to_string(mProducerId);
+    mQueuedBufferTrace = "QueuedBuffer - " + mName + "BLAST#" + std::to_string(mProducerId);
     mBufferItemConsumer->setName(String8(consumerName.c_str()));
     mBufferItemConsumer->setFrameAvailableListener(this);
-    mBufferItemConsumer->setBufferFreedListener(this);
 
-    ComposerService::getComposerService()->getMaxAcquiredBufferCount(&mMaxAcquiredBuffers);
+    ComposerServiceAIDL::getComposerService()->getMaxAcquiredBufferCount(&mMaxAcquiredBuffers);
     mBufferItemConsumer->setMaxAcquiredBufferCount(mMaxAcquiredBuffers);
     mCurrentMaxAcquiredBufferCount = mMaxAcquiredBuffers;
     mNumAcquired = 0;
     mNumFrameAvailable = 0;
 
     TransactionCompletedListener::getInstance()->addQueueStallListener(
-        [&]() {
-            std::function<void(bool)> callbackCopy;
-            {
-                std::unique_lock _lock{mMutex};
-                callbackCopy = mTransactionHangCallback;
-            }
-            if (callbackCopy) callbackCopy(true);
-        }, this);
+            [&](const std::string& reason) {
+                std::function<void(const std::string&)> callbackCopy;
+                {
+                    std::unique_lock _lock{mMutex};
+                    callbackCopy = mTransactionHangCallback;
+                }
+                if (callbackCopy) callbackCopy(reason);
+            },
+            this);
 
     BQA_LOGV("BLASTBufferQueue created");
 }
@@ -211,7 +240,7 @@ void BLASTBufferQueue::update(const sp<SurfaceControl>& surface, uint32_t width,
                               int32_t format) {
     LOG_ALWAYS_FATAL_IF(surface == nullptr, "BLASTBufferQueue: mSurfaceControl must not be NULL");
 
-    std::unique_lock _lock{mMutex};
+    std::lock_guard _lock{mMutex};
     if (mFormat != format) {
         mFormat = format;
         mBufferItemConsumer->setDefaultBufferFormat(convertBufferFormat(format));
@@ -281,7 +310,7 @@ void BLASTBufferQueue::transactionCommittedCallback(nsecs_t /*latchTime*/,
                                                     const sp<Fence>& /*presentFence*/,
                                                     const std::vector<SurfaceControlStats>& stats) {
     {
-        std::unique_lock _lock{mMutex};
+        std::lock_guard _lock{mMutex};
         BBQ_TRACE();
         BQA_LOGV("transactionCommittedCallback");
         if (!mSurfaceControlsWithPendingCallback.empty()) {
@@ -296,13 +325,8 @@ void BLASTBufferQueue::transactionCommittedCallback(nsecs_t /*latchTime*/,
                 // frame numbers that were in a sync. We remove the frame from mSyncedFrameNumbers
                 // set and then check if it's empty. If there are no more pending syncs, we can
                 // proceed with flushing the shadow queue.
-                // We also want to check if mSyncTransaction is null because it's possible another
-                // sync request came in while waiting, but it hasn't started processing yet. In that
-                // case, we don't actually want to flush the frames in between since they will get
-                // processed and merged with the sync transaction and released earlier than if they
-                // were sent to SF
                 mSyncedFrameNumbers.erase(currFrameNumber);
-                if (mSyncedFrameNumbers.empty() && mSyncTransaction == nullptr) {
+                if (mSyncedFrameNumbers.empty()) {
                     flushShadowQueue();
                 }
             } else {
@@ -329,7 +353,7 @@ static void transactionCallbackThunk(void* context, nsecs_t latchTime,
 void BLASTBufferQueue::transactionCallback(nsecs_t /*latchTime*/, const sp<Fence>& /*presentFence*/,
                                            const std::vector<SurfaceControlStats>& stats) {
     {
-        std::unique_lock _lock{mMutex};
+        std::lock_guard _lock{mMutex};
         BBQ_TRACE();
         BQA_LOGV("transactionCallback");
 
@@ -339,14 +363,17 @@ void BLASTBufferQueue::transactionCallback(nsecs_t /*latchTime*/, const sp<Fence
             std::optional<SurfaceControlStats> statsOptional = findMatchingStat(stats, pendingSC);
             if (statsOptional) {
                 SurfaceControlStats stat = *statsOptional;
-                mTransformHint = stat.transformHint;
-                mBufferItemConsumer->setTransformHint(mTransformHint);
-                BQA_LOGV("updated mTransformHint=%d", mTransformHint);
+                if (stat.transformHint) {
+                    mTransformHint = *stat.transformHint;
+                    mBufferItemConsumer->setTransformHint(mTransformHint);
+                    BQA_LOGV("updated mTransformHint=%d", mTransformHint);
+                }
                 // Update frametime stamps if the frame was latched and presented, indicated by a
                 // valid latch time.
                 if (stat.latchTime > 0) {
                     mBufferItemConsumer
                             ->updateFrameTimestamps(stat.frameEventStats.frameNumber,
+                                                    stat.frameEventStats.previousFrameNumber,
                                                     stat.frameEventStats.refreshStartTime,
                                                     stat.frameEventStats.gpuCompositionDoneFence,
                                                     stat.presentFence, stat.previousReleaseFence,
@@ -408,9 +435,8 @@ void BLASTBufferQueue::flushShadowQueue() {
 void BLASTBufferQueue::releaseBufferCallback(
         const ReleaseCallbackId& id, const sp<Fence>& releaseFence,
         std::optional<uint32_t> currentMaxAcquiredBufferCount) {
+    std::lock_guard _lock{mMutex};
     BBQ_TRACE();
-
-    std::unique_lock _lock{mMutex};
     releaseBufferCallbackLocked(id, releaseFence, currentMaxAcquiredBufferCount,
                                 false /* fakeRelease */);
 }
@@ -425,10 +451,8 @@ void BLASTBufferQueue::releaseBufferCallbackLocked(
     // to the buffer queue. This will prevent higher latency when we are running
     // on a lower refresh rate than the max supported. We only do that for EGL
     // clients as others don't care about latency
-    const bool isEGL = [&] {
-        const auto it = mSubmitted.find(id);
-        return it != mSubmitted.end() && it->second.mApi == NATIVE_WINDOW_API_EGL;
-    }();
+    const auto it = mSubmitted.find(id);
+    const bool isEGL = it != mSubmitted.end() && it->second.mApi == NATIVE_WINDOW_API_EGL;
 
     if (currentMaxAcquiredBufferCount) {
         mCurrentMaxAcquiredBufferCount = *currentMaxAcquiredBufferCount;
@@ -483,6 +507,17 @@ void BLASTBufferQueue::releaseBuffer(const ReleaseCallbackId& callbackId,
     // Remove the frame number from mSyncedFrameNumbers since we can get a release callback
     // without getting a transaction committed if the buffer was dropped.
     mSyncedFrameNumbers.erase(callbackId.framenumber);
+}
+
+static ui::Size getBufferSize(const BufferItem& item) {
+    uint32_t bufWidth = item.mGraphicBuffer->getWidth();
+    uint32_t bufHeight = item.mGraphicBuffer->getHeight();
+
+    // Take the buffer's orientation into account
+    if (item.mTransform & ui::Transform::ROT_90) {
+        std::swap(bufWidth, bufHeight);
+    }
+    return ui::Size(bufWidth, bufHeight);
 }
 
 status_t BLASTBufferQueue::acquireNextBufferLocked(
@@ -562,7 +597,13 @@ status_t BLASTBufferQueue::acquireNextBufferLocked(
     // Ensure BLASTBufferQueue stays alive until we receive the transaction complete callback.
     incStrong((void*)transactionCallbackThunk);
 
-    mSize = mRequestedSize;
+    // Only update mSize for destination bounds if the incoming buffer matches the requested size.
+    // Otherwise, it could cause stretching since the destination bounds will update before the
+    // buffer with the new size is acquired.
+    if (mRequestedSize == getBufferSize(bufferItem) ||
+        bufferItem.mScalingMode != NATIVE_WINDOW_SCALING_MODE_FREEZE) {
+        mSize = mRequestedSize;
+    }
     Rect crop = computeCrop(bufferItem);
     mLastBufferInfo.update(true /* hasBuffer */, bufferItem.mGraphicBuffer->getWidth(),
                            bufferItem.mGraphicBuffer->getHeight(), bufferItem.mTransform,
@@ -572,7 +613,8 @@ status_t BLASTBufferQueue::acquireNextBufferLocked(
             std::bind(releaseBufferCallbackThunk, wp<BLASTBufferQueue>(this) /* callbackContext */,
                       std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
     sp<Fence> fence = bufferItem.mFence ? new Fence(bufferItem.mFence->dup()) : Fence::NO_FENCE;
-    t->setBuffer(mSurfaceControl, buffer, fence, bufferItem.mFrameNumber, releaseBufferCallback);
+    t->setBuffer(mSurfaceControl, buffer, fence, bufferItem.mFrameNumber, mProducerId,
+                 releaseBufferCallback);
     t->setDataspace(mSurfaceControl, static_cast<ui::Dataspace>(bufferItem.mDataSpace));
     t->setHdrMetadata(mSurfaceControl, bufferItem.mHdrMetadata);
     t->setSurfaceDamageRegion(mSurfaceControl, bufferItem.mSurfaceDamage);
@@ -617,12 +659,12 @@ status_t BLASTBufferQueue::acquireNextBufferLocked(
     }
 
     {
-        std::unique_lock _lock{mTimestampMutex};
+        std::lock_guard _lock{mTimestampMutex};
         auto dequeueTime = mDequeueTimestamps.find(buffer->getId());
         if (dequeueTime != mDequeueTimestamps.end()) {
             Parcel p;
             p.writeInt64(dequeueTime->second);
-            t->setMetadata(mSurfaceControl, METADATA_DEQUEUE_TIME, p);
+            t->setMetadata(mSurfaceControl, gui::METADATA_DEQUEUE_TIME, p);
             mDequeueTimestamps.erase(dequeueTime);
         }
     }
@@ -656,6 +698,7 @@ Rect BLASTBufferQueue::computeCrop(const BufferItem& item) {
 }
 
 void BLASTBufferQueue::acquireAndReleaseBuffer() {
+    BBQ_TRACE();
     BufferItem bufferItem;
     status_t status =
             mBufferItemConsumer->acquireBuffer(&bufferItem, 0 /* expectedPresent */, false);
@@ -673,10 +716,10 @@ void BLASTBufferQueue::onFrameAvailable(const BufferItem& item) {
     SurfaceComposerClient::Transaction* prevTransaction = nullptr;
 
     {
-        std::unique_lock _lock{mMutex};
+        UNIQUE_LOCK_WITH_ASSERTION(mMutex);
         BBQ_TRACE();
-
         bool waitForTransactionCallback = !mSyncedFrameNumbers.empty();
+
         const bool syncTransactionSet = mTransactionReadyCallback != nullptr;
         BQA_LOGV("onFrameAvailable-start syncTransactionSet=%s", boolToString(syncTransactionSet));
 
@@ -767,44 +810,33 @@ void BLASTBufferQueue::onFrameReplaced(const BufferItem& item) {
 }
 
 void BLASTBufferQueue::onFrameDequeued(const uint64_t bufferId) {
-    std::unique_lock _lock{mTimestampMutex};
+    std::lock_guard _lock{mTimestampMutex};
     mDequeueTimestamps[bufferId] = systemTime();
 };
 
 void BLASTBufferQueue::onFrameCancelled(const uint64_t bufferId) {
-    std::unique_lock _lock{mTimestampMutex};
+    std::lock_guard _lock{mTimestampMutex};
     mDequeueTimestamps.erase(bufferId);
 };
 
-void BLASTBufferQueue::syncNextTransaction(
+bool BLASTBufferQueue::syncNextTransaction(
         std::function<void(SurfaceComposerClient::Transaction*)> callback,
         bool acquireSingleBuffer) {
+    LOG_ALWAYS_FATAL_IF(!callback,
+                        "BLASTBufferQueue: callback passed in to syncNextTransaction must not be "
+                        "NULL");
+
+    std::lock_guard _lock{mMutex};
     BBQ_TRACE();
-
-    std::function<void(SurfaceComposerClient::Transaction*)> prevCallback = nullptr;
-    SurfaceComposerClient::Transaction* prevTransaction = nullptr;
-
-    {
-        std::lock_guard _lock{mMutex};
-        // We're about to overwrite the previous call so we should invoke that callback
-        // immediately.
-        if (mTransactionReadyCallback) {
-            prevCallback = mTransactionReadyCallback;
-            prevTransaction = mSyncTransaction;
-        }
-
-        mTransactionReadyCallback = callback;
-        if (callback) {
-            mSyncTransaction = new SurfaceComposerClient::Transaction();
-        } else {
-            mSyncTransaction = nullptr;
-        }
-        mAcquireSingleBuffer = mTransactionReadyCallback ? acquireSingleBuffer : true;
+    if (mTransactionReadyCallback) {
+        ALOGW("Attempting to overwrite transaction callback in syncNextTransaction");
+        return false;
     }
 
-    if (prevCallback) {
-        prevCallback(prevTransaction);
-    }
+    mTransactionReadyCallback = callback;
+    mSyncTransaction = new SurfaceComposerClient::Transaction();
+    mAcquireSingleBuffer = acquireSingleBuffer;
+    return true;
 }
 
 void BLASTBufferQueue::stopContinuousSyncTransaction() {
@@ -812,18 +844,33 @@ void BLASTBufferQueue::stopContinuousSyncTransaction() {
     SurfaceComposerClient::Transaction* prevTransaction = nullptr;
     {
         std::lock_guard _lock{mMutex};
-        bool invokeCallback = mTransactionReadyCallback && !mAcquireSingleBuffer;
-        if (invokeCallback) {
-            prevCallback = mTransactionReadyCallback;
-            prevTransaction = mSyncTransaction;
+        if (mAcquireSingleBuffer || !mTransactionReadyCallback) {
+            ALOGW("Attempting to stop continuous sync when none are active");
+            return;
         }
+
+        prevCallback = mTransactionReadyCallback;
+        prevTransaction = mSyncTransaction;
+
         mTransactionReadyCallback = nullptr;
         mSyncTransaction = nullptr;
         mAcquireSingleBuffer = true;
     }
+
     if (prevCallback) {
         prevCallback(prevTransaction);
     }
+}
+
+void BLASTBufferQueue::clearSyncTransaction() {
+    std::lock_guard _lock{mMutex};
+    if (!mAcquireSingleBuffer) {
+        ALOGW("Attempting to clear sync transaction when none are active");
+        return;
+    }
+
+    mTransactionReadyCallback = nullptr;
+    mSyncTransaction = nullptr;
 }
 
 bool BLASTBufferQueue::rejectBuffer(const BufferItem& item) {
@@ -832,14 +879,7 @@ bool BLASTBufferQueue::rejectBuffer(const BufferItem& item) {
         return false;
     }
 
-    uint32_t bufWidth = item.mGraphicBuffer->getWidth();
-    uint32_t bufHeight = item.mGraphicBuffer->getHeight();
-
-    // Take the buffer's orientation into account
-    if (item.mTransform & ui::Transform::ROT_90) {
-        std::swap(bufWidth, bufHeight);
-    }
-    ui::Size bufferSize(bufWidth, bufHeight);
+    ui::Size bufferSize = getBufferSize(item);
     if (mRequestedSize != mSize && mRequestedSize == bufferSize) {
         return false;
     }
@@ -851,8 +891,8 @@ bool BLASTBufferQueue::rejectBuffer(const BufferItem& item) {
 class BBQSurface : public Surface {
 private:
     std::mutex mMutex;
-    sp<BLASTBufferQueue> mBbq;
-    bool mDestroyed = false;
+    sp<BLASTBufferQueue> mBbq GUARDED_BY(mMutex);
+    bool mDestroyed GUARDED_BY(mMutex) = false;
 
 public:
     BBQSurface(const sp<IGraphicBufferProducer>& igbp, bool controlledByApp,
@@ -873,7 +913,11 @@ public:
 
     status_t setFrameRate(float frameRate, int8_t compatibility,
                           int8_t changeFrameRateStrategy) override {
-        std::unique_lock _lock{mMutex};
+        if (flags::bq_setframerate()) {
+            return Surface::setFrameRate(frameRate, compatibility, changeFrameRateStrategy);
+        }
+
+        std::lock_guard _lock{mMutex};
         if (mDestroyed) {
             return DEAD_OBJECT;
         }
@@ -886,7 +930,7 @@ public:
 
     status_t setFrameTimelineInfo(uint64_t frameNumber,
                                   const FrameTimelineInfo& frameTimelineInfo) override {
-        std::unique_lock _lock{mMutex};
+        std::lock_guard _lock{mMutex};
         if (mDestroyed) {
             return DEAD_OBJECT;
         }
@@ -896,7 +940,7 @@ public:
     void destroy() override {
         Surface::destroy();
 
-        std::unique_lock _lock{mMutex};
+        std::lock_guard _lock{mMutex};
         mDestroyed = true;
         mBbq = nullptr;
     }
@@ -906,7 +950,7 @@ public:
 // no timing issues.
 status_t BLASTBufferQueue::setFrameRate(float frameRate, int8_t compatibility,
                                         bool shouldBeSeamless) {
-    std::unique_lock _lock{mMutex};
+    std::lock_guard _lock{mMutex};
     SurfaceComposerClient::Transaction t;
 
     return t.setFrameRate(mSurfaceControl, frameRate, compatibility, shouldBeSeamless).apply();
@@ -916,20 +960,20 @@ status_t BLASTBufferQueue::setFrameTimelineInfo(uint64_t frameNumber,
                                                 const FrameTimelineInfo& frameTimelineInfo) {
     ATRACE_FORMAT("%s(%s) frameNumber: %" PRIu64 " vsyncId: %" PRId64, __func__, mName.c_str(),
                   frameNumber, frameTimelineInfo.vsyncId);
-    std::unique_lock _lock{mMutex};
+    std::lock_guard _lock{mMutex};
     mPendingFrameTimelines.push({frameNumber, frameTimelineInfo});
     return OK;
 }
 
 void BLASTBufferQueue::setSidebandStream(const sp<NativeHandle>& stream) {
-    std::unique_lock _lock{mMutex};
+    std::lock_guard _lock{mMutex};
     SurfaceComposerClient::Transaction t;
 
     t.setSidebandStream(mSurfaceControl, stream).apply();
 }
 
 sp<Surface> BLASTBufferQueue::getSurface(bool includeSurfaceControlHandle) {
-    std::unique_lock _lock{mMutex};
+    std::lock_guard _lock{mMutex};
     sp<IBinder> scHandle = nullptr;
     if (includeSurfaceControlHandle && mSurfaceControl) {
         scHandle = mSurfaceControl->getHandle();
@@ -1154,6 +1198,7 @@ PixelFormat BLASTBufferQueue::convertBufferFormat(PixelFormat& format) {
 }
 
 uint32_t BLASTBufferQueue::getLastTransformHint() const {
+    std::lock_guard _lock{mMutex};
     if (mSurfaceControl != nullptr) {
         return mSurfaceControl->getTransformHint();
     } else {
@@ -1162,62 +1207,18 @@ uint32_t BLASTBufferQueue::getLastTransformHint() const {
 }
 
 uint64_t BLASTBufferQueue::getLastAcquiredFrameNum() {
-    std::unique_lock _lock{mMutex};
+    std::lock_guard _lock{mMutex};
     return mLastAcquiredFrameNumber;
 }
 
-void BLASTBufferQueue::abandon() {
-    std::unique_lock _lock{mMutex};
-    // flush out the shadow queue
-    while (mNumFrameAvailable > 0) {
-        acquireAndReleaseBuffer();
-    }
-
-    // Clear submitted buffer states
-    mNumAcquired = 0;
-    mSubmitted.clear();
-    mPendingRelease.clear();
-
-    if (!mPendingTransactions.empty()) {
-        BQA_LOGD("Applying pending transactions on abandon %d",
-                 static_cast<uint32_t>(mPendingTransactions.size()));
-        SurfaceComposerClient::Transaction t;
-        mergePendingTransactions(&t, std::numeric_limits<uint64_t>::max() /* frameNumber */);
-        // All transactions on our apply token are one-way. See comment on mAppliedLastTransaction
-        t.setApplyToken(mApplyToken).apply(false, true);
-    }
-
-    // Clear sync states
-    if (!mSyncedFrameNumbers.empty()) {
-        BQA_LOGD("mSyncedFrameNumbers cleared");
-        mSyncedFrameNumbers.clear();
-    }
-
-    if (mSyncTransaction != nullptr) {
-        BQA_LOGD("mSyncTransaction cleared mAcquireSingleBuffer=%s",
-                 mAcquireSingleBuffer ? "true" : "false");
-        mSyncTransaction = nullptr;
-        mAcquireSingleBuffer = false;
-    }
-
-    // abandon buffer queue
-    if (mBufferItemConsumer != nullptr) {
-        mBufferItemConsumer->abandon();
-        mBufferItemConsumer->setFrameAvailableListener(nullptr);
-        mBufferItemConsumer->setBufferFreedListener(nullptr);
-    }
-    mBufferItemConsumer = nullptr;
-    mConsumer = nullptr;
-    mProducer = nullptr;
-}
-
 bool BLASTBufferQueue::isSameSurfaceControl(const sp<SurfaceControl>& surfaceControl) const {
-    std::unique_lock _lock{mMutex};
+    std::lock_guard _lock{mMutex};
     return SurfaceControl::isSameSurface(mSurfaceControl, surfaceControl);
 }
 
-void BLASTBufferQueue::setTransactionHangCallback(std::function<void(bool)> callback) {
-    std::unique_lock _lock{mMutex};
+void BLASTBufferQueue::setTransactionHangCallback(
+        std::function<void(const std::string&)> callback) {
+    std::lock_guard _lock{mMutex};
     mTransactionHangCallback = callback;
 }
 

@@ -18,7 +18,6 @@
 
 #include <stdint.h>
 
-#include <string>
 #include <vector>
 
 #include <unwindstack/Memory.h>
@@ -27,31 +26,29 @@ namespace unwindstack {
 
 class MemoryBuffer : public Memory {
  public:
-  MemoryBuffer() = default;
-  virtual ~MemoryBuffer() { free(raw_); }
+  // If a size is too large, assume it's likely corrupted data, and set to zero.
+  MemoryBuffer(size_t size) : raw_(size > kMaxBufferSize ? 0 : size), offset_(0) {}
+  MemoryBuffer(size_t size, uint64_t offset)
+      : raw_(size > kMaxBufferSize ? 0 : size), offset_(offset) {}
+  virtual ~MemoryBuffer() = default;
 
   size_t Read(uint64_t addr, void* dst, size_t size) override;
 
   uint8_t* GetPtr(size_t offset) override;
 
-  bool Resize(size_t size) {
-    void* new_raw = realloc(raw_, size);
-    if (new_raw == nullptr) {
-      free(raw_);
-      raw_ = nullptr;
-      size_ = 0;
-      return false;
-    }
-    raw_ = reinterpret_cast<uint8_t*>(new_raw);
-    size_ = size;
-    return true;
-  }
-
-  uint64_t Size() { return size_; }
+  uint8_t* Data() { return raw_.data(); }
+  uint64_t Size() { return raw_.size(); }
 
  private:
-  uint8_t* raw_ = nullptr;
-  size_t size_ = 0;
+  std::vector<uint8_t> raw_;
+  uint64_t offset_;
+
+  // This class is only used for global data and a compressed .debug_frame in
+  // the library code. The limit of 10MB is way over what any valid existing
+  // globals data section is expected to be. A 50MB shared library only contains
+  // a .debug_frame that is < 100KB in size. Therefore, 10MB should be able to
+  // handle any valid large shared library with a valid large .debug_frame.
+  static constexpr size_t kMaxBufferSize = 10 * 1024 * 1024;
 };
 
 }  // namespace unwindstack

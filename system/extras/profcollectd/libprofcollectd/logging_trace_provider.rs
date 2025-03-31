@@ -36,7 +36,13 @@ impl TraceProvider for LoggingTraceProvider {
         true
     }
 
-    fn trace(&self, trace_dir: &Path, tag: &str, sampling_period: &Duration, binary_filter: &str) {
+    fn trace_system(
+        &self,
+        trace_dir: &Path,
+        tag: &str,
+        sampling_period: &Duration,
+        _binary_filter: &str,
+    ) {
         let trace_file = trace_provider::get_path(trace_dir, tag, LOGGING_TRACEFILE_EXTENSION);
 
         log::info!(
@@ -47,12 +53,30 @@ impl TraceProvider for LoggingTraceProvider {
         );
     }
 
-    fn process(&self, _trace_dir: &Path, _profile_dir: &Path) -> Result<()> {
+    fn trace_process(
+        &self,
+        trace_dir: &Path,
+        tag: &str,
+        sampling_period: &Duration,
+        processes: &str,
+    ) {
+        let trace_file = trace_provider::get_path(trace_dir, tag, LOGGING_TRACEFILE_EXTENSION);
+
+        log::info!(
+            "Trace event triggered, tag {}, processes {}, sampling for {}ms, saving to {}",
+            tag,
+            processes,
+            sampling_period.as_millis(),
+            trace_file.display()
+        );
+    }
+
+    fn process(&self, _trace_dir: &Path, _profile_dir: &Path, _binary_filter: &str) -> Result<()> {
         log::info!("Process event triggered");
         Ok(())
     }
 
-    fn set_log_file(&self, filename: &Path) {}
+    fn set_log_file(&self, _filename: &Path) {}
     fn reset_log_file(&self) {}
 }
 

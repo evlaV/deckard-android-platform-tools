@@ -19,6 +19,7 @@
 #include <gui/BLASTBufferQueue.h>
 
 #include <android/hardware/graphics/common/1.2/types.h>
+#include <gui/AidlStatusUtil.h>
 #include <gui/BufferQueueCore.h>
 #include <gui/BufferQueueProducer.h>
 #include <gui/FrameTimestamps.h>
@@ -30,16 +31,23 @@
 #include <gui/test/CallbackUtils.h>
 #include <private/gui/ComposerService.h>
 #include <private/gui/ComposerServiceAIDL.h>
+#include <tests/utils/ScreenshotUtils.h>
 #include <ui/DisplayMode.h>
+#include <ui/DisplayState.h>
 #include <ui/GraphicBuffer.h>
 #include <ui/GraphicTypes.h>
+#include <ui/Rect.h>
+#include <ui/Size.h>
 #include <ui/Transform.h>
 
 #include <gtest/gtest.h>
 
+#include <com_android_graphics_libgui_flags.h>
+
 using namespace std::chrono_literals;
 
 namespace android {
+using namespace com::android::graphics::libgui;
 
 using Transaction = SurfaceComposerClient::Transaction;
 using android::hardware::graphics::common::V1_2::BufferUsage;
@@ -115,14 +123,16 @@ public:
         mBlastBufferQueueAdapter->syncNextTransaction(callback, acquireSingleBuffer);
     }
 
-    void syncNextTransaction(std::function<void(Transaction*)> callback,
+    bool syncNextTransaction(std::function<void(Transaction*)> callback,
                              bool acquireSingleBuffer = true) {
-        mBlastBufferQueueAdapter->syncNextTransaction(callback, acquireSingleBuffer);
+        return mBlastBufferQueueAdapter->syncNextTransaction(callback, acquireSingleBuffer);
     }
 
     void stopContinuousSyncTransaction() {
         mBlastBufferQueueAdapter->stopContinuousSyncTransaction();
     }
+
+    void clearSyncTransaction() { mBlastBufferQueueAdapter->clearSyncTransaction(); }
 
     int getWidth() { return mBlastBufferQueueAdapter->mSize.width; }
 
@@ -172,46 +182,44 @@ private:
 class BLASTBufferQueueTest : public ::testing::Test {
 public:
 protected:
-    BLASTBufferQueueTest() {
-        const ::testing::TestInfo* const testInfo =
-                ::testing::UnitTest::GetInstance()->current_test_info();
-        ALOGV("Begin test: %s.%s", testInfo->test_case_name(), testInfo->name());
-    }
-
-    ~BLASTBufferQueueTest() {
-        const ::testing::TestInfo* const testInfo =
-                ::testing::UnitTest::GetInstance()->current_test_info();
-        ALOGV("End test:   %s.%s", testInfo->test_case_name(), testInfo->name());
-    }
-
     void SetUp() {
         mComposer = ComposerService::getComposerService();
         mClient = new SurfaceComposerClient();
-        mDisplayToken = mClient->getInternalDisplayToken();
+        const auto ids = SurfaceComposerClient::getPhysicalDisplayIds();
+        ASSERT_FALSE(ids.empty());
+        // display 0 is picked as this test is not much display depedent
+        mDisplayToken = SurfaceComposerClient::getPhysicalDisplayToken(ids.front());
         ASSERT_NE(nullptr, mDisplayToken.get());
         Transaction t;
         t.setDisplayLayerStack(mDisplayToken, ui::DEFAULT_LAYER_STACK);
         t.apply();
         t.clear();
 
-        ui::DisplayMode mode;
-        ASSERT_EQ(NO_ERROR, SurfaceComposerClient::getActiveDisplayMode(mDisplayToken, &mode));
-        const ui::Size& resolution = mode.resolution;
+        ui::DisplayState displayState;
+        ASSERT_EQ(NO_ERROR, SurfaceComposerClient::getDisplayState(mDisplayToken, &displayState));
+        const ui::Size& resolution = displayState.layerStackSpaceRect;
         mDisplayWidth = resolution.getWidth();
         mDisplayHeight = resolution.getHeight();
+        ALOGD("Display: %dx%d orientation:%d", mDisplayWidth, mDisplayHeight,
+              displayState.orientation);
+
+        mRootSurfaceControl = mClient->createSurface(String8("RootTestSurface"), mDisplayWidth,
+                                                     mDisplayHeight, PIXEL_FORMAT_RGBA_8888,
+                                                     ISurfaceComposerClient::eFXSurfaceBufferState,
+                                                     /*parent*/ nullptr);
+
+        t.setLayerStack(mRootSurfaceControl, ui::DEFAULT_LAYER_STACK)
+                .setLayer(mRootSurfaceControl, std::numeric_limits<int32_t>::max())
+                .show(mRootSurfaceControl)
+                .apply();
 
         mSurfaceControl = mClient->createSurface(String8("TestSurface"), mDisplayWidth,
                                                  mDisplayHeight, PIXEL_FORMAT_RGBA_8888,
                                                  ISurfaceComposerClient::eFXSurfaceBufferState,
-                                                 /*parent*/ nullptr);
-        t.setLayerStack(mSurfaceControl, ui::DEFAULT_LAYER_STACK)
-                .setLayer(mSurfaceControl, std::numeric_limits<int32_t>::max())
-                .show(mSurfaceControl)
-                .setDataspace(mSurfaceControl, ui::Dataspace::V0_SRGB)
-                .apply();
+                                                 /*parent*/ mRootSurfaceControl->getHandle());
 
-        mCaptureArgs.displayToken = mDisplayToken;
-        mCaptureArgs.dataspace = ui::Dataspace::V0_SRGB;
+        mCaptureArgs.sourceCrop = Rect(ui::Size(mDisplayWidth, mDisplayHeight));
+        mCaptureArgs.layerHandle = mRootSurfaceControl->getHandle();
     }
 
     void setUpProducer(BLASTBufferQueueHelper& adapter, sp<IGraphicBufferProducer>& producer,
@@ -298,20 +306,6 @@ protected:
         captureBuf->unlock();
     }
 
-    static status_t captureDisplay(DisplayCaptureArgs& captureArgs,
-                                   ScreenCaptureResults& captureResults) {
-        const auto sf = ComposerServiceAIDL::getComposerService();
-        SurfaceComposerClient::Transaction().apply(true);
-
-        const sp<SyncScreenCaptureListener> captureListener = new SyncScreenCaptureListener();
-        binder::Status status = sf->captureDisplay(captureArgs, captureListener);
-        if (status.transactionError() != NO_ERROR) {
-            return status.transactionError();
-        }
-        captureResults = captureListener->waitForResults();
-        return captureResults.result;
-    }
-
     void queueBuffer(sp<IGraphicBufferProducer> igbp, uint8_t r, uint8_t g, uint8_t b,
                      nsecs_t presentTimeDelay) {
         int slot;
@@ -344,11 +338,12 @@ protected:
     sp<IBinder> mDisplayToken;
 
     sp<SurfaceControl> mSurfaceControl;
+    sp<SurfaceControl> mRootSurfaceControl;
 
     uint32_t mDisplayWidth;
     uint32_t mDisplayHeight;
 
-    DisplayCaptureArgs mCaptureArgs;
+    LayerCaptureArgs mCaptureArgs;
     ScreenCaptureResults mCaptureResults;
     sp<CountProducerListener> mProducerListener;
 };
@@ -366,7 +361,9 @@ TEST_F(BLASTBufferQueueTest, Update) {
     BLASTBufferQueueHelper adapter(mSurfaceControl, mDisplayWidth, mDisplayHeight);
     sp<SurfaceControl> updateSurface =
             mClient->createSurface(String8("UpdateTest"), mDisplayWidth / 2, mDisplayHeight / 2,
-                                   PIXEL_FORMAT_RGBA_8888);
+                                   PIXEL_FORMAT_RGBA_8888,
+                                   ISurfaceComposerClient::eFXSurfaceBufferState,
+                                   /*parent*/ mRootSurfaceControl->getHandle());
     adapter.update(updateSurface, mDisplayWidth / 2, mDisplayHeight / 2);
     ASSERT_EQ(updateSurface, adapter.getSurfaceControl());
     sp<IGraphicBufferProducer> igbProducer;
@@ -449,10 +446,11 @@ TEST_F(BLASTBufferQueueTest, onFrameAvailable_Apply) {
     igbProducer->queueBuffer(slot, input, &qbOutput);
     ASSERT_NE(ui::Transform::ROT_INVALID, qbOutput.transformHint);
 
-    adapter.waitForCallbacks();
+    // ensure the buffer queue transaction has been committed
+    Transaction().apply(true /* synchronous */);
 
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
 }
@@ -533,9 +531,11 @@ TEST_F(BLASTBufferQueueTest, SetCrop_Item) {
     igbProducer->queueBuffer(slot, input, &qbOutput);
     ASSERT_NE(ui::Transform::ROT_INVALID, qbOutput.transformHint);
 
-    adapter.waitForCallbacks();
+    // ensure the buffer queue transaction has been committed
+    Transaction().apply(true /* synchronous */);
+
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
 
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b,
@@ -550,16 +550,6 @@ TEST_F(BLASTBufferQueueTest, SetCrop_ScalingModeScaleCrop) {
     int32_t bufferSideLength =
             (mDisplayWidth < mDisplayHeight) ? mDisplayWidth / 2 : mDisplayHeight / 2;
     int32_t finalCropSideLength = bufferSideLength / 2;
-
-    auto bg = mClient->createSurface(String8("BGTest"), 0, 0, PIXEL_FORMAT_RGBA_8888,
-                                     ISurfaceComposerClient::eFXSurfaceEffect);
-    ASSERT_NE(nullptr, bg.get());
-    Transaction t;
-    t.setLayerStack(bg, ui::DEFAULT_LAYER_STACK)
-            .setCrop(bg, Rect(0, 0, mDisplayWidth, mDisplayHeight))
-            .setColor(bg, half3{0, 0, 0})
-            .setLayer(bg, 0)
-            .apply();
 
     BLASTBufferQueueHelper adapter(mSurfaceControl, bufferSideLength, bufferSideLength);
     sp<IGraphicBufferProducer> igbProducer;
@@ -592,9 +582,11 @@ TEST_F(BLASTBufferQueueTest, SetCrop_ScalingModeScaleCrop) {
     igbProducer->queueBuffer(slot, input, &qbOutput);
     ASSERT_NE(ui::Transform::ROT_INVALID, qbOutput.transformHint);
 
-    adapter.waitForCallbacks();
+    // ensure the buffer queue transaction has been committed
+    Transaction().apply(true /* synchronous */);
+
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(checkScreenCapture(r, g, b,
                                                {10, 10, (int32_t)bufferSideLength - 10,
                                                 (int32_t)bufferSideLength - 10}));
@@ -605,17 +597,6 @@ TEST_F(BLASTBufferQueueTest, SetCrop_ScalingModeScaleCrop) {
 }
 
 TEST_F(BLASTBufferQueueTest, ScaleCroppedBufferToBufferSize) {
-    // add black background
-    auto bg = mClient->createSurface(String8("BGTest"), 0, 0, PIXEL_FORMAT_RGBA_8888,
-                                     ISurfaceComposerClient::eFXSurfaceEffect);
-    ASSERT_NE(nullptr, bg.get());
-    Transaction t;
-    t.setLayerStack(bg, ui::DEFAULT_LAYER_STACK)
-            .setCrop(bg, Rect(0, 0, mDisplayWidth, mDisplayHeight))
-            .setColor(bg, half3{0, 0, 0})
-            .setLayer(bg, 0)
-            .apply();
-
     Rect windowSize(1000, 1000);
     Rect bufferSize(windowSize);
     Rect bufferCrop(200, 200, 700, 700);
@@ -655,9 +636,10 @@ TEST_F(BLASTBufferQueueTest, ScaleCroppedBufferToBufferSize) {
     igbProducer->queueBuffer(slot, input, &qbOutput);
     ASSERT_NE(ui::Transform::ROT_INVALID, qbOutput.transformHint);
 
-    adapter.waitForCallbacks();
+    // ensure the buffer queue transaction has been committed
+    Transaction().apply(true /* synchronous */);
 
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
 
     // Verify cropped region is scaled correctly.
     ASSERT_NO_FATAL_FAILURE(checkScreenCapture(255, 0, 0, {10, 10, 490, 490}));
@@ -672,17 +654,6 @@ TEST_F(BLASTBufferQueueTest, ScaleCroppedBufferToBufferSize) {
 }
 
 TEST_F(BLASTBufferQueueTest, ScaleCroppedBufferToWindowSize) {
-    // add black background
-    auto bg = mClient->createSurface(String8("BGTest"), 0, 0, PIXEL_FORMAT_RGBA_8888,
-                                     ISurfaceComposerClient::eFXSurfaceEffect);
-    ASSERT_NE(nullptr, bg.get());
-    Transaction t;
-    t.setLayerStack(bg, ui::DEFAULT_LAYER_STACK)
-            .setCrop(bg, Rect(0, 0, mDisplayWidth, mDisplayHeight))
-            .setColor(bg, half3{0, 0, 0})
-            .setLayer(bg, 0)
-            .apply();
-
     Rect windowSize(1000, 1000);
     Rect bufferSize(500, 500);
     Rect bufferCrop(100, 100, 350, 350);
@@ -722,9 +693,10 @@ TEST_F(BLASTBufferQueueTest, ScaleCroppedBufferToWindowSize) {
     igbProducer->queueBuffer(slot, input, &qbOutput);
     ASSERT_NE(ui::Transform::ROT_INVALID, qbOutput.transformHint);
 
-    adapter.waitForCallbacks();
+    // ensure the buffer queue transaction has been committed
+    Transaction().apply(true /* synchronous */);
 
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     // Verify cropped region is scaled correctly.
     ASSERT_NO_FATAL_FAILURE(checkScreenCapture(255, 0, 0, {10, 10, 490, 490}));
     ASSERT_NO_FATAL_FAILURE(checkScreenCapture(0, 255, 0, {10, 510, 490, 990}));
@@ -769,10 +741,12 @@ TEST_F(BLASTBufferQueueTest, ScalingModeChanges) {
                                                        NATIVE_WINDOW_SCALING_MODE_FREEZE, 0,
                                                        Fence::NO_FENCE);
         igbProducer->queueBuffer(slot, input, &qbOutput);
-        adapter.waitForCallbacks();
+
+        // ensure the buffer queue transaction has been committed
+        Transaction().apply(true /* synchronous */);
     }
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
 
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b,
@@ -804,10 +778,11 @@ TEST_F(BLASTBufferQueueTest, ScalingModeChanges) {
                                                        NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW,
                                                        0, Fence::NO_FENCE);
         igbProducer->queueBuffer(slot, input, &qbOutput);
-        adapter.waitForCallbacks();
+        // ensure the buffer queue transaction has been committed
+        Transaction().apply(true /* synchronous */);
     }
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     // verify we still scale the buffer to the new size (half the screen height)
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b,
@@ -842,12 +817,12 @@ TEST_F(BLASTBufferQueueTest, SyncThenNoSync) {
     transactionCallback.getCallbackData(&callbackData);
 
     // capture screen and verify that it is green
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(0, 255, 0, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
 
     mProducerListener->waitOnNumberReleased(1);
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
 }
@@ -887,7 +862,7 @@ TEST_F(BLASTBufferQueueTest, MultipleSyncTransactions) {
     transactionCallback.getCallbackData(&callbackData);
 
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
 }
@@ -935,7 +910,7 @@ TEST_F(BLASTBufferQueueTest, MultipleSyncTransactionWithNonSync) {
     transactionCallback.getCallbackData(&callbackData);
 
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
 }
@@ -985,7 +960,7 @@ TEST_F(BLASTBufferQueueTest, MultipleSyncRunOutOfBuffers) {
     transactionCallback.getCallbackData(&callbackData);
 
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
 }
@@ -1043,7 +1018,7 @@ TEST_F(BLASTBufferQueueTest, RunOutOfBuffersWaitingOnSF) {
     transactionCallback.getCallbackData(&callbackData);
 
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
 }
@@ -1076,13 +1051,13 @@ TEST_F(BLASTBufferQueueTest, SyncNextTransactionAcquireMultipleBuffers) {
     transactionCallback.getCallbackData(&callbackData);
 
     // capture screen and verify that it is blue
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(0, 0, 255, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
 
     mProducerListener->waitOnNumberReleased(2);
     // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(255, 0, 0, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
 }
@@ -1103,7 +1078,11 @@ TEST_F(BLASTBufferQueueTest, SyncNextTransactionOverwrite) {
     ASSERT_NE(nullptr, adapter.getTransactionReadyCallback());
 
     auto callback2 = [](Transaction*) {};
-    adapter.syncNextTransaction(callback2);
+    ASSERT_FALSE(adapter.syncNextTransaction(callback2));
+
+    sp<IGraphicBufferProducer> igbProducer;
+    setUpProducer(adapter, igbProducer);
+    queueBuffer(igbProducer, 0, 255, 0, 0);
 
     std::unique_lock<std::mutex> lock(mutex);
     if (!receivedCallback) {
@@ -1113,6 +1092,37 @@ TEST_F(BLASTBufferQueueTest, SyncNextTransactionOverwrite) {
     }
 
     ASSERT_TRUE(receivedCallback);
+}
+
+TEST_F(BLASTBufferQueueTest, ClearSyncTransaction) {
+    std::mutex mutex;
+    std::condition_variable callbackReceivedCv;
+    bool receivedCallback = false;
+
+    BLASTBufferQueueHelper adapter(mSurfaceControl, mDisplayWidth, mDisplayHeight);
+    ASSERT_EQ(nullptr, adapter.getTransactionReadyCallback());
+    auto callback = [&](Transaction*) {
+        std::unique_lock<std::mutex> lock(mutex);
+        receivedCallback = true;
+        callbackReceivedCv.notify_one();
+    };
+    adapter.syncNextTransaction(callback);
+    ASSERT_NE(nullptr, adapter.getTransactionReadyCallback());
+
+    adapter.clearSyncTransaction();
+
+    sp<IGraphicBufferProducer> igbProducer;
+    setUpProducer(adapter, igbProducer);
+    queueBuffer(igbProducer, 0, 255, 0, 0);
+
+    std::unique_lock<std::mutex> lock(mutex);
+    if (!receivedCallback) {
+        ASSERT_EQ(callbackReceivedCv.wait_for(lock, std::chrono::seconds(3)),
+                  std::cv_status::timeout)
+                << "did not receive callback";
+    }
+
+    ASSERT_FALSE(receivedCallback);
 }
 
 TEST_F(BLASTBufferQueueTest, SyncNextTransactionDropBuffer) {
@@ -1143,9 +1153,10 @@ TEST_F(BLASTBufferQueueTest, SyncNextTransactionDropBuffer) {
 
     CallbackData callbackData;
     transactionCallback.getCallbackData(&callbackData);
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+    ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
     ASSERT_NO_FATAL_FAILURE(
             checkScreenCapture(r, g, b, {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
+    sync.apply();
 }
 
 // This test will currently fail because the old surfacecontrol will steal the last presented buffer
@@ -1161,7 +1172,7 @@ TEST_F(BLASTBufferQueueTest, DISABLED_DisconnectProducerTest) {
                 mClient->createSurface(String8("TestSurface"), mDisplayWidth, mDisplayHeight,
                                        PIXEL_FORMAT_RGBA_8888,
                                        ISurfaceComposerClient::eFXSurfaceBufferState,
-                                       /*parent*/ nullptr);
+                                       /*parent*/ mRootSurfaceControl->getHandle());
         Transaction()
                 .setLayerStack(mSurfaceControl, ui::DEFAULT_LAYER_STACK)
                 .setLayer(mSurfaceControl, std::numeric_limits<int32_t>::max())
@@ -1186,7 +1197,7 @@ TEST_F(BLASTBufferQueueTest, DISABLED_DisconnectProducerTest) {
         CallbackData callbackData;
         transactionCallback.getCallbackData(&callbackData);
         // capture screen and verify that it is red
-        ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+        ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
         ASSERT_NO_FATAL_FAILURE(
                 checkScreenCapture(255, 0, 0,
                                    {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
@@ -1204,7 +1215,7 @@ TEST_F(BLASTBufferQueueTest, DISABLED_UpdateSurfaceControlTest) {
                 mClient->createSurface(String8("TestSurface"), mDisplayWidth, mDisplayHeight,
                                        PIXEL_FORMAT_RGBA_8888,
                                        ISurfaceComposerClient::eFXSurfaceBufferState,
-                                       /*parent*/ nullptr);
+                                       /*parent*/ mRootSurfaceControl->getHandle());
         Transaction()
                 .setLayerStack(mSurfaceControl, ui::DEFAULT_LAYER_STACK)
                 .setLayer(mSurfaceControl, std::numeric_limits<int32_t>::max())
@@ -1229,7 +1240,7 @@ TEST_F(BLASTBufferQueueTest, DISABLED_UpdateSurfaceControlTest) {
         CallbackData callbackData;
         transactionCallback.getCallbackData(&callbackData);
         // capture screen and verify that it is red
-        ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+        ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
         ASSERT_NO_FATAL_FAILURE(
                 checkScreenCapture(255, 0, 0,
                                    {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight}));
@@ -1287,43 +1298,6 @@ TEST_F(BLASTBufferQueueTest, QueryNativeWindowQueuesToWindowComposer) {
                                   &queuesToNativeWindow);
     ASSERT_EQ(NO_ERROR, err);
     ASSERT_EQ(queuesToNativeWindow, 1);
-}
-
-// Test a slow producer doesn't hold up a faster producer from the same client. Essentially tests
-// BBQ uses separate transaction queues.
-TEST_F(BLASTBufferQueueTest, OutOfOrderTransactionTest) {
-    sp<SurfaceControl> bgSurface =
-            mClient->createSurface(String8("BGTest"), 0, 0, PIXEL_FORMAT_RGBA_8888,
-                                   ISurfaceComposerClient::eFXSurfaceBufferState);
-    ASSERT_NE(nullptr, bgSurface.get());
-    Transaction t;
-    t.setLayerStack(bgSurface, ui::DEFAULT_LAYER_STACK)
-            .show(bgSurface)
-            .setDataspace(bgSurface, ui::Dataspace::V0_SRGB)
-            .setLayer(bgSurface, std::numeric_limits<int32_t>::max() - 1)
-            .apply();
-
-    BLASTBufferQueueHelper slowAdapter(mSurfaceControl, mDisplayWidth, mDisplayHeight);
-    sp<IGraphicBufferProducer> slowIgbProducer;
-    setUpProducer(slowAdapter, slowIgbProducer);
-    nsecs_t presentTimeDelay = std::chrono::nanoseconds(500ms).count();
-    queueBuffer(slowIgbProducer, 0 /* r */, 255 /* g */, 0 /* b */, presentTimeDelay);
-
-    BLASTBufferQueueHelper fastAdapter(bgSurface, mDisplayWidth, mDisplayHeight);
-    sp<IGraphicBufferProducer> fastIgbProducer;
-    setUpProducer(fastAdapter, fastIgbProducer);
-    uint8_t r = 255;
-    uint8_t g = 0;
-    uint8_t b = 0;
-    queueBuffer(fastIgbProducer, r, g, b, 0 /* presentTimeDelay */);
-    fastAdapter.waitForCallbacks();
-
-    // capture screen and verify that it is red
-    ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
-
-    ASSERT_NO_FATAL_FAILURE(
-            checkScreenCapture(r, g, b,
-                               {0, 0, (int32_t)mDisplayWidth, (int32_t)mDisplayHeight / 2}));
 }
 
 TEST_F(BLASTBufferQueueTest, TransformHint) {
@@ -1398,8 +1372,8 @@ public:
         igbProducer->queueBuffer(slot, input, &qbOutput);
         ASSERT_NE(ui::Transform::ROT_INVALID, qbOutput.transformHint);
 
-        adapter.waitForCallbacks();
-        ASSERT_EQ(NO_ERROR, captureDisplay(mCaptureArgs, mCaptureResults));
+        Transaction().apply(true /* synchronous */);
+        ASSERT_EQ(NO_ERROR, ScreenCapture::captureLayers(mCaptureArgs, mCaptureResults));
 
         switch (tr) {
             case ui::Transform::ROT_0:
@@ -1610,6 +1584,9 @@ TEST_F(BLASTFrameEventHistoryTest, FrameEventHistory_Basic) {
     nsecs_t postedTimeB = 0;
     setUpAndQueueBuffer(igbProducer, &requestedPresentTimeB, &postedTimeB, &qbOutput, true);
     history.applyDelta(qbOutput.frameTimestamps);
+
+    adapter.waitForCallback(2);
+
     events = history.getFrame(1);
     ASSERT_NE(nullptr, events);
 
@@ -1619,7 +1596,9 @@ TEST_F(BLASTFrameEventHistoryTest, FrameEventHistory_Basic) {
     ASSERT_GE(events->postedTime, postedTimeA);
 
     ASSERT_GE(events->latchTime, postedTimeA);
-    ASSERT_GE(events->dequeueReadyTime, events->latchTime);
+    if (flags::frametimestamps_previousrelease()) {
+        ASSERT_EQ(events->dequeueReadyTime, FrameEvents::TIMESTAMP_PENDING);
+    }
     ASSERT_NE(nullptr, events->gpuCompositionDoneFence);
     ASSERT_NE(nullptr, events->displayPresentFence);
     ASSERT_NE(nullptr, events->releaseFence);
@@ -1630,6 +1609,50 @@ TEST_F(BLASTFrameEventHistoryTest, FrameEventHistory_Basic) {
     ASSERT_EQ(2, events->frameNumber);
     ASSERT_EQ(requestedPresentTimeB, events->requestedPresentTime);
     ASSERT_GE(events->postedTime, postedTimeB);
+
+    // Now do the same as above with a third buffer, so that timings related to
+    // buffer releases make it back to the first frame.
+    nsecs_t requestedPresentTimeC = 0;
+    nsecs_t postedTimeC = 0;
+    setUpAndQueueBuffer(igbProducer, &requestedPresentTimeC, &postedTimeC, &qbOutput, true);
+    history.applyDelta(qbOutput.frameTimestamps);
+
+    adapter.waitForCallback(3);
+
+    // Check the first frame...
+    events = history.getFrame(1);
+    ASSERT_NE(nullptr, events);
+    ASSERT_EQ(1, events->frameNumber);
+    ASSERT_EQ(requestedPresentTimeA, events->requestedPresentTime);
+    ASSERT_GE(events->postedTime, postedTimeA);
+    ASSERT_GE(events->latchTime, postedTimeA);
+    // Now dequeueReadyTime is valid, because the release timings finally
+    // propaged to queueBuffer()
+    ASSERT_GE(events->dequeueReadyTime, events->latchTime);
+    ASSERT_NE(nullptr, events->gpuCompositionDoneFence);
+    ASSERT_NE(nullptr, events->displayPresentFence);
+    ASSERT_NE(nullptr, events->releaseFence);
+
+    // ...and the second
+    events = history.getFrame(2);
+    ASSERT_NE(nullptr, events);
+    ASSERT_EQ(2, events->frameNumber);
+    ASSERT_EQ(requestedPresentTimeB, events->requestedPresentTime);
+    ASSERT_GE(events->postedTime, postedTimeB);
+    ASSERT_GE(events->latchTime, postedTimeB);
+    if (flags::frametimestamps_previousrelease()) {
+        ASSERT_EQ(events->dequeueReadyTime, FrameEvents::TIMESTAMP_PENDING);
+    }
+    ASSERT_NE(nullptr, events->gpuCompositionDoneFence);
+    ASSERT_NE(nullptr, events->displayPresentFence);
+    ASSERT_NE(nullptr, events->releaseFence);
+
+    // ...and finally the third!
+    events = history.getFrame(3);
+    ASSERT_NE(nullptr, events);
+    ASSERT_EQ(3, events->frameNumber);
+    ASSERT_EQ(requestedPresentTimeC, events->requestedPresentTime);
+    ASSERT_GE(events->postedTime, postedTimeC);
 
     // wait for any callbacks that have not been received
     adapter.waitForCallbacks();
@@ -1689,7 +1712,45 @@ TEST_F(BLASTFrameEventHistoryTest, FrameEventHistory_DroppedFrame) {
     setUpAndQueueBuffer(igbProducer, &requestedPresentTimeC, &postedTimeC, &qbOutput, true);
     history.applyDelta(qbOutput.frameTimestamps);
 
+    adapter.waitForCallback(3);
+
     // frame number, requestedPresentTime, and postTime should not have changed
+    ASSERT_EQ(1, events->frameNumber);
+    ASSERT_EQ(requestedPresentTimeA, events->requestedPresentTime);
+    ASSERT_GE(events->postedTime, postedTimeA);
+
+    // a valid latchtime and pre and post composition info should not be set for the dropped frame
+    ASSERT_FALSE(events->hasLatchInfo());
+    ASSERT_FALSE(events->hasDequeueReadyInfo());
+    ASSERT_FALSE(events->hasGpuCompositionDoneInfo());
+    ASSERT_FALSE(events->hasDisplayPresentInfo());
+    ASSERT_FALSE(events->hasReleaseInfo());
+
+    // we should also have gotten values for the presented frame
+    events = history.getFrame(2);
+    ASSERT_NE(nullptr, events);
+    ASSERT_EQ(2, events->frameNumber);
+    ASSERT_EQ(requestedPresentTimeB, events->requestedPresentTime);
+    ASSERT_GE(events->postedTime, postedTimeB);
+    ASSERT_GE(events->latchTime, postedTimeB);
+
+    if (flags::frametimestamps_previousrelease()) {
+        ASSERT_EQ(events->dequeueReadyTime, FrameEvents::TIMESTAMP_PENDING);
+    }
+    ASSERT_NE(nullptr, events->gpuCompositionDoneFence);
+    ASSERT_NE(nullptr, events->displayPresentFence);
+    ASSERT_NE(nullptr, events->releaseFence);
+
+    // Queue another buffer to check for timestamps that came late
+    nsecs_t requestedPresentTimeD = 0;
+    nsecs_t postedTimeD = 0;
+    setUpAndQueueBuffer(igbProducer, &requestedPresentTimeD, &postedTimeD, &qbOutput, true);
+    history.applyDelta(qbOutput.frameTimestamps);
+
+    adapter.waitForCallback(4);
+
+    // frame number, requestedPresentTime, and postTime should not have changed
+    events = history.getFrame(1);
     ASSERT_EQ(1, events->frameNumber);
     ASSERT_EQ(requestedPresentTimeA, events->requestedPresentTime);
     ASSERT_GE(events->postedTime, postedTimeA);

@@ -32,7 +32,7 @@ license {
         "legacy_unencumbered",
     ],
     license_text: [
-        "LICENSE.rst",
+        "LICENSE",
         "NOTICE",
     ],
 }
@@ -115,6 +115,10 @@ cc_library_static {
     defaults: ["fmtlib-non-test-defaults"],
     sdk_version: "current",
     stl: "c++_static",
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.mediaprovider",
+    ],
 }
 
 cc_defaults {
@@ -129,7 +133,11 @@ cc_defaults {
     host_supported: true,
     test_suites: ["general-tests"],
     // The tests require exceptions and RTTI.
-    cflags: ["-fexceptions"],
+    cflags: [
+        "-fexceptions",
+        // https://github.com/fmtlib/fmt/issues/3884
+        "-Wno-non-virtual-dtor",
+    ],
     rtti: true,
     // The usual "gtest *and* gmock, please" dance...
     gtest: false,
@@ -146,26 +154,43 @@ cc_defaults {
 
 // Most of the fmtlib tests.
 cc_test {
-    name: "fmtlib_test",
+    name: "fmtlib_test_1",
     defaults: ["fmtlib-test-defaults"],
     srcs: [
+        "test/args-test.cc",
         "test/chrono-test.cc",
         "test/color-test.cc",
         "test/core-test.cc",
+        "test/enforce-checks-test.cc",
         "test/format-test.cc",
+        "test/noexception-test.cc",
         // Some of the os-test tests deliberately try to do bad things with
         // file descriptors, but Android's fdsan won't let them.
         // "test/os-test.cc",
-        "test/printf-test.cc",
-        "test/ranges-test.cc",
+        "test/ranges-odr-test.cc",
         "test/scan-test.cc",
+        // Depends on filesystem_error declarations which are not linked.
+        // "test/std-test.cc",
+        "test/unicode-test.cc",
+        "test/xchar-test.cc",
     ],
 }
 
 // This one needs to be separate because some of the test names overlap with
 // other tests.
 cc_test {
-    name: "fmtlib_ostream_test",
+    name: "fmtlib_test_2",
     defaults: ["fmtlib-test-defaults"],
-    srcs: ["test/ostream-test.cc"],
+    srcs: [
+        "test/ostream-test.cc",
+        "test/printf-test.cc",
+    ],
+}
+
+cc_test {
+    name: "fmtlib_test_3",
+    defaults: ["fmtlib-test-defaults"],
+    srcs: [
+        "test/ranges-test.cc",
+    ],
 }

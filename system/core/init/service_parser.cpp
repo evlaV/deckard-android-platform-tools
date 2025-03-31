@@ -52,6 +52,18 @@ using android::base::StartsWith;
 namespace android {
 namespace init {
 
+#ifdef INIT_FULL_SOURCES
+// on full sources, we have better information on device to
+// make this decision
+constexpr bool kAlwaysErrorUserRoot = false;
+#else
+constexpr uint64_t kBuildShippingApiLevel = BUILD_SHIPPING_API_LEVEL + 0 /* +0 if empty */;
+// on partial sources, the host build, we don't have the specific
+// vendor API level, but we can enforce things based on the
+// shipping API level.
+constexpr bool kAlwaysErrorUserRoot = kBuildShippingApiLevel > __ANDROID_API_V__;
+#endif
+
 Result<void> ServiceParser::ParseCapabilities(std::vector<std::string>&& args) {
     service_->capabilities_ = 0;
 
@@ -179,8 +191,9 @@ Result<void> ServiceParser::ParsePriority(std::vector<std::string>&& args) {
     if (!ParseInt(args[1], &service_->proc_attr_.priority,
                   static_cast<int>(ANDROID_PRIORITY_HIGHEST),  // highest is negative
                   static_cast<int>(ANDROID_PRIORITY_LOWEST))) {
-        return Errorf("process priority value must be range {} - {}", ANDROID_PRIORITY_HIGHEST,
-                      ANDROID_PRIORITY_LOWEST);
+        return Errorf("process priority value must be range {} - {}",
+                      static_cast<int>(ANDROID_PRIORITY_HIGHEST),
+                      static_cast<int>(ANDROID_PRIORITY_LOWEST));
     }
     return {};
 }
@@ -679,12 +692,13 @@ Result<void> ServiceParser::EndSection() {
     }
 
     if (service_->proc_attr_.parsed_uid == std::nullopt) {
-        if (android::base::GetIntProperty("ro.vendor.api_level", 0) > __ANDROID_API_U__) {
+        if (kAlwaysErrorUserRoot ||
+            android::base::GetIntProperty("ro.vendor.api_level", 0) > 202404) {
             return Error() << "No user specified for service '" << service_->name()
-                           << "'. Defaults to root.";
+                           << "', so it would have been root.";
         } else {
             LOG(WARNING) << "No user specified for service '" << service_->name()
-                         << "'. Defaults to root.";
+                         << "', so it is root.";
         }
     }
 

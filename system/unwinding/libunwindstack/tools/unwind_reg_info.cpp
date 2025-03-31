@@ -26,6 +26,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include <unwindstack/DwarfLocation.h>
 #include <unwindstack/DwarfMemory.h>
 #include <unwindstack/DwarfSection.h>
@@ -49,7 +55,8 @@ void PrintSignedValue(int64_t value) {
   }
 }
 
-void PrintExpression(Memory* memory, uint8_t class_type, uint64_t end, uint64_t length) {
+void PrintExpression(std::shared_ptr<Memory>& memory, uint8_t class_type, uint64_t end,
+                     uint64_t length) {
   std::vector<std::string> lines;
   DwarfMemory dwarf_memory(memory);
   if (class_type == ELFCLASS32) {
@@ -64,8 +71,8 @@ void PrintExpression(Memory* memory, uint8_t class_type, uint64_t end, uint64_t 
   }
 }
 
-void PrintRegInformation(DwarfSection* section, Memory* memory, uint64_t pc, uint8_t class_type,
-                         ArchEnum arch) {
+void PrintRegInformation(DwarfSection* section, std::shared_ptr<Memory>&& memory, uint64_t pc,
+                         uint8_t class_type, ArchEnum arch) {
   const DwarfFde* fde = section->GetFdeFromPc(pc);
   if (fde == nullptr) {
     printf("  No fde found.\n");
@@ -152,7 +159,7 @@ void PrintArmRegInformation(ElfInterfaceArm* interface, uint64_t pc) {
     return;
   }
 
-  ArmExidx arm(nullptr, interface->memory(), nullptr);
+  ArmExidx arm(nullptr, interface->memory().get(), nullptr);
 
   arm.set_log(ARM_LOG_BY_REG);
   arm.set_log_skip_execution(true);
@@ -171,7 +178,8 @@ void PrintArmRegInformation(ElfInterfaceArm* interface, uint64_t pc) {
 }
 
 int GetInfo(const char* file, uint64_t offset, uint64_t pc) {
-  Elf elf(Memory::CreateFileMemory(file, offset).release());
+  auto elf_memory = Memory::CreateFileMemory(file, offset);
+  Elf elf(elf_memory);
   if (!elf.Init() || !elf.valid()) {
     printf("%s is not a valid elf file.\n", file);
     return 1;

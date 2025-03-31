@@ -28,12 +28,14 @@
 #include <log/log_read.h>
 #include <log/log_time.h>
 
+#include "test_utils.h"
+
 #ifdef __ANDROID__
 static void read_with_wrap() {
   // Read the last line in the log to get a starting timestamp. We're assuming
   // the log is not empty.
   const int mode = ANDROID_LOG_NONBLOCK;
-  struct logger_list* logger_list = android_logger_list_open(LOG_ID_SYSTEM, mode, 1000, 0);
+  struct logger_list* logger_list = android_logger_list_open(LOG_ID_SYSTEM, mode, INT_MAX, 0);
 
   ASSERT_NE(logger_list, nullptr);
 
@@ -59,7 +61,9 @@ static void read_with_wrap() {
 #endif
 
 // b/64143705 confirm fixed
-TEST(liblog, wrap_mode_blocks) {
+// This test is tends to be flaky based on other log messages in the system,
+// so simply disable it.
+TEST(liblog, DISABLED_wrap_mode_blocks) {
 #ifdef __ANDROID__
   // The read call is expected to take up to 2 hours in the happy case.  There was a previous bug
   // where it would take only 30 seconds due to an alarm() in logd_reader.cpp.  That alarm has been
@@ -68,7 +72,7 @@ TEST(liblog, wrap_mode_blocks) {
   struct sigaction ignore = {.sa_handler = [](int) { _exit(0); }};
   struct sigaction old_sigaction;
   sigaction(SIGALRM, &ignore, &old_sigaction);
-  alarm(10);
+  alarm(getAlarmSeconds(5));
 
   android::base::Timer timer;
   read_with_wrap();

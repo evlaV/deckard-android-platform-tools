@@ -101,6 +101,8 @@ extern const char* const kFeatureSendRecv2Zstd;
 extern const char* const kFeatureSendRecv2DryRunSend;
 // adbd supports delayed acks.
 extern const char* const kFeatureDelayedAck;
+// adbd supports `dev-raw` service
+extern const char* const kFeatureDevRaw;
 
 TransportId NextTransportId();
 
@@ -136,6 +138,9 @@ struct Connection {
     atransport* transport_ = nullptr;
 
     static std::unique_ptr<Connection> FromFd(unique_fd fd);
+
+    virtual uint64_t NegotiatedSpeedMbps() { return 0; }
+    virtual uint64_t MaxSpeedMbps() { return 0; }
 };
 
 // Abstraction for a blocking packet transport.
@@ -466,21 +471,21 @@ atransport* acquire_one_transport(TransportType type, const char* serial, Transp
                                   bool* is_ambiguous, std::string* error_out,
                                   bool accept_any_state = false);
 void kick_transport(atransport* t, bool reset = false);
-void update_transports(void);
+void update_transports();
 
 // Iterates across all of the current and pending transports.
 // Stops iteration and returns false if fn returns false, otherwise returns true.
 bool iterate_transports(std::function<bool(const atransport*)> fn);
 
-void init_reconnect_handler(void);
-void init_transport_registration(void);
-void init_mdns_transport_discovery(void);
-std::string list_transports(bool long_listing);
+void init_reconnect_handler();
+void init_mdns_transport_discovery();
 
 #if ADB_HOST
 atransport* find_transport(const char* serial);
 
 void kick_all_tcp_devices();
+
+bool using_bonjour(void);
 #endif
 
 void kick_all_transports();
@@ -520,7 +525,11 @@ void close_usb_devices(std::function<bool(const atransport*)> predicate, bool re
 
 void send_packet(apacket* p, atransport* t);
 
-asocket* create_device_tracker(bool long_output);
+#if ADB_HOST
+enum TrackerOutputType { SHORT_TEXT, LONG_TEXT, PROTOBUF, TEXT_PROTOBUF };
+asocket* create_device_tracker(TrackerOutputType type);
+std::string list_transports(TrackerOutputType type);
+#endif
 
 #if !ADB_HOST
 unique_fd adb_listen(std::string_view addr, std::string* error);

@@ -16,6 +16,7 @@
 
 #include "first_stage_mount.h"
 
+#include <signal.h>
 #include <stdlib.h>
 #include <sys/mount.h>
 #include <unistd.h>
@@ -33,6 +34,7 @@
 #include <android-base/logging.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <android/avf_cc_flags.h>
 #include <fs_avb/fs_avb.h>
 #include <fs_mgr.h>
 #include <fs_mgr_dm_linear.h>
@@ -272,6 +274,11 @@ bool FirstStageMountVBootV2::DoFirstStageMount() {
     return true;
 }
 
+// TODO: should this be in a library in packages/modules/Virtualization first_stage_init links?
+static bool IsMicrodroidStrictBoot() {
+    return access("/proc/device-tree/chosen/avf,strict-boot", F_OK) == 0;
+}
+
 bool FirstStageMountVBootV2::InitDevices() {
     std::set<std::string> devices;
     GetSuperDeviceName(&devices);
@@ -281,6 +288,14 @@ bool FirstStageMountVBootV2::InitDevices() {
     }
     if (!InitRequiredDevices(std::move(devices))) {
         return false;
+    }
+
+    if (IsMicrodroid() && android::virtualization::IsOpenDiceChangesFlagEnabled()) {
+        if (IsMicrodroidStrictBoot()) {
+            if (!block_dev_init_.InitPlatformDevice("open-dice0")) {
+                return false;
+            }
+        }
     }
 
     if (IsDmLinearEnabled()) {
@@ -380,11 +395,7 @@ bool FirstStageMountVBootV2::CreateSnapshotPartitions(SnapshotManager* sm) {
 
     use_snapuserd_ = sm->IsSnapuserdRequired();
     if (use_snapuserd_) {
-        if (sm->UpdateUsesUserSnapshots()) {
-            LaunchFirstStageSnapuserd(SnapshotDriver::DM_USER);
-        } else {
-            LaunchFirstStageSnapuserd(SnapshotDriver::DM_SNAPSHOT);
-        }
+        LaunchFirstStageSnapuserd();
     }
 
     sm->SetUeventRegenCallback([this](const std::string& device) -> bool {
@@ -527,8 +538,47 @@ bool FirstStageMountVBootV2::TrySwitchSystemAsRoot() {
     return true;
 }
 
+static bool MaybeDeriveMicrodroidVendorDiceNode(Fstab* fstab) {
+    std::optional<std::string> microdroid_vendor_block_dev;
+    for (auto entry = fstab->begin(); entry != fstab->end(); entry++) {
+        if (entry->mount_point == "/vendor") {
+            microdroid_vendor_block_dev.emplace(entry->blk_device);
+            break;
+        }
+    }
+    if (!microdroid_vendor_block_dev.has_value()) {
+        LOG(VERBOSE) << "No microdroid vendor partition to mount";
+        return true;
+    }
+    // clang-format off
+    const std::array<const char*, 8> args = {
+        "/system/bin/derive_microdroid_vendor_dice_node",
+                "--dice-driver", "/dev/open-dice0",
+                "--microdroid-vendor-disk-image", microdroid_vendor_block_dev->data(),
+                "--output", "/microdroid_resources/dice_chain.raw", nullptr,
+    };
+    // clang-format-on
+    // ForkExecveAndWaitForCompletion calls waitpid to wait for the fork-ed process to finish.
+    // The first_stage_console adds SA_NOCLDWAIT flag to the SIGCHLD handler, which means that
+    // waitpid will always return -ECHLD. Here we re-register a default handler, so that waitpid
+    // works.
+    LOG(INFO) << "Deriving dice node for microdroid vendor partition";
+    signal(SIGCHLD, SIG_DFL);
+    if (!ForkExecveAndWaitForCompletion(args[0], (char**)args.data())) {
+        LOG(ERROR) << "Failed to derive microdroid vendor dice node";
+        return false;
+    }
+    return true;
+}
+
 bool FirstStageMountVBootV2::MountPartitions() {
     if (!TrySwitchSystemAsRoot()) return false;
+
+    if (IsMicrodroid() && android::virtualization::IsOpenDiceChangesFlagEnabled()) {
+        if (!MaybeDeriveMicrodroidVendorDiceNode(&fstab_)) {
+            return false;
+        }
+    }
 
     if (!SkipMountingPartitions(&fstab_, true /* verbose */)) return false;
 
@@ -732,6 +782,15 @@ bool FirstStageMountVBootV2::GetDmVerityDevices(std::set<std::string>* devices) 
     return true;
 }
 
+bool IsHashtreeDisabled(const AvbHandle& vbmeta, const std::string& mount_point) {
+    if (vbmeta.status() == AvbHandleStatus::kHashtreeDisabled ||
+        vbmeta.status() == AvbHandleStatus::kVerificationDisabled) {
+        LOG(ERROR) << "Top-level vbmeta is disabled, skip Hashtree setup for " << mount_point;
+        return true;  // Returns true to mount the partition directly.
+    }
+    return false;
+}
+
 bool FirstStageMountVBootV2::SetUpDmVerity(FstabEntry* fstab_entry) {
     AvbHashtreeResult hashtree_result;
 
@@ -740,34 +799,46 @@ bool FirstStageMountVBootV2::SetUpDmVerity(FstabEntry* fstab_entry) {
     if (!fstab_entry->avb_keys.empty()) {
         if (!InitAvbHandle()) return false;
         // Checks if hashtree should be disabled from the top-level /vbmeta.
-        if (avb_handle_->status() == AvbHandleStatus::kHashtreeDisabled ||
-            avb_handle_->status() == AvbHandleStatus::kVerificationDisabled) {
-            LOG(ERROR) << "Top-level vbmeta is disabled, skip Hashtree setup for "
-                       << fstab_entry->mount_point;
-            return true;  // Returns true to mount the partition directly.
+        if (IsHashtreeDisabled(*avb_handle_, fstab_entry->mount_point)) {
+            return true;
+        }
+        auto avb_standalone_handle = AvbHandle::LoadAndVerifyVbmeta(
+                *fstab_entry, preload_avb_key_blobs_[fstab_entry->avb_keys]);
+        if (!avb_standalone_handle) {
+            LOG(ERROR) << "Failed to load offline vbmeta for " << fstab_entry->mount_point;
+            // Fallbacks to built-in hashtree if fs_mgr_flags.avb is set.
+            if (!fstab_entry->fs_mgr_flags.avb) return false;
+            LOG(INFO) << "Fallback to built-in hashtree for " << fstab_entry->mount_point;
+            hashtree_result =
+                    avb_handle_->SetUpAvbHashtree(fstab_entry, false /* wait_for_verity_dev */);
         } else {
-            auto avb_standalone_handle = AvbHandle::LoadAndVerifyVbmeta(
-                    *fstab_entry, preload_avb_key_blobs_[fstab_entry->avb_keys]);
-            if (!avb_standalone_handle) {
-                LOG(ERROR) << "Failed to load offline vbmeta for " << fstab_entry->mount_point;
-                // Fallbacks to built-in hashtree if fs_mgr_flags.avb is set.
-                if (!fstab_entry->fs_mgr_flags.avb) return false;
-                LOG(INFO) << "Fallback to built-in hashtree for " << fstab_entry->mount_point;
-                hashtree_result =
-                        avb_handle_->SetUpAvbHashtree(fstab_entry, false /* wait_for_verity_dev */);
-            } else {
-                // Sets up hashtree via the standalone handle.
-                if (IsStandaloneImageRollback(*avb_handle_, *avb_standalone_handle, *fstab_entry)) {
-                    return false;
-                }
-                hashtree_result = avb_standalone_handle->SetUpAvbHashtree(
-                        fstab_entry, false /* wait_for_verity_dev */);
+            // Sets up hashtree via the standalone handle.
+            if (IsStandaloneImageRollback(*avb_handle_, *avb_standalone_handle, *fstab_entry)) {
+                return false;
             }
+            hashtree_result = avb_standalone_handle->SetUpAvbHashtree(
+                    fstab_entry, false /* wait_for_verity_dev */);
         }
     } else if (fstab_entry->fs_mgr_flags.avb) {
         if (!InitAvbHandle()) return false;
         hashtree_result =
                 avb_handle_->SetUpAvbHashtree(fstab_entry, false /* wait_for_verity_dev */);
+    } else if (!fstab_entry->avb_hashtree_digest.empty()) {
+        // When fstab_entry has neither avb_keys nor avb flag, try using
+        // avb_hashtree_digest.
+        if (!InitAvbHandle()) return false;
+        // Checks if hashtree should be disabled from the top-level /vbmeta.
+        if (IsHashtreeDisabled(*avb_handle_, fstab_entry->mount_point)) {
+            return true;
+        }
+        auto avb_standalone_handle = AvbHandle::LoadAndVerifyVbmeta(*fstab_entry);
+        if (!avb_standalone_handle) {
+            LOG(ERROR) << "Failed to load vbmeta based on hashtree descriptor root digest for "
+                       << fstab_entry->mount_point;
+            return false;
+        }
+        hashtree_result = avb_standalone_handle->SetUpAvbHashtree(fstab_entry,
+                                                                  false /* wait_for_verity_dev */);
     } else {
         return true;  // No need AVB, returns true to mount the partition directly.
     }

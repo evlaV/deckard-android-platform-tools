@@ -35,9 +35,13 @@ class Memory {
   static std::shared_ptr<Memory> CreateProcessMemory(pid_t pid);
   static std::shared_ptr<Memory> CreateProcessMemoryCached(pid_t pid);
   static std::shared_ptr<Memory> CreateProcessMemoryThreadCached(pid_t pid);
+  // This should only be used for performance. Using this could result
+  // in crashes if used to try and read stack data.
+  static std::shared_ptr<Memory> CreateProcessMemoryLocalUnsafe();
+
   static std::shared_ptr<Memory> CreateOfflineMemory(const uint8_t* data, uint64_t start,
                                                      uint64_t end);
-  static std::unique_ptr<Memory> CreateFileMemory(const std::string& path, uint64_t offset,
+  static std::shared_ptr<Memory> CreateFileMemory(const std::string& path, uint64_t offset,
                                                   uint64_t size = UINT64_MAX);
 
   virtual MemoryCacheBase* AsMemoryCacheBase() { return nullptr; }

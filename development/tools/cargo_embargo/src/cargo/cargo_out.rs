@@ -14,15 +14,16 @@
 
 use super::metadata::WorkspaceMetadata;
 use super::{Crate, CrateType, Extern, ExternType};
+use crate::CargoOutput;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use log::debug;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::env;
-use std::fs::{read_to_string, File};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -30,16 +31,14 @@ use std::path::PathBuf;
 /// the rustc invocations.
 ///
 /// Ignores crates outside the current directory and build script crates.
-pub fn parse_cargo_out(
-    cargo_out_path: impl AsRef<Path>,
-    cargo_metadata_path: impl AsRef<Path>,
-) -> Result<Vec<Crate>> {
-    let cargo_out = read_to_string(cargo_out_path).context("failed to read cargo.out")?;
-    let metadata = serde_json::from_reader(
-        File::open(cargo_metadata_path).context("failed to open cargo.metadata")?,
+pub fn parse_cargo_out(cargo_output: &CargoOutput) -> Result<Vec<Crate>> {
+    let metadata = serde_json::from_str(&cargo_output.cargo_metadata)
+        .context("failed to parse cargo metadata")?;
+    parse_cargo_out_str(
+        &cargo_output.cargo_out,
+        &metadata,
+        env::current_dir().unwrap().canonicalize().unwrap(),
     )
-    .context("failed to parse cargo.metadata")?;
-    parse_cargo_out_str(&cargo_out, &metadata, env::current_dir().unwrap().canonicalize().unwrap())
 }
 
 /// Parses the given `cargo.out` and `cargo.metadata` file contents and generates a list of crates
@@ -52,13 +51,19 @@ fn parse_cargo_out_str(
     base_directory: impl AsRef<Path>,
 ) -> Result<Vec<Crate>> {
     let cargo_out = CargoOut::parse(cargo_out).context("failed to parse cargo.out")?;
+    debug!("Parsed cargo output: {:?}", cargo_out);
 
     assert!(cargo_out.cc_invocations.is_empty(), "cc not supported yet");
     assert!(cargo_out.ar_invocations.is_empty(), "ar not supported yet");
 
+    let mut raw_names = BTreeMap::new();
+    for rustc in cargo_out.rustc_invocations.iter() {
+        raw_name_from_rustc_invocation(rustc, &mut raw_names)
+    }
+
     let mut crates = Vec::new();
     for rustc in cargo_out.rustc_invocations.iter() {
-        let c = Crate::from_rustc_invocation(rustc, metadata)
+        let c = Crate::from_rustc_invocation(rustc, metadata, &cargo_out.tests, &raw_names)
             .with_context(|| format!("failed to process rustc invocation: {rustc}"))?;
         // Ignore build.rs crates.
         if c.name.starts_with("build_script_") {
@@ -70,7 +75,55 @@ fn parse_cargo_out_str(
         }
         crates.push(c);
     }
+    crates.dedup();
     Ok(crates)
+}
+
+fn args_from_rustc_invocation(rustc: &str) -> Vec<&str> {
+    rustc
+        .split_whitespace()
+        // Remove quotes from simple strings, panic for others.
+        .map(|arg| match (arg.chars().next(), arg.chars().skip(1).last()) {
+            (Some('"'), Some('"')) => &arg[1..arg.len() - 1],
+            (Some('\''), Some('\'')) => &arg[1..arg.len() - 1],
+            (Some('"'), _) => panic!("can't handle strings with whitespace"),
+            (Some('\''), _) => panic!("can't handle strings with whitespace"),
+            _ => arg,
+        })
+        .collect()
+}
+
+/// Parse out the path name for a crate from a rustc invocation
+fn raw_name_from_rustc_invocation(rustc: &str, raw_names: &mut BTreeMap<String, String>) {
+    let mut crate_name = String::new();
+    // split into args
+    let mut arg_iter = args_from_rustc_invocation(rustc).into_iter();
+    // look for the crate name and a string ending in .rs and check whether the
+    // path string contains a kebab-case version of the crate name
+    while let Some(arg) = arg_iter.next() {
+        match arg {
+            "--crate-name" => crate_name = arg_iter.next().unwrap().to_string(),
+            _ if arg.ends_with(".rs") => {
+                assert_ne!(crate_name, "", "--crate-name option should precede input");
+                let snake_case_arg = arg.replace('-', "_");
+                if let Some(idx) = snake_case_arg.rfind(&crate_name) {
+                    let raw_name = arg[idx..idx + crate_name.len()].to_string();
+                    if crate_name != raw_name {
+                        raw_names.insert(crate_name, raw_name);
+                    }
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a test target contains any tests or benchmarks.
+#[derive(Debug)]
+struct TestContents {
+    tests: bool,
+    benchmarks: bool,
 }
 
 /// Raw-ish data extracted from cargo.out file.
@@ -86,6 +139,9 @@ struct CargoOut {
     // line number => line
     warning_lines: BTreeMap<usize, String>,
     warning_files: Vec<String>,
+
+    // output filename => test filename => whether it contains any tests or benchmarks
+    tests: BTreeMap<String, BTreeMap<PathBuf, TestContents>>,
 
     errors: Vec<String>,
     test_errors: Vec<String>,
@@ -109,6 +165,7 @@ impl CargoOut {
     fn parse(contents: &str) -> Result<CargoOut> {
         let mut result = CargoOut::default();
         let mut in_tests = false;
+        let mut cur_test_key = None;
         let mut lines_iter = contents.lines().enumerate();
         while let Some((n, line)) = lines_iter.next() {
             if line.starts_with("warning: ") {
@@ -187,6 +244,27 @@ impl CargoOut {
                 in_tests = line.contains("cargo test") && line.contains("--list");
                 continue;
             }
+
+            // `cargo test -- --list` output
+            // Example: Running unittests src/lib.rs (target.tmp/x86_64-unknown-linux-gnu/debug/deps/aarch64-58b675be7dc09833)
+            static CARGO_TEST_LIST_START_PAT: Lazy<Regex> =
+                Lazy::new(|| Regex::new(r"^\s*Running (?:unittests )?(.*) \(.*/(.*)\)$").unwrap());
+            static CARGO_TEST_LIST_END_PAT: Lazy<Regex> =
+                Lazy::new(|| Regex::new(r"^(\d+) tests?, (\d+) benchmarks$").unwrap());
+            if let Some(captures) = CARGO_TEST_LIST_START_PAT.captures(line) {
+                cur_test_key =
+                    Some((captures.get(2).unwrap().as_str(), captures.get(1).unwrap().as_str()));
+            } else if let Some((output_filename, main_src)) = cur_test_key {
+                if let Some(captures) = CARGO_TEST_LIST_END_PAT.captures(line) {
+                    let num_tests = captures.get(1).unwrap().as_str().parse::<u32>().unwrap();
+                    let num_benchmarks = captures.get(2).unwrap().as_str().parse::<u32>().unwrap();
+                    result.tests.entry(output_filename.to_owned()).or_default().insert(
+                        PathBuf::from(main_src),
+                        TestContents { tests: num_tests != 0, benchmarks: num_benchmarks != 0 },
+                    );
+                    cur_test_key = None;
+                }
+            }
         }
 
         // self.find_warning_owners()
@@ -196,21 +274,17 @@ impl CargoOut {
 }
 
 impl Crate {
-    fn from_rustc_invocation(rustc: &str, metadata: &WorkspaceMetadata) -> Result<Crate> {
+    fn from_rustc_invocation(
+        rustc: &str,
+        metadata: &WorkspaceMetadata,
+        tests: &BTreeMap<String, BTreeMap<PathBuf, TestContents>>,
+        raw_names: &BTreeMap<String, String>,
+    ) -> Result<Crate> {
         let mut out = Crate::default();
+        let mut extra_filename = String::new();
 
         // split into args
-        let args: Vec<&str> = rustc.split_whitespace().collect();
-        let mut arg_iter = args
-            .iter()
-            // Remove quotes from simple strings, panic for others.
-            .map(|arg| match (arg.chars().next(), arg.chars().skip(1).last()) {
-                (Some('"'), Some('"')) => &arg[1..arg.len() - 1],
-                (Some('\''), Some('\'')) => &arg[1..arg.len() - 1],
-                (Some('"'), _) => panic!("can't handle strings with whitespace"),
-                (Some('\''), _) => panic!("can't handle strings with whitespace"),
-                _ => arg,
-            });
+        let mut arg_iter = args_from_rustc_invocation(rustc).into_iter();
         // process each arg
         while let Some(arg) = arg_iter.next() {
             match arg {
@@ -238,9 +312,9 @@ impl Crate {
                     if let Some((name, path)) = arg.split_once('=') {
                         let filename = path.split('/').last().unwrap();
 
-                        // Example filename: "libgetrandom-fd8800939535fc59.rmeta"
+                        // Example filename: "libgetrandom-fd8800939535fc59.rmeta" or "libmls_rs_uniffi.rlib".
                         static REGEX: Lazy<Regex> = Lazy::new(|| {
-                            Regex::new(r"^lib(.*)-[0-9a-f]*.(rlib|so|rmeta)$").unwrap()
+                            Regex::new(r"^lib([^-]*)(?:-[0-9a-f]*)?.(rlib|so|rmeta)$").unwrap()
                         });
 
                         let Some(lib_name) = REGEX.captures(filename).and_then(|x| x.get(1)) else {
@@ -255,9 +329,17 @@ impl Crate {
                             } else {
                                 bail!("Unexpected extension for extern filename {}", filename);
                             };
+
+                        let lib_name = lib_name.as_str().to_string();
+                        let raw_name = if let Some(raw_name) = raw_names.get(&lib_name) {
+                            raw_name.to_owned()
+                        } else {
+                            lib_name.clone()
+                        };
                         out.externs.push(Extern {
                             name: name.to_string(),
-                            lib_name: lib_name.as_str().to_string(),
+                            lib_name,
+                            raw_name,
                             extern_type,
                         });
                     } else if arg != "proc_macro" {
@@ -285,6 +367,9 @@ impl Crate {
                         && arg != "prefer-dynamic"
                     {
                         out.codegens.push(arg.to_string());
+                    }
+                    if let Some(x) = arg.strip_prefix("extra-filename=") {
+                        extra_filename = x.to_string();
                     }
                 }
                 "--cap-lints" => out.cap_lints = arg_iter.next().unwrap().to_string(),
@@ -317,13 +402,23 @@ impl Crate {
                 _ if arg.starts_with("--edition=") => {}
                 _ if arg.starts_with("--json=") => {}
                 _ if arg.starts_with("-Aclippy") => {}
+                _ if arg.starts_with("--allow=clippy") => {}
                 _ if arg.starts_with("-Wclippy") => {}
-                "-W" => {}
-                "-D" => {}
+                _ if arg.starts_with("--warn=clippy") => {}
+                _ if arg.starts_with("-A=rustdoc") => {}
+                _ if arg.starts_with("--allow=rustdoc") => {}
+                _ if arg.starts_with("-D") => {}
+                _ if arg.starts_with("--deny=") => {}
+                _ if arg.starts_with("-W") => {}
+                _ if arg.starts_with("--warn=") => {}
 
                 arg => bail!("unsupported rustc argument: {arg:?}"),
             }
         }
+        out.cfgs.sort();
+        out.cfgs.dedup();
+        out.codegens.sort();
+        out.features.sort();
 
         if out.name.is_empty() {
             bail!("missing --crate-name");
@@ -359,9 +454,15 @@ impl Crate {
                     manifest_path,
                 )
             })?;
-        out.package_name = package_metadata.name.clone();
+        out.package_name.clone_from(&package_metadata.name);
         out.version = Some(package_metadata.version.clone());
-        out.edition = package_metadata.edition.clone();
+        out.edition.clone_from(&package_metadata.edition);
+
+        let output_filename = out.name.clone() + &extra_filename;
+        if let Some(test_contents) = tests.get(&output_filename).and_then(|m| m.get(&out.main_src))
+        {
+            out.empty_test = !test_contents.tests && !test_contents.benchmarks;
+        }
 
         Ok(out)
     }

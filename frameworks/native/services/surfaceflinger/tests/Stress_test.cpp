@@ -32,7 +32,7 @@ namespace android {
 
 TEST(SurfaceFlingerStress, create_and_destroy) {
     auto do_stress = []() {
-        sp<SurfaceComposerClient> client = new SurfaceComposerClient;
+        sp<SurfaceComposerClient> client = sp<SurfaceComposerClient>::make();
         ASSERT_EQ(NO_ERROR, client->initCheck());
         for (int j = 0; j < 1000; j++) {
             auto surf = client->createSurface(String8("t"), 100, 100,
@@ -51,9 +51,9 @@ TEST(SurfaceFlingerStress, create_and_destroy) {
     }
 }
 
-surfaceflinger::LayersProto generateLayerProto() {
-    surfaceflinger::LayersProto layersProto;
-    std::array<surfaceflinger::LayerProto*, 10> layers = {};
+perfetto::protos::LayersProto generateLayerProto() {
+    perfetto::protos::LayersProto layersProto;
+    std::array<perfetto::protos::LayerProto*, 10> layers = {};
     for (size_t i = 0; i < layers.size(); ++i) {
         layers[i] = layersProto.add_layers();
         layers[i]->set_id(i);
@@ -103,7 +103,7 @@ TEST(LayerProtoStress, mem_info) {
     cmd += std::to_string(getpid());
     system(cmd.c_str());
     for (int i = 0; i < 100000; i++) {
-        surfaceflinger::LayersProto layersProto = generateLayerProto();
+        perfetto::protos::LayersProto layersProto = generateLayerProto();
         auto layerTree = surfaceflinger::LayerProtoParser::generateLayerTree(layersProto);
         surfaceflinger::LayerProtoParser::layerTreeToString(layerTree);
     }

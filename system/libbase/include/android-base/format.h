@@ -24,5 +24,9 @@
 #pragma clang diagnostic pop
 #include <fmt/core.h>
 #include <fmt/format.h>
-#include <fmt/ostream.h>
 #include <fmt/printf.h>
+
+#ifndef _WIN32
+#include <fmt/ostream.h>
+#include <fmt/std.h>
+#endif  // _WIN32

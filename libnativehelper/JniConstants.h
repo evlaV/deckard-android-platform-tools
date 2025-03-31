@@ -39,6 +39,7 @@ jclass JniConstants_NioBufferClass(JNIEnv* env);
 // JniConstants.c.
 //
 jmethodID JniConstants_FileDescriptor_init(JNIEnv* env);
+jmethodID JniConstants_FileDescriptor_setInt$(JNIEnv* env);
 jmethodID JniConstants_NIOAccess_getBaseArray(JNIEnv* env);
 jmethodID JniConstants_NIOAccess_getBaseArrayOffset(JNIEnv* env);
 jmethodID JniConstants_NioBuffer_array(JNIEnv* env);

@@ -17,7 +17,6 @@
 //! Pack profiles into reports.
 
 use anyhow::{anyhow, Result};
-use lazy_static::lazy_static;
 use macaddr::MacAddr6;
 use std::fs::{self, File, Permissions};
 use std::io::{Read, Write};
@@ -30,13 +29,11 @@ use zip::write::FileOptions;
 use zip::CompressionMethod::Deflated;
 use zip::ZipWriter;
 
-use crate::config::Config;
+use crate::config::{clear_processed_files, Config};
 
 pub const NO_USAGE_SETTING: i32 = -1;
 
-lazy_static! {
-    pub static ref UUID_CONTEXT: Context = Context::new(0);
-}
+pub static UUID_CONTEXT: Context = Context::new(0);
 
 pub fn pack_report(
     profile: &Path,
@@ -83,14 +80,14 @@ pub fn pack_report(
         zip.write_all(usage_setting.to_string().as_bytes())?;
     }
     zip.finish()?;
+    clear_processed_files()?;
 
     Ok(report_filename)
 }
 
 fn get_report_filename(node_id: &MacAddr6) -> Result<String> {
     let since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
-    let ts =
-        Timestamp::from_unix(&*UUID_CONTEXT, since_epoch.as_secs(), since_epoch.subsec_nanos());
+    let ts = Timestamp::from_unix(&UUID_CONTEXT, since_epoch.as_secs(), since_epoch.subsec_nanos());
     let uuid = Uuid::new_v1(
         ts,
         node_id.as_bytes().try_into().expect("Invalid number of bytes in V1 UUID"),

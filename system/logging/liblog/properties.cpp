@@ -270,66 +270,31 @@ int __android_log_is_debuggable() {
   return is_debuggable;
 }
 
-/*
- * For properties that are read often, but generally remain constant.
- * Since a change is rare, we will accept a trylock failure gracefully.
- * Use a separate lock from is_loggable to keep contention down b/25563384.
- */
-struct cache2_char {
-  pthread_mutex_t lock;
-  uint32_t serial;
-  const char* key_persist;
-  struct cache_char cache_persist;
-  const char* key_ro;
-  struct cache_char cache_ro;
-  unsigned char (*const evaluate)(const struct cache2_char* self);
-};
+int __android_log_security() {
+  static pthread_mutex_t security_lock = PTHREAD_MUTEX_INITIALIZER;
+  static cache_char security_prop = {{NULL, 0xFFFFFFFF}, BOOLEAN_FALSE};
+  static uint32_t security_serial = 0;
 
-static inline unsigned char do_cache2_char(struct cache2_char* self) {
-  uint32_t current_serial;
-  int change_detected;
-  unsigned char c;
-
-  if (pthread_mutex_trylock(&self->lock)) {
+  if (pthread_mutex_trylock(&security_lock)) {
     /* We are willing to accept some race in this context */
-    return self->evaluate(self);
+    return security_prop.c == BOOLEAN_TRUE;
   }
 
-  change_detected = check_cache(&self->cache_persist.cache) || check_cache(&self->cache_ro.cache);
-  current_serial = __system_property_area_serial();
-  if (current_serial != self->serial) {
+  int change_detected = check_cache(&security_prop.cache);
+  uint32_t current_serial = __system_property_area_serial();
+  if (current_serial != security_serial) {
     change_detected = 1;
   }
   if (change_detected) {
-    refresh_cache(&self->cache_persist, self->key_persist);
-    refresh_cache(&self->cache_ro, self->key_ro);
-    self->serial = current_serial;
+    refresh_cache(&security_prop, "persist.logd.security");
+    security_serial = current_serial;
   }
-  c = self->evaluate(self);
 
-  pthread_mutex_unlock(&self->lock);
+  int res = security_prop.c == BOOLEAN_TRUE;
 
-  return c;
-}
+  pthread_mutex_unlock(&security_lock);
 
-/*
- * Security state generally remains constant, but the DO must be able
- * to turn off logging should it become spammy after an attack is detected.
- */
-static unsigned char evaluate_security(const struct cache2_char* self) {
-  unsigned char c = self->cache_ro.c;
-
-  return (c != BOOLEAN_FALSE) && c && (self->cache_persist.c == BOOLEAN_TRUE);
-}
-
-int __android_log_security() {
-  static struct cache2_char security = {
-      PTHREAD_MUTEX_INITIALIZER, 0,
-      "persist.logd.security",   {{NULL, 0xFFFFFFFF}, BOOLEAN_FALSE},
-      "ro.organization_owned",   {{NULL, 0xFFFFFFFF}, BOOLEAN_FALSE},
-      evaluate_security};
-
-  return do_cache2_char(&security);
+  return res;
 }
 
 #else
@@ -348,6 +313,10 @@ int __android_log_is_loggable_len(int prio, const char*, size_t, int def) {
 
 int __android_log_is_debuggable() {
   return 1;
+}
+
+int __android_log_security() {
+  return 0;
 }
 
 #endif

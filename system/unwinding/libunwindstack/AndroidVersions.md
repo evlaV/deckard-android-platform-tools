@@ -130,3 +130,7 @@ included in linker arguments when using lld.
   If the apk file is readable, or dlopen'ing the shared library creates
   a read-only map of the elf data, and a read-executable map of the
   code, the offset will be displayed properly without this fix.
+
+## Android 15 ("V", API level 35)
+* Added support for a compressed .debug\_frame, compressed with either zlib or
+  zstd.

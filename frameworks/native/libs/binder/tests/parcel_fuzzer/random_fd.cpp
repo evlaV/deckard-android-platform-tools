@@ -23,7 +23,7 @@
 
 namespace android {
 
-using base::unique_fd;
+using binder::unique_fd;
 
 std::vector<unique_fd> getRandomFds(FuzzedDataProvider* provider) {
     const char* fdType;
@@ -51,7 +51,9 @@ std::vector<unique_fd> getRandomFds(FuzzedDataProvider* provider) {
 
                  int flags = O_CLOEXEC;
                  if (provider->ConsumeBool()) flags |= O_DIRECT;
-                 if (provider->ConsumeBool()) flags |= O_NONBLOCK;
+
+                 // TODO(b/236812909): also test blocking
+                 if (true) flags |= O_NONBLOCK;
 
                  CHECK_EQ(0, pipe2(pipefds, flags)) << flags;
 

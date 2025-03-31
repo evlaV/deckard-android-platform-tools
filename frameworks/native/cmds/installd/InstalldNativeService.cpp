@@ -40,6 +40,7 @@
 #include <fstream>
 #include <functional>
 #include <regex>
+#include <thread>
 #include <unordered_set>
 
 #include <android-base/file.h>
@@ -69,7 +70,6 @@
 #include "installd_deps.h"
 #include "otapreopt_utils.h"
 #include "utils.h"
-#include "view_compiler.h"
 
 #include "CacheTracker.h"
 #include "CrateManager.h"
@@ -233,12 +233,12 @@ binder::Status checkArgumentFileName(const std::string& path) {
     return ok();
 }
 
-binder::Status checkUidInAppRange(int32_t appUid) {
-    if (FIRST_APPLICATION_UID <= appUid && appUid <= LAST_APPLICATION_UID) {
+binder::Status checkArgumentAppId(int32_t appId) {
+    if (FIRST_APPLICATION_UID <= appId && appId <= LAST_APPLICATION_UID) {
         return ok();
     }
     return exception(binder::Status::EX_ILLEGAL_ARGUMENT,
-                     StringPrintf("UID %d is outside of the range", appUid));
+                     StringPrintf("appId %d is outside of the range", appId));
 }
 
 #define ENFORCE_UID(uid) {                                  \
@@ -301,12 +301,12 @@ binder::Status checkUidInAppRange(int32_t appUid) {
         }                                                      \
     }
 
-#define CHECK_ARGUMENT_UID_IN_APP_RANGE(uid)               \
-    {                                                      \
-        binder::Status status = checkUidInAppRange((uid)); \
-        if (!status.isOk()) {                              \
-            return status;                                 \
-        }                                                  \
+#define CHECK_ARGUMENT_APP_ID(appId)                         \
+    {                                                        \
+        binder::Status status = checkArgumentAppId((appId)); \
+        if (!status.isOk()) {                                \
+            return status;                                   \
+        }                                                    \
     }
 
 #ifdef GRANULAR_LOCKS
@@ -410,7 +410,7 @@ using PackageLockGuard = std::lock_guard<PackageLock>;
 }  // namespace
 
 binder::Status InstalldNativeService::FsveritySetupAuthToken::authenticate(
-        const ParcelFileDescriptor& authFd, int32_t appUid, int32_t userId) {
+        const ParcelFileDescriptor& authFd, int32_t uid) {
     int open_flags = fcntl(authFd.get(), F_GETFL);
     if (open_flags < 0) {
         return exception(binder::Status::EX_SERVICE_SPECIFIC, "fcntl failed");
@@ -425,9 +425,8 @@ binder::Status InstalldNativeService::FsveritySetupAuthToken::authenticate(
         return exception(binder::Status::EX_SECURITY, "Not a regular file");
     }
     // Don't accept a file owned by a different app.
-    uid_t uid = multiuser_get_uid(userId, appUid);
-    if (this->mStatFromAuthFd.st_uid != uid) {
-        return exception(binder::Status::EX_SERVICE_SPECIFIC, "File not owned by appUid");
+    if (this->mStatFromAuthFd.st_uid != (uid_t)uid) {
+        return exception(binder::Status::EX_SERVICE_SPECIFIC, "File not owned by uid");
     }
     return ok();
 }
@@ -472,6 +471,49 @@ status_t InstalldNativeService::dump(int fd, const Vector<String16>& /* args */)
     return NO_ERROR;
 }
 
+constexpr const char kXattrRestoreconInProgress[] = "user.restorecon_in_progress";
+
+static std::string lgetfilecon(const std::string& path) {
+    char* context;
+    if (::lgetfilecon(path.c_str(), &context) < 0) {
+        PLOG(ERROR) << "Failed to lgetfilecon for " << path;
+        return {};
+    }
+    std::string result{context};
+    free(context);
+    return result;
+}
+
+static bool getRestoreconInProgress(const std::string& path) {
+    bool inProgress = false;
+    if (getxattr(path.c_str(), kXattrRestoreconInProgress, &inProgress, sizeof(inProgress)) !=
+        sizeof(inProgress)) {
+        if (errno != ENODATA) {
+            PLOG(ERROR) << "Failed to check in-progress restorecon for " << path;
+        }
+        return false;
+    }
+    return inProgress;
+}
+
+struct RestoreconInProgress {
+    explicit RestoreconInProgress(const std::string& path) : mPath(path) {
+        bool inProgress = true;
+        if (setxattr(mPath.c_str(), kXattrRestoreconInProgress, &inProgress, sizeof(inProgress),
+                     0) != 0) {
+            PLOG(ERROR) << "Failed to set in-progress restorecon for " << path;
+        }
+    }
+    ~RestoreconInProgress() {
+        if (removexattr(mPath.c_str(), kXattrRestoreconInProgress) < 0) {
+            PLOG(ERROR) << "Failed to clear in-progress restorecon for " << mPath;
+        }
+    }
+
+private:
+    const std::string& mPath;
+};
+
 /**
  * Perform restorecon of the given path, but only perform recursive restorecon
  * if the label of that top-level file actually changed.  This can save us
@@ -480,56 +522,70 @@ status_t InstalldNativeService::dump(int fd, const Vector<String16>& /* args */)
 static int restorecon_app_data_lazy(const std::string& path, const std::string& seInfo, uid_t uid,
         bool existing) {
     ScopedTrace tracer("restorecon-lazy");
-    int res = 0;
-    char* before = nullptr;
-    char* after = nullptr;
     if (!existing) {
         ScopedTrace tracer("new-path");
         if (selinux_android_restorecon_pkgdir(path.c_str(), seInfo.c_str(), uid,
                 SELINUX_ANDROID_RESTORECON_RECURSE) < 0) {
             PLOG(ERROR) << "Failed recursive restorecon for " << path;
-            goto fail;
+            return -1;
         }
-        return res;
+        return 0;
     }
 
-    // Note that SELINUX_ANDROID_RESTORECON_DATADATA flag is set by
-    // libselinux. Not needed here.
-    if (lgetfilecon(path.c_str(), &before) < 0) {
-        PLOG(ERROR) << "Failed before getfilecon for " << path;
-        goto fail;
-    }
-    if (selinux_android_restorecon_pkgdir(path.c_str(), seInfo.c_str(), uid, 0) < 0) {
-        PLOG(ERROR) << "Failed top-level restorecon for " << path;
-        goto fail;
-    }
-    if (lgetfilecon(path.c_str(), &after) < 0) {
-        PLOG(ERROR) << "Failed after getfilecon for " << path;
-        goto fail;
+    // Note that SELINUX_ANDROID_RESTORECON_DATADATA flag is set by libselinux. Not needed here.
+
+    // Check to see if there was an interrupted operation.
+    bool inProgress = getRestoreconInProgress(path);
+    std::string before, after;
+    if (!inProgress) {
+        if (before = lgetfilecon(path); before.empty()) {
+            PLOG(ERROR) << "Failed before getfilecon for " << path;
+            return -1;
+        }
+        if (selinux_android_restorecon_pkgdir(path.c_str(), seInfo.c_str(), uid, 0) < 0) {
+            PLOG(ERROR) << "Failed top-level restorecon for " << path;
+            return -1;
+        }
+        if (after = lgetfilecon(path); after.empty()) {
+            PLOG(ERROR) << "Failed after getfilecon for " << path;
+            return -1;
+        }
     }
 
     // If the initial top-level restorecon above changed the label, then go
     // back and restorecon everything recursively
-    if (strcmp(before, after)) {
-        ScopedTrace tracer("label-change");
+    if (inProgress || before != after) {
         if (existing) {
             LOG(DEBUG) << "Detected label change from " << before << " to " << after << " at "
-                    << path << "; running recursive restorecon";
+                       << path << "; running recursive restorecon";
         }
-        if (selinux_android_restorecon_pkgdir(path.c_str(), seInfo.c_str(), uid,
-                SELINUX_ANDROID_RESTORECON_RECURSE) < 0) {
-            PLOG(ERROR) << "Failed recursive restorecon for " << path;
-            goto fail;
+
+        auto restorecon = [path, seInfo, uid]() {
+            ScopedTrace tracer("label-change");
+
+            // Temporary mark the folder as "in-progress" to resume in case of reboot/other failure.
+            RestoreconInProgress fence(path);
+
+            if (selinux_android_restorecon_pkgdir(path.c_str(), seInfo.c_str(), uid,
+                                                  SELINUX_ANDROID_RESTORECON_RECURSE) < 0) {
+                PLOG(ERROR) << "Failed recursive restorecon for " << path;
+                return -1;
+            }
+            return 0;
+        };
+        if (inProgress) {
+            // The previous restorecon was interrupted. It's either crashed (unlikely), or the phone
+            // was rebooted. Possibly because it took too much time. This time let's move it to a
+            // separate thread - so it won't block the rest of the OS.
+            std::thread(restorecon).detach();
+        } else {
+            if (int result = restorecon(); result) {
+                return result;
+            }
         }
     }
 
-    goto done;
-fail:
-    res = -1;
-done:
-    free(before);
-    free(after);
-    return res;
+    return 0;
 }
 static bool internal_storage_has_project_id() {
     // The following path is populated in setFirstBoot, so if this file is present
@@ -3258,17 +3314,6 @@ binder::Status InstalldNativeService::controlDexOptBlocking(bool block) {
     return ok();
 }
 
-binder::Status InstalldNativeService::compileLayouts(const std::string& apkPath,
-                                                     const std::string& packageName,
-                                                     const std ::string& outDexFile, int uid,
-                                                     bool* _aidl_return) {
-    const char* apk_path = apkPath.c_str();
-    const char* package_name = packageName.c_str();
-    const char* out_dex_file = outDexFile.c_str();
-    *_aidl_return = android::installd::view_compiler(apk_path, package_name, out_dex_file, uid);
-    return *_aidl_return ? ok() : error("viewcompiler failed");
-}
-
 binder::Status InstalldNativeService::linkNativeLibraryDirectory(
         const std::optional<std::string>& uuid, const std::string& packageName,
         const std::string& nativeLibPath32, int32_t userId) {
@@ -3295,7 +3340,7 @@ binder::Status InstalldNativeService::linkNativeLibraryDirectory(
     }
 
     char *con = nullptr;
-    if (lgetfilecon(pkgdir, &con) < 0) {
+    if (::lgetfilecon(pkgdir, &con) < 0) {
         return error("Failed to lgetfilecon " + _pkgdir);
     }
 
@@ -3928,7 +3973,7 @@ binder::Status InstalldNativeService::getOdexVisibility(
 // attacker-in-the-middle cannot enable fs-verity on arbitrary app files. If the FD is not writable,
 // return null.
 //
-// appUid and userId are passed for additional ownership check, such that one app can not be
+// app process uid is passed for additional ownership check, such that one app can not be
 // authenticated for another app's file. These parameters are assumed trusted for this purpose of
 // consistency check.
 //
@@ -3936,13 +3981,13 @@ binder::Status InstalldNativeService::getOdexVisibility(
 // Since enabling fs-verity to a file requires no outstanding writable FD, passing the authFd to the
 // server allows the server to hold the only reference (as long as the client app doesn't).
 binder::Status InstalldNativeService::createFsveritySetupAuthToken(
-        const ParcelFileDescriptor& authFd, int32_t appUid, int32_t userId,
+        const ParcelFileDescriptor& authFd, int32_t uid,
         sp<IFsveritySetupAuthToken>* _aidl_return) {
-    CHECK_ARGUMENT_UID_IN_APP_RANGE(appUid);
-    ENFORCE_VALID_USER(userId);
+    CHECK_ARGUMENT_APP_ID(multiuser_get_app_id(uid));
+    ENFORCE_VALID_USER(multiuser_get_user_id(uid));
 
     auto token = sp<FsveritySetupAuthToken>::make();
-    binder::Status status = token->authenticate(authFd, appUid, userId);
+    binder::Status status = token->authenticate(authFd, uid);
     if (!status.isOk()) {
         return status;
     }
@@ -3972,24 +4017,37 @@ binder::Status InstalldNativeService::enableFsverity(const sp<IFsveritySetupAuth
         return exception(binder::Status::EX_ILLEGAL_ARGUMENT, "Received a null auth token");
     }
 
-    // Authenticate to check the targeting file is the same inode as the authFd.
+    // Authenticate to check the targeting file is the same inode as the authFd. With O_PATH, we
+    // prevent a malicious client from blocking installd by providing a path to FIFO. After the
+    // authentication, the actual open is safe.
     sp<IBinder> authTokenBinder = IInterface::asBinder(authToken)->localBinder();
     if (authTokenBinder == nullptr) {
         return exception(binder::Status::EX_SECURITY, "Received a non-local auth token");
     }
-    auto authTokenInstance = sp<FsveritySetupAuthToken>::cast(authTokenBinder);
-    unique_fd rfd(open(filePath.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-    struct stat stFromPath;
-    if (fstat(rfd.get(), &stFromPath) < 0) {
-        *_aidl_return = errno;
+    unique_fd pathFd(open(filePath.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_PATH));
+    // Returns a constant errno to avoid one app probing file existence of the others, before the
+    // authentication is done.
+    const int kFixedErrno = EPERM;
+    if (pathFd.get() < 0) {
+        PLOG(DEBUG) << "Failed to open the path";
+        *_aidl_return = kFixedErrno;
         return ok();
     }
+    std::string procFdPath(StringPrintf("/proc/self/fd/%d", pathFd.get()));
+    struct stat stFromPath;
+    if (stat(procFdPath.c_str(), &stFromPath) < 0) {
+        PLOG(DEBUG) << "Failed to stat proc fd " << pathFd.get() << " -> " << filePath;
+        *_aidl_return = kFixedErrno;
+        return ok();
+    }
+    auto authTokenInstance = sp<FsveritySetupAuthToken>::cast(authTokenBinder);
     if (!authTokenInstance->isSameStat(stFromPath)) {
         LOG(DEBUG) << "FD authentication failed";
-        *_aidl_return = EPERM;
+        *_aidl_return = kFixedErrno;
         return ok();
     }
 
+    unique_fd rfd(open(procFdPath.c_str(), O_RDONLY | O_CLOEXEC));
     fsverity_enable_arg arg = {};
     arg.version = 1;
     arg.hash_algorithm = FS_VERITY_HASH_ALG_SHA256;

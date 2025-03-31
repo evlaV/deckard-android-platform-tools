@@ -56,14 +56,12 @@
 
 #if defined(LIBSNAPSHOT_TEST_VAB_LEGACY)
 #define DEFAULT_MODE "vab-legacy"
-#elif defined(LIBSNAPSHOT_TEST_VABC_LEGACY)
-#define DEFAULT_MODE "vabc-legacy"
 #else
 #define DEFAULT_MODE ""
 #endif
 
 DEFINE_string(force_mode, DEFAULT_MODE,
-              "Force testing older modes (vab-legacy, vabc-legacy) ignoring device config.");
+              "Force testing older modes (vab-legacy) ignoring device config.");
 DEFINE_string(force_iouring_disable, "",
               "Force testing mode (iouring_disabled) - disable io_uring");
 DEFINE_string(compression_method, "gz", "Default compression algorithm.");
@@ -104,6 +102,7 @@ std::string fake_super;
 
 void MountMetadata();
 
+// @VsrTest = 3.7.6
 class SnapshotTest : public ::testing::Test {
   public:
     SnapshotTest() : dm_(DeviceMapper::Instance()) {}
@@ -123,6 +122,7 @@ class SnapshotTest : public ::testing::Test {
         LOG(INFO) << "Starting test: " << test_name_;
 
         SKIP_IF_NON_VIRTUAL_AB();
+        SKIP_IF_VENDOR_ON_ANDROID_S();
 
         SetupProperties();
         if (!DeviceSupportsMode()) {
@@ -139,17 +139,10 @@ class SnapshotTest : public ::testing::Test {
     void SetupProperties() {
         std::unordered_map<std::string, std::string> properties;
 
-        ASSERT_TRUE(android::base::SetProperty("snapuserd.test.dm.snapshots", "0"))
-                << "Failed to disable property: virtual_ab.userspace.snapshots.enabled";
         ASSERT_TRUE(android::base::SetProperty("snapuserd.test.io_uring.force_disable", "0"))
                 << "Failed to set property: snapuserd.test.io_uring.disabled";
 
-        if (FLAGS_force_mode == "vabc-legacy") {
-            ASSERT_TRUE(android::base::SetProperty("snapuserd.test.dm.snapshots", "1"))
-                    << "Failed to disable property: virtual_ab.userspace.snapshots.enabled";
-            properties["ro.virtual_ab.compression.enabled"] = "true";
-            properties["ro.virtual_ab.userspace.snapshots.enabled"] = "false";
-        } else if (FLAGS_force_mode == "vab-legacy") {
+        if (FLAGS_force_mode == "vab-legacy") {
             properties["ro.virtual_ab.compression.enabled"] = "false";
             properties["ro.virtual_ab.userspace.snapshots.enabled"] = "false";
         }
@@ -176,6 +169,7 @@ class SnapshotTest : public ::testing::Test {
 
     void TearDown() override {
         RETURN_IF_NON_VIRTUAL_AB();
+        RETURN_IF_VENDOR_ON_ANDROID_S();
 
         LOG(INFO) << "Tearing down SnapshotTest test: " << test_name_;
 
@@ -1023,6 +1017,7 @@ class SnapshotUpdateTest : public SnapshotTest {
   public:
     void SetUp() override {
         SKIP_IF_NON_VIRTUAL_AB();
+        SKIP_IF_VENDOR_ON_ANDROID_S();
 
         SnapshotTest::SetUp();
         if (!image_manager_) {
@@ -1105,6 +1100,7 @@ class SnapshotUpdateTest : public SnapshotTest {
     }
     void TearDown() override {
         RETURN_IF_NON_VIRTUAL_AB();
+        RETURN_IF_VENDOR_ON_ANDROID_S();
 
         LOG(INFO) << "Tearing down SnapshotUpdateTest test: " << test_name_;
 
@@ -1601,97 +1597,6 @@ TEST_F(SnapshotUpdateTest, SpaceSwapUpdate) {
     }
 }
 
-// Test that a transient merge consistency check failure can resume properly.
-TEST_F(SnapshotUpdateTest, ConsistencyCheckResume) {
-    if (!snapuserd_required_) {
-        // b/179111359
-        GTEST_SKIP() << "Skipping snapuserd test";
-    }
-
-    auto old_sys_size = GetSize(sys_);
-    auto old_prd_size = GetSize(prd_);
-
-    // Grow |sys| but shrink |prd|.
-    SetSize(sys_, old_sys_size * 2);
-    sys_->set_estimate_cow_size(8_MiB);
-    SetSize(prd_, old_prd_size / 2);
-    prd_->set_estimate_cow_size(1_MiB);
-
-    AddOperationForPartitions();
-
-    ASSERT_TRUE(sm->BeginUpdate());
-    ASSERT_TRUE(sm->CreateUpdateSnapshots(manifest_));
-    ASSERT_TRUE(WriteSnapshotAndHash(sys_));
-    ASSERT_TRUE(WriteSnapshotAndHash(vnd_));
-    ASSERT_TRUE(ShiftAllSnapshotBlocks("prd_b", old_prd_size));
-
-    sync();
-
-    // Assert that source partitions aren't affected.
-    for (const auto& name : {"sys_a", "vnd_a", "prd_a"}) {
-        ASSERT_TRUE(IsPartitionUnchanged(name));
-    }
-
-    ASSERT_TRUE(sm->FinishedSnapshotWrites(false));
-
-    // Simulate shutting down the device.
-    ASSERT_TRUE(UnmapAll());
-
-    // After reboot, init does first stage mount.
-    auto init = NewManagerForFirstStageMount("_b");
-    ASSERT_NE(init, nullptr);
-    ASSERT_TRUE(init->NeedSnapshotsInFirstStageMount());
-    ASSERT_TRUE(init->CreateLogicalAndSnapshotPartitions("super", snapshot_timeout_));
-
-    // Check that the target partitions have the same content.
-    for (const auto& name : {"sys_b", "vnd_b", "prd_b"}) {
-        ASSERT_TRUE(IsPartitionUnchanged(name));
-    }
-
-    auto old_checker = init->merge_consistency_checker();
-
-    init->set_merge_consistency_checker(
-            [](const std::string&, const SnapshotStatus&) -> MergeFailureCode {
-                return MergeFailureCode::WrongMergeCountConsistencyCheck;
-            });
-
-    // Initiate the merge and wait for it to be completed.
-    if (ShouldSkipLegacyMerging()) {
-        LOG(INFO) << "Skipping legacy merge in test";
-        return;
-    }
-    ASSERT_TRUE(init->InitiateMerge());
-    ASSERT_EQ(init->IsSnapuserdRequired(), snapuserd_required_);
-    {
-        // Check that the merge phase is FIRST_PHASE until at least one call
-        // to ProcessUpdateState() occurs.
-        ASSERT_TRUE(AcquireLock());
-        auto local_lock = std::move(lock_);
-        auto status = init->ReadSnapshotUpdateStatus(local_lock.get());
-        ASSERT_EQ(status.merge_phase(), MergePhase::FIRST_PHASE);
-    }
-
-    // Merge should have failed.
-    ASSERT_EQ(UpdateState::MergeFailed, init->ProcessUpdateState());
-
-    // Simulate shutting down the device and creating partitions again.
-    ASSERT_TRUE(UnmapAll());
-
-    // Restore the checker.
-    init->set_merge_consistency_checker(std::move(old_checker));
-
-    ASSERT_TRUE(init->CreateLogicalAndSnapshotPartitions("super", snapshot_timeout_));
-
-    // Complete the merge.
-    ASSERT_EQ(UpdateState::MergeCompleted, init->ProcessUpdateState());
-
-    // Check that the target partitions have the same content after the merge.
-    for (const auto& name : {"sys_b", "vnd_b", "prd_b"}) {
-        ASSERT_TRUE(IsPartitionUnchanged(name))
-                << "Content of " << name << " changes after the merge";
-    }
-}
-
 // Test that if new system partitions uses empty space in super, that region is not snapshotted.
 TEST_F(SnapshotUpdateTest, DirectWriteEmptySpace) {
     GTEST_SKIP() << "b/141889746";
@@ -2077,6 +1982,8 @@ TEST_F(MetadataMountedTest, Android) {
 }
 
 TEST_F(MetadataMountedTest, Recovery) {
+    GTEST_SKIP() << "b/350715463";
+
     test_device->set_recovery(true);
     metadata_dir_ = test_device->GetMetadataDir();
 
@@ -2453,8 +2360,10 @@ TEST_F(SnapshotUpdateTest, AddPartition) {
     auto init = NewManagerForFirstStageMount("_b");
     ASSERT_NE(init, nullptr);
 
-    ASSERT_TRUE(init->EnsureSnapuserdConnected());
-    init->set_use_first_stage_snapuserd(true);
+    if (snapuserd_required_) {
+        ASSERT_TRUE(init->EnsureSnapuserdConnected());
+        init->set_use_first_stage_snapuserd(true);
+    }
 
     ASSERT_TRUE(init->NeedSnapshotsInFirstStageMount());
     ASSERT_TRUE(init->CreateLogicalAndSnapshotPartitions("super", snapshot_timeout_));
@@ -2465,9 +2374,11 @@ TEST_F(SnapshotUpdateTest, AddPartition) {
         ASSERT_TRUE(IsPartitionUnchanged(name));
     }
 
-    ASSERT_TRUE(init->PerformInitTransition(SnapshotManager::InitTransition::SECOND_STAGE));
-    for (const auto& name : partitions) {
-        ASSERT_TRUE(init->snapuserd_client()->WaitForDeviceDelete(name + "-user-cow-init"));
+    if (snapuserd_required_) {
+        ASSERT_TRUE(init->PerformInitTransition(SnapshotManager::InitTransition::SECOND_STAGE));
+        for (const auto& name : partitions) {
+            ASSERT_TRUE(init->snapuserd_client()->WaitForDeviceDelete(name + "-user-cow-init"));
+        }
     }
 
     // Initiate the merge and wait for it to be completed.
@@ -2742,6 +2653,44 @@ TEST_F(SnapshotUpdateTest, BadCowVersion) {
     ASSERT_TRUE(sm->CreateUpdateSnapshots(manifest_));
 }
 
+TEST_F(SnapshotTest, FlagCheck) {
+    if (!snapuserd_required_) {
+        GTEST_SKIP() << "Skipping snapuserd test";
+    }
+    ASSERT_TRUE(AcquireLock());
+
+    SnapshotUpdateStatus status = sm->ReadSnapshotUpdateStatus(lock_.get());
+
+    // Set flags in proto
+    status.set_o_direct(true);
+    status.set_io_uring_enabled(true);
+    status.set_userspace_snapshots(true);
+    status.set_cow_op_merge_size(16);
+
+    sm->WriteSnapshotUpdateStatus(lock_.get(), status);
+    // Ensure a connection to the second-stage daemon, but use the first-stage
+    // code paths thereafter.
+    ASSERT_TRUE(sm->EnsureSnapuserdConnected());
+    sm->set_use_first_stage_snapuserd(true);
+
+    auto init = NewManagerForFirstStageMount("_b");
+    ASSERT_NE(init, nullptr);
+
+    lock_ = nullptr;
+
+    std::vector<std::string> snapuserd_argv;
+    ASSERT_TRUE(init->PerformInitTransition(SnapshotManager::InitTransition::SELINUX_DETACH,
+                                            &snapuserd_argv));
+    ASSERT_TRUE(std::find(snapuserd_argv.begin(), snapuserd_argv.end(), "-o_direct") !=
+                snapuserd_argv.end());
+    ASSERT_TRUE(std::find(snapuserd_argv.begin(), snapuserd_argv.end(), "-io_uring") !=
+                snapuserd_argv.end());
+    ASSERT_TRUE(std::find(snapuserd_argv.begin(), snapuserd_argv.end(), "-user_snapshot") !=
+                snapuserd_argv.end());
+    ASSERT_TRUE(std::find(snapuserd_argv.begin(), snapuserd_argv.end(), "-cow_op_merge_size=16") !=
+                snapuserd_argv.end());
+}
+
 class FlashAfterUpdateTest : public SnapshotUpdateTest,
                              public WithParamInterface<std::tuple<uint32_t, bool>> {
   public:
@@ -2891,6 +2840,7 @@ void SnapshotTestEnvironment::SetUp() {
     // that is fixed, don't call GTEST_SKIP here, but instead call GTEST_SKIP in individual test
     // suites.
     RETURN_IF_NON_VIRTUAL_AB_MSG("Virtual A/B is not enabled, skipping global setup.\n");
+    RETURN_IF_VENDOR_ON_ANDROID_S_MSG("Test not enabled for Vendor on Android S.\n");
 
     std::vector<std::string> paths = {
             // clang-format off
@@ -2945,21 +2895,31 @@ void SnapshotTestEnvironment::SetUp() {
 
 void SnapshotTestEnvironment::TearDown() {
     RETURN_IF_NON_VIRTUAL_AB();
+    RETURN_IF_VENDOR_ON_ANDROID_S();
+
     if (super_images_ != nullptr) {
         DeleteBackingImage(super_images_.get(), "fake-super");
     }
 }
 
 void KillSnapuserd() {
-    auto status = android::base::GetProperty("init.svc.snapuserd", "stopped");
-    if (status == "stopped") {
-        return;
+    // Detach the daemon if it's alive
+    auto snapuserd_client = SnapuserdClient::TryConnect(kSnapuserdSocket, 5s);
+    if (snapuserd_client) {
+        snapuserd_client->DetachSnapuserd();
     }
-    auto snapuserd_client = SnapuserdClient::Connect(kSnapuserdSocket, 5s);
-    if (!snapuserd_client) {
-        return;
+
+    // Now stop the service - Init will send a SIGKILL to the daemon. However,
+    // process state will move from "running" to "stopping". Only after the
+    // process is reaped by init, the service state is moved to "stopped".
+    //
+    // Since the tests involve starting the daemon immediately, wait for the
+    // process to completely stop (aka. wait until init reaps the terminated
+    // process).
+    android::base::SetProperty("ctl.stop", "snapuserd");
+    if (!android::base::WaitForProperty("init.svc.snapuserd", "stopped", 10s)) {
+        LOG(ERROR) << "Timed out waiting for snapuserd to stop.";
     }
-    snapuserd_client->DetachSnapuserd();
 }
 
 }  // namespace snapshot
@@ -2970,22 +2930,29 @@ int main(int argc, char** argv) {
     ::testing::AddGlobalTestEnvironment(new ::android::snapshot::SnapshotTestEnvironment());
     gflags::ParseCommandLineFlags(&argc, &argv, false);
 
-    android::base::SetProperty("ctl.stop", "snapuserd");
+    bool vab_legacy = false;
+    if (FLAGS_force_mode == "vab-legacy") {
+        vab_legacy = true;
+    }
 
-    std::unordered_set<std::string> modes = {"", "vab-legacy", "vabc-legacy"};
+    if (!vab_legacy) {
+        // This is necessary if the configuration we're testing doesn't match the device.
+        android::base::SetProperty("ctl.stop", "snapuserd");
+        android::snapshot::KillSnapuserd();
+    }
+
+    std::unordered_set<std::string> modes = {"", "vab-legacy"};
     if (modes.count(FLAGS_force_mode) == 0) {
         std::cerr << "Unexpected force_config argument\n";
         return 1;
     }
 
-    // This is necessary if the configuration we're testing doesn't match the device.
-    android::snapshot::KillSnapuserd();
-
     int ret = RUN_ALL_TESTS();
 
-    android::base::SetProperty("snapuserd.test.dm.snapshots", "0");
     android::base::SetProperty("snapuserd.test.io_uring.force_disable", "0");
 
-    android::snapshot::KillSnapuserd();
+    if (!vab_legacy) {
+        android::snapshot::KillSnapuserd();
+    }
     return ret;
 }

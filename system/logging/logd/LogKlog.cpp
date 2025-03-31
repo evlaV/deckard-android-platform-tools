@@ -41,8 +41,6 @@ static const char priority_message[] = { KMSG_PRIORITY(LOG_INFO), '\0' };
 static const char suspendStr[] = "PM: suspend entry ";
 static const char resumeStr[] = "PM: suspend exit ";
 static const char suspendedStr[] = "suspended for ";
-static const char healthdStr[] = "healthd";
-static const char batteryStr[] = ": battery ";
 static const char auditStr[] = " audit(";
 static const char klogdStr[] = "logd.klogd: ";
 
@@ -313,15 +311,6 @@ log_time LogKlog::sniffTime(const char*& buf, ssize_t len, bool reverse) {
                    (((b += strlen(resumeStr)) - cp) < len)) {
             len -= b - cp;
             calculateCorrection(now, b, len);
-        } else if (((b = android::strnstr(cp, len, healthdStr))) &&
-                   (((b += strlen(healthdStr)) - cp) < len) &&
-                   ((b = android::strnstr(b, len -= b - cp, batteryStr))) &&
-                   (((b += strlen(batteryStr)) - cp) < len)) {
-            // NB: healthd is roughly 150us late, so we use it instead to
-            //     trigger a check for ntp-induced or hardware clock drift.
-            log_time real(CLOCK_REALTIME);
-            log_time mono(CLOCK_MONOTONIC);
-            correction = (real < mono) ? log_time(log_time::EPOCH) : (real - mono);
         } else if (((b = android::strnstr(cp, len, suspendedStr))) &&
                    (((b += strlen(suspendedStr)) - cp) < len)) {
             len -= b - cp;
@@ -344,6 +333,17 @@ log_time LogKlog::sniffTime(const char*& buf, ssize_t len, bool reverse) {
                 } else {
                     correction += real;
                 }
+            }
+        } else {
+            static time_t last_correction_time_utc = 0;
+            time_t current_time_utc = time(nullptr);
+            if (current_time_utc < last_correction_time_utc ||
+                current_time_utc - last_correction_time_utc > 60) {
+                log_time real(CLOCK_REALTIME);
+                log_time mono(CLOCK_MONOTONIC);
+                correction = (real < mono) ? log_time(log_time::EPOCH) : (real - mono);
+
+                last_correction_time_utc = current_time_utc;
             }
         }
 

@@ -325,9 +325,14 @@ static ZipError FindCentralDirectoryInfo(const char* debug_file_name,
   }
 
   // One of the field is 0xFFFFFFFF, look for the zip64 EOCD instead.
-  if (eocd->cd_size == UINT32_MAX || eocd->cd_start_offset == UINT32_MAX) {
-    ALOGV("Looking for the zip64 EOCD, cd_size: %" PRIu32 "cd_start_offset: %" PRId32,
-          eocd->cd_size, eocd->cd_start_offset);
+  if (eocd->num_records_on_disk == UINT16_MAX || eocd->num_records == UINT16_MAX ||
+      eocd->cd_size == UINT32_MAX || eocd->cd_start_offset == UINT32_MAX ||
+      eocd->comment_length == UINT16_MAX) {
+    ALOGV("Looking for the zip64 EOCD (cd_size: %" PRIu32 ", cd_start_offset: %" PRIu32
+          ", comment_length: %" PRIu16 ", num_records: %" PRIu16 ", num_records_on_disk: %" PRIu16
+          ")",
+          eocd->cd_size, eocd->cd_start_offset, eocd->comment_length, eocd->num_records,
+          eocd->num_records_on_disk);
     return FindCentralDirectoryInfoForZip64(debug_file_name, archive, eocd_offset, cdInfo);
   }
 
@@ -906,21 +911,25 @@ static int32_t FindEntry(const ZipArchive* archive, std::string_view entryName,
     return kInconsistentInformation;
   }
 
+  // Check the extra field length, regardless of whether it's used, or what it's used for.
+  const off64_t lfh_extra_field_offset = name_offset + lfh->file_name_length;
+  const uint16_t lfh_extra_field_size = lfh->extra_field_length;
+  if (lfh_extra_field_offset > cd_offset - lfh_extra_field_size) {
+    ALOGW("Zip: extra field has a bad size for entry %s", std::string(entryName).c_str());
+    return kInvalidOffset;
+  }
+
+  data->extra_field_size = lfh_extra_field_size;
+
+  // Check whether the extra field is being used for zip64.
   uint64_t lfh_uncompressed_size = lfh->uncompressed_size;
   uint64_t lfh_compressed_size = lfh->compressed_size;
   if (lfh_uncompressed_size == UINT32_MAX || lfh_compressed_size == UINT32_MAX) {
     if (lfh_uncompressed_size != UINT32_MAX || lfh_compressed_size != UINT32_MAX) {
       ALOGW(
-          "Zip: The zip64 extended field in the local header MUST include BOTH original and "
-          "compressed file size fields.");
+          "Zip: zip64 on Android requires both compressed and uncompressed length to be "
+          "UINT32_MAX");
       return kInvalidFile;
-    }
-
-    const off64_t lfh_extra_field_offset = name_offset + lfh->file_name_length;
-    const uint16_t lfh_extra_field_size = lfh->extra_field_length;
-    if (lfh_extra_field_offset > cd_offset - lfh_extra_field_size) {
-      ALOGW("Zip: extra field has a bad size for entry %s", std::string(entryName).c_str());
-      return kInvalidOffset;
     }
 
     auto lfh_extra_field_buf = static_buf;
@@ -1186,7 +1195,7 @@ class MemoryWriter final : public zip_archive::Writer {
                                             const ZipEntry64* entry) {
     const uint64_t declared_length = entry->uncompressed_length;
     if (declared_length > size) {
-      ALOGW("Zip: file size %" PRIu64 " is larger than the buffer size %zu.", declared_length,
+      ALOGE("Zip: file size %" PRIu64 " is larger than the buffer size %zu.", declared_length,
             size);
       return {};
     }
@@ -1200,7 +1209,7 @@ class MemoryWriter final : public zip_archive::Writer {
     }
 
     if (size_ < buf_size || bytes_written_ > size_ - buf_size) {
-      ALOGW("Zip: Unexpected size %zu (declared) vs %zu (actual)", size_,
+      ALOGE("Zip: Unexpected size %zu (declared) vs %zu (actual)", size_,
             bytes_written_ + buf_size);
       return false;
     }
@@ -1244,12 +1253,12 @@ class FileWriter final : public zip_archive::Writer {
     const uint64_t declared_length = entry->uncompressed_length;
     const off64_t current_offset = lseek64(fd, 0, SEEK_CUR);
     if (current_offset == -1) {
-      ALOGW("Zip: unable to seek to current location on fd %d: %s", fd, strerror(errno));
+      ALOGE("Zip: unable to seek to current location on fd %d: %s", fd, strerror(errno));
       return {};
     }
 
     if (declared_length > SIZE_MAX || declared_length > INT64_MAX) {
-      ALOGW("Zip: file size %" PRIu64 " is too large to extract.", declared_length);
+      ALOGE("Zip: file size %" PRIu64 " is too large to extract.", declared_length);
       return {};
     }
 
@@ -1266,7 +1275,7 @@ class FileWriter final : public zip_archive::Writer {
       // disk does not have enough space.
       long result = TEMP_FAILURE_RETRY(fallocate(fd, 0, current_offset, declared_length));
       if (result == -1 && errno == ENOSPC) {
-        ALOGW("Zip: unable to allocate %" PRIu64 " bytes at offset %" PRId64 ": %s",
+        ALOGE("Zip: unable to allocate %" PRIu64 " bytes at offset %" PRId64 ": %s",
               declared_length, static_cast<int64_t>(current_offset), strerror(errno));
         return {};
       }
@@ -1275,7 +1284,7 @@ class FileWriter final : public zip_archive::Writer {
 
     struct stat sb;
     if (fstat(fd, &sb) == -1) {
-      ALOGW("Zip: unable to fstat file: %s", strerror(errno));
+      ALOGE("Zip: unable to fstat file: %s", strerror(errno));
       return {};
     }
 
@@ -1283,7 +1292,7 @@ class FileWriter final : public zip_archive::Writer {
     if (!S_ISBLK(sb.st_mode)) {
       long result = TEMP_FAILURE_RETRY(ftruncate(fd, declared_length + current_offset));
       if (result == -1) {
-        ALOGW("Zip: unable to truncate file to %" PRId64 ": %s",
+        ALOGE("Zip: unable to truncate file to %" PRId64 ": %s",
               static_cast<int64_t>(declared_length + current_offset), strerror(errno));
         return {};
       }
@@ -1294,7 +1303,7 @@ class FileWriter final : public zip_archive::Writer {
 
   virtual bool Append(uint8_t* buf, size_t buf_size) override {
     if (declared_length_ < buf_size || total_bytes_written_ > declared_length_ - buf_size) {
-      ALOGW("Zip: Unexpected size %zu  (declared) vs %zu (actual)", declared_length_,
+      ALOGE("Zip: Unexpected size %zu  (declared) vs %zu (actual)", declared_length_,
             total_bytes_written_ + buf_size);
       return false;
     }
@@ -1303,7 +1312,7 @@ class FileWriter final : public zip_archive::Writer {
     if (result) {
       total_bytes_written_ += buf_size;
     } else {
-      ALOGW("Zip: unable to write %zu bytes to file; %s", buf_size, strerror(errno));
+      ALOGE("Zip: unable to write %zu bytes to file; %s", buf_size, strerror(errno));
     }
 
     return result;

@@ -35,11 +35,15 @@ static const size_t EVENT_BUFFER_SIZE = 100;
 
 static constexpr nsecs_t WAITING_FOR_VSYNC_TIMEOUT = ms2ns(300);
 
-DisplayEventDispatcher::DisplayEventDispatcher(
-        const sp<Looper>& looper, ISurfaceComposer::VsyncSource vsyncSource,
-        ISurfaceComposer::EventRegistrationFlags eventRegistration)
-      : mLooper(looper), mReceiver(vsyncSource, eventRegistration), mWaitingForVsync(false),
-        mLastVsyncCount(0), mLastScheduleVsyncTime(0) {
+DisplayEventDispatcher::DisplayEventDispatcher(const sp<Looper>& looper,
+                                               gui::ISurfaceComposer::VsyncSource vsyncSource,
+                                               EventRegistrationFlags eventRegistration,
+                                               const sp<IBinder>& layerHandle)
+      : mLooper(looper),
+        mReceiver(vsyncSource, eventRegistration, layerHandle),
+        mWaitingForVsync(false),
+        mLastVsyncCount(0),
+        mLastScheduleVsyncTime(0) {
     ALOGV("dispatcher %p ~ Initializing display event dispatcher.", this);
 }
 
@@ -169,7 +173,13 @@ bool DisplayEventDispatcher::processPendingEvents(nsecs_t* outTimestamp,
                     *outVsyncEventData = ev.vsync.vsyncData;
                     break;
                 case DisplayEventReceiver::DISPLAY_EVENT_HOTPLUG:
-                    dispatchHotplug(ev.header.timestamp, ev.header.displayId, ev.hotplug.connected);
+                    if (ev.hotplug.connectionError == 0) {
+                        dispatchHotplug(ev.header.timestamp, ev.header.displayId,
+                                        ev.hotplug.connected);
+                    } else {
+                        dispatchHotplugConnectionError(ev.header.timestamp,
+                                                       ev.hotplug.connectionError);
+                    }
                     break;
                 case DisplayEventReceiver::DISPLAY_EVENT_MODE_CHANGE:
                     dispatchModeChanged(ev.header.timestamp, ev.header.displayId,
@@ -184,6 +194,11 @@ bool DisplayEventDispatcher::processPendingEvents(nsecs_t* outTimestamp,
                 case DisplayEventReceiver::DISPLAY_EVENT_FRAME_RATE_OVERRIDE_FLUSH:
                     dispatchFrameRateOverrides(ev.header.timestamp, ev.header.displayId,
                                                std::move(mFrameRateOverrides));
+                    break;
+                case DisplayEventReceiver::DISPLAY_EVENT_HDCP_LEVELS_CHANGE:
+                    dispatchHdcpLevelsChanged(ev.header.displayId,
+                                              ev.hdcpLevelsChange.connectedLevel,
+                                              ev.hdcpLevelsChange.maxLevel);
                     break;
                 default:
                     ALOGW("dispatcher %p ~ ignoring unknown event type %#x", this, ev.header.type);

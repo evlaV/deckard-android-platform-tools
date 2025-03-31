@@ -66,6 +66,14 @@ void Error(const char* format, ...) {
   va_end(args);
 }
 
+void Fatal(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  LogWithPriority(ANDROID_LOG_FATAL, 0, format, args);
+  va_end(args);
+  abort();
+}
+
 #if defined(__BIONIC__)
 void AsyncSafe(const char* format, ...) {
   va_list args;

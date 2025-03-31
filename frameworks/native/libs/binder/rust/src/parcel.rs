@@ -34,7 +34,7 @@ mod parcelable_holder;
 pub use self::file_descriptor::ParcelFileDescriptor;
 pub use self::parcelable::{
     Deserialize, DeserializeArray, DeserializeOption, Parcelable, Serialize, SerializeArray,
-    SerializeOption, NON_NULL_PARCELABLE_FLAG, NULL_PARCELABLE_FLAG,
+    SerializeOption, UnstructuredParcelable, NON_NULL_PARCELABLE_FLAG, NULL_PARCELABLE_FLAG,
 };
 pub use self::parcelable_holder::{ParcelableHolder, ParcelableMetadata};
 
@@ -54,6 +54,10 @@ pub struct Parcel {
 
 /// Safety: This type guarantees that it owns the AParcel and that all access to
 /// the AParcel happens through the Parcel, so it is ok to send across threads.
+///
+/// It would not be okay to implement Sync, because that would allow you to call
+/// the reading methods from several threads in parallel, which would be a data
+/// race on the cursor position inside the AParcel.
 unsafe impl Send for Parcel {}
 
 /// Container for a message (data and object references) that can be sent

@@ -28,30 +28,59 @@
 #include <android-base/logging.h>
 #include <android-base/unique_fd.h>
 
-#include "adbconnection/process_info.h"
+#include "adbconnection/common.h"
+#include "app_processes.pb.h"
 
 using android::base::unique_fd;
 
-#define JDWP_CONTROL_NAME "\0jdwp-control"
-#define JDWP_CONTROL_NAME_LEN (sizeof(JDWP_CONTROL_NAME) - 1)
+std::optional<ProcessInfo> readProcessInfoFromSocket(int socket) {
+  std::string proto;
+  proto.resize(MAX_APP_MESSAGE_LENGTH);
+  ssize_t rc = TEMP_FAILURE_RETRY(recv(socket, proto.data(), proto.length(), MSG_PEEK));
 
-static_assert(JDWP_CONTROL_NAME_LEN <= sizeof(reinterpret_cast<sockaddr_un*>(0)->sun_path));
+  if (rc == 0) {
+    LOG(INFO) << "Remote process closed the socket (on MSG_PEEK)";
+    return {};
+  }
+
+  if (rc == -1) {
+    PLOG(ERROR) << "adbconnection_server: Unable to MSG_PEEK ProcessInfo recv";
+    return {};
+  }
+
+  ssize_t message_size = rc;
+  proto.resize(message_size);
+  rc = TEMP_FAILURE_RETRY(recv(socket, proto.data(), message_size, 0));
+
+  if (rc == 0) {
+    LOG(INFO) << "Remote process closed the socket (on recv)";
+    return {};
+  }
+
+  if (rc == -1) {
+    PLOG(ERROR) << "adbconnection_server: Unable to recv ProcessInfo " << message_size << " bytes";
+    return {};
+  }
+
+  if (rc != message_size) {
+    LOG(ERROR) << "adbconnection_server: Unexpected ProcessInfo size " << message_size
+               << " bytes but got " << rc;
+    return {};
+  }
+
+  return ProcessInfo::parseProtobufString(proto);
+}
 
 // Listen for incoming jdwp clients forever.
 void adbconnection_listen(void (*callback)(int fd, ProcessInfo process)) {
-  sockaddr_un addr = {};
-  socklen_t addrlen = JDWP_CONTROL_NAME_LEN + sizeof(addr.sun_family);
-
-  addr.sun_family = AF_UNIX;
-  memcpy(addr.sun_path, JDWP_CONTROL_NAME, JDWP_CONTROL_NAME_LEN);
-
   unique_fd s(socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0));
   if (s < 0) {
     PLOG(ERROR) << "failed to create JDWP control socket";
     return;
   }
 
-  if (bind(s.get(), reinterpret_cast<sockaddr*>(&addr), addrlen) < 0) {
+  auto [addr, addr_len] = get_control_socket_addr();
+  if (bind(s.get(), reinterpret_cast<sockaddr*>(&addr), addr_len) < 0) {
     PLOG(ERROR) << "failed to bind JDWP control socket";
     return;
   }
@@ -108,13 +137,11 @@ void adbconnection_listen(void (*callback)(int fd, ProcessInfo process)) {
                      << ") in pending connections";
         }
 
-        ProcessInfo process;
-        int rc = TEMP_FAILURE_RETRY(recv(it->get(), &process, sizeof(process), MSG_DONTWAIT));
-        if (rc != sizeof(process)) {
-          LOG(ERROR) << "received data of incorrect size from JDWP client: read " << rc
-                     << ", expected " << sizeof(process);
+        auto process_info = readProcessInfoFromSocket(it->get());
+        if (process_info) {
+          callback(it->release(), *process_info);
         } else {
-          callback(it->release(), process);
+          LOG(ERROR) << "Unable to read ProcessInfo from app startup";
         }
 
         if (epoll_ctl(epfd.get(), EPOLL_CTL_DEL, event.data.fd, nullptr) != 0) {

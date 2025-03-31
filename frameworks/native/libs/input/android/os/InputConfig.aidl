@@ -144,4 +144,17 @@ enum InputConfig {
      * It is not valid to set this configuration if {@link #TRUSTED_OVERLAY} is not set.
      */
     INTERCEPTS_STYLUS            = 1 << 15,
+
+    /**
+     * The window is a clone of another window. This may be treated differently since there's
+     * likely a duplicate window with the same client token, but different bounds.
+     */
+    CLONE                        = 1 << 16,
+
+    /**
+     * If the stylus is currently down *anywhere* on the screen, new touches will not be delivered
+     * to the window with this flag. This helps prevent unexpected clicks on some system windows,
+     * like StatusBar and TaskBar.
+     */
+    GLOBAL_STYLUS_BLOCKS_TOUCH   = 1 << 17,
 }

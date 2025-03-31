@@ -40,6 +40,9 @@
 
 #include "logger.h"
 
+// Socket timeout in seconds. Accounts for tail operation which can take longer.
+#define LIBLOG_SOCK_TIMEOUT_S 5
+
 // Connects to /dev/socket/<name> and returns the associated fd or returns -1 on error.
 // O_CLOEXEC is always set.
 static int socket_local_client(const std::string& name, int type, bool timeout) {
@@ -58,8 +61,8 @@ static int socket_local_client(const std::string& name, int type, bool timeout) 
 
   if (timeout) {
     // Sending and receiving messages should be instantaneous, but we don't want to wait forever if
-    // logd is hung, so we set a gracious 2s timeout.
-    struct timeval t = {2, 0};
+    // logd is hung, so we set a timeout.
+    struct timeval t = {LIBLOG_SOCK_TIMEOUT_S, 0};
     if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &t, sizeof(t)) == -1) {
       return -1;
     }

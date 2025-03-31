@@ -21,20 +21,33 @@
 //!
 //! This library is [no_std] for portability.
 
-#![cfg_attr(not(test), no_std)]
+// ANDROID: Use std to allow building as a dylib.
+// This condition lets us make the hack to add a dependency on std for the
+// panic_handler and eh_personality conditional on actually building a dylib.
+#![cfg_attr(not(any(test, android_dylib)), no_std)]
 
+mod cert;
+mod descriptor;
 mod error;
+mod ops;
 mod verify;
 
-pub use error::{IoError, SlotVerifyError};
-pub use verify::Ops;
-
-/// APIs that will eventually be internal-only to this library, but while this library is split need
-/// to be exposed externally.
-//
-// TODO(b/290110273): remove this module once we've moved the full libavb wrapper here.
-pub mod internal {
-    use super::*;
-
-    pub use error::{result_to_io_enum, slot_verify_enum_to_result};
-}
+pub use cert::{
+    cert_generate_unlock_challenge, cert_validate_unlock_credential,
+    cert_validate_vbmeta_public_key, CertOps, CertPermanentAttributes, CertUnlockChallenge,
+    CertUnlockCredential, CERT_PIK_VERSION_LOCATION, CERT_PSK_VERSION_LOCATION, SHA256_DIGEST_SIZE,
+};
+pub use descriptor::{
+    ChainPartitionDescriptor, ChainPartitionDescriptorFlags, Descriptor, DescriptorError,
+    DescriptorResult, HashDescriptor, HashDescriptorFlags, HashtreeDescriptor,
+    HashtreeDescriptorFlags, KernelCommandlineDescriptor, KernelCommandlineDescriptorFlags,
+    PropertyDescriptor,
+};
+pub use error::{
+    IoError, IoResult, SlotVerifyError, SlotVerifyNoDataResult, SlotVerifyResult,
+    VbmetaVerifyError, VbmetaVerifyResult,
+};
+pub use ops::{Ops, PublicKeyForPartitionInfo};
+pub use verify::{
+    slot_verify, HashtreeErrorMode, PartitionData, SlotVerifyData, SlotVerifyFlags, VbmetaData,
+};

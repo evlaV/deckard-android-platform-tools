@@ -14,23 +14,11 @@
  * limitations under the License.
  */
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wused-but-marked-unused"
-#pragma clang diagnostic ignored "-Wdeprecated"
 #include <gtest/gtest.h>
-#pragma clang diagnostic pop
 #include <sstream>
 
 #define PARSE_FAILURES_NONFATAL  // return empty optionals wherever possible instead of asserting.
 #include "nativehelper/jni_macros.h"
-
-// Provide static storage to these values so they can be used in a runtime context.
-// This has to be defined local to the test translation unit to avoid ODR violations prior to C++17.
-#define STORAGE_FN_FOR_JNI_TRAITS(jtype, ...)                                  \
-constexpr char nativehelper::detail::jni_type_trait<jtype>::type_descriptor[]; \
-constexpr char nativehelper::detail::jni_type_trait<jtype>::type_name[];
-
-DEFINE_JNI_TYPE_TRAIT(STORAGE_FN_FOR_JNI_TRAITS)
 
 template <typename T>
 std::string stringify_helper(const T& val) {

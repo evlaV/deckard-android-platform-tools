@@ -93,6 +93,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <string.h>
 
 #include <sstream>
 #include <string>
@@ -113,7 +114,7 @@ struct Errno {
   Errno(int e) : val_(e) {}
   int value() const { return val_; }
   operator int() const { return value(); }
-  std::string print() const { return strerror(value()); }
+  const char* print() const { return strerror(value()); }
 
   int val_;
 
@@ -125,16 +126,29 @@ struct Errno {
   }
 };
 
+static_assert(std::is_trivially_copyable_v<Errno> == true);
+
 template <typename E = Errno, bool include_message = true>
 struct ResultError {
   template <typename T, typename P, typename = std::enable_if_t<std::is_convertible_v<P, E>>>
   ResultError(T&& message, P&& code)
       : message_(std::forward<T>(message)), code_(E(std::forward<P>(code))) {}
 
+  ResultError(const ResultError& other) = default;
+  ResultError(ResultError&& other) = default;
+  ResultError& operator=(const ResultError& other) = default;
+  ResultError& operator=(ResultError&& other) = default;
+
   template <typename T>
   // NOLINTNEXTLINE(google-explicit-constructor)
-  operator android::base::expected<T, ResultError<E>>() const {
-    return android::base::unexpected(ResultError<E>(message_, code_));
+  operator android::base::expected<T, ResultError<E>>() && {
+    return android::base::unexpected(std::move(*this));
+  }
+
+  template <typename T>
+  // NOLINTNEXTLINE(google-explicit-constructor)
+  operator android::base::expected<T, ResultError<E>>() const& {
+    return android::base::unexpected(*this);
   }
 
   const std::string& message() const { return message_; }
@@ -144,6 +158,11 @@ struct ResultError {
   std::string message_;
   E code_;
 };
+
+template <typename E>
+auto format_as(ResultError<E, true> error) {
+  return error.message();
+}
 
 template <typename E>
 struct ResultError<E, /* include_message */ false> {
@@ -245,11 +264,11 @@ class Error {
   Error& operator=(const Error&) = delete;
   Error& operator=(Error&&) = delete;
 
-  template <typename T, typename... Args>
-  friend Error ErrorfImpl(const T&& fmt, const Args&... args);
+  template <typename... Args>
+  friend Error ErrorfImpl(fmt::format_string<Args...> fmt, const Args&... args);
 
-  template <typename T, typename... Args>
-  friend Error ErrnoErrorfImpl(const T&& fmt, const Args&... args);
+  template <typename... Args>
+  friend Error ErrnoErrorfImpl(fmt::format_string<Args...> fmt, const Args&... args);
 
  private:
   Error(bool has_code, E code, const std::string& message) : code_(code), has_code_(has_code) {
@@ -280,14 +299,19 @@ inline E ErrorCode(E code, T&& t, const Args&... args) {
   return ErrorCode(code, args...);
 }
 
-template <typename T, typename... Args>
-inline Error<Errno> ErrorfImpl(const T&& fmt, const Args&... args) {
-  return Error(false, ErrorCode(Errno{}, args...), fmt::format(fmt, args...));
+__attribute__((noinline)) ResultError<Errno> MakeResultErrorWithCode(std::string&& message,
+                                                                     Errno code);
+
+template <typename... Args>
+inline ResultError<Errno> ErrorfImpl(fmt::format_string<Args...> fmt, const Args&... args) {
+  return ResultError(fmt::vformat(fmt.get(), fmt::make_format_args(args...)),
+                     ErrorCode(Errno{}, args...));
 }
 
-template <typename T, typename... Args>
-inline Error<Errno> ErrnoErrorfImpl(const T&& fmt, const Args&... args) {
-  return Error<Errno>(true, Errno{errno}, fmt::format(fmt, args...));
+template <typename... Args>
+inline ResultError<Errno> ErrnoErrorfImpl(fmt::format_string<Args...> fmt, const Args&... args) {
+  Errno code{errno};
+  return MakeResultErrorWithCode(fmt::vformat(fmt.get(), fmt::make_format_args(args...)), code);
 }
 
 #define Errorf(fmt, ...) android::base::ErrorfImpl(FMT_STRING(fmt), ##__VA_ARGS__)
@@ -317,14 +341,10 @@ template <typename T>
 struct ConversionBase {
   ErrorType<T> error_;
   // T is a expected<U, ErrorType<T>>.
-  operator const T() const && {
-    return unexpected(std::move(error_));
-  }
+  operator T() const& { return unexpected(error_); }
+  operator T() && { return unexpected(std::move(error_)); }
 
-  operator const Code<T>() const && {
-    return error_.code();
-  }
-
+  operator Code<T>() const { return error_.code(); }
 };
 
 // User defined conversions can be followed by numeric conversions
@@ -339,9 +359,9 @@ struct NumericConversions<T,
     > : public ConversionBase<T>
 {
 #pragma push_macro("SPECIALIZED_CONVERSION")
-#define SPECIALIZED_CONVERSION(type)\
-  operator const expected<type, ErrorType<T>>() const &&\
-  { return unexpected(std::move(this->error_));}
+#define SPECIALIZED_CONVERSION(type)                                                  \
+  operator expected<type, ErrorType<T>>() const& { return unexpected(this->error_); } \
+  operator expected<type, ErrorType<T>>()&& { return unexpected(std::move(this->error_)); }
 
   SPECIALIZED_CONVERSION(int)
   SPECIALIZED_CONVERSION(short int)
@@ -373,6 +393,9 @@ template <class U>
 // Define a concept which **any** type matches to
 concept Universal = std::is_same_v<U, U>;
 #endif
+
+// A type that is never used.
+struct Never {};
 } // namespace impl
 
 template <typename T, typename E, bool include_message>
@@ -400,16 +423,22 @@ public:
   }
 
   // Consumes V when it's a fail value
-  static const OkOrFail<V> Fail(V&& v) {
+  static OkOrFail<V> Fail(V&& v) {
     assert(!IsOk(v));
     return OkOrFail<V>{std::move(v.error())};
   }
 
-  // We specialize as much as possible to avoid ambiguous conversion with
-  // templated expected ctor
-  operator const Result<C, E, include_message>() const && {
+  // We specialize as much as possible to avoid ambiguous conversion with templated expected ctor.
+  // We don't need this specialization if `C` is numeric because that case is already covered by
+  // `NumericConversions`.
+  operator Result<std::conditional_t<impl::IsNumeric<C>, impl::Never, C>, E, include_message>()
+      const& {
+    return unexpected(this->error_);
+  }
+  operator Result<std::conditional_t<impl::IsNumeric<C>, impl::Never, C>, E, include_message>() && {
     return unexpected(std::move(this->error_));
   }
+
 #ifdef __cpp_concepts
   // The idea here is to match this template method to any type (not simply trivial types).
   // The reason for including a constraint is to take advantage of the fact that a constrained
@@ -417,14 +446,25 @@ public:
   // specialization rules (thus avoiding ambiguity). So we use a universally matching constraint to
   // mark this function as less preferable (but still accepting of all types).
   template <impl::Universal U>
-#else
-  template <typename U>
-#endif
-  operator const Result<U, E, include_message>() const&& {
+  operator Result<U, E, include_message>() const& {
+    return unexpected(this->error_);
+  }
+  template <impl::Universal U>
+  operator Result<U, E, include_message>() && {
     return unexpected(std::move(this->error_));
   }
+#else
+  template <typename U>
+  operator Result<U, E, include_message>() const& {
+    return unexpected(this->error_);
+  }
+  template <typename U>
+  operator Result<U, E, include_message>() && {
+    return unexpected(std::move(this->error_));
+  }
+#endif
 
-  static std::string ErrorMessage(const V& val) { return val.error().message(); }
+  static const std::string& ErrorMessage(const V& val) { return val.error().message(); }
 };
 
 // Macros for testing the results of functions that return android::base::Result.

@@ -145,7 +145,7 @@ static bool load_key(const std::string& file) {
 
     std::lock_guard<std::mutex> lock(g_keys_mutex);
     std::string fingerprint = hash_key(key.get());
-    bool already_loaded = (g_keys.find(fingerprint) != g_keys.end());
+    bool already_loaded = g_keys.contains(fingerprint);
     if (!already_loaded) {
         g_keys[fingerprint] = std::move(key);
     }
@@ -260,7 +260,7 @@ std::deque<std::shared_ptr<RSA>> adb_auth_get_private_keys() {
 static std::string adb_auth_sign(RSA* key, const char* token, size_t token_size) {
     if (token_size != TOKEN_SIZE) {
         D("Unexpected token size %zd", token_size);
-        return nullptr;
+        return std::string();
     }
 
     std::string result;

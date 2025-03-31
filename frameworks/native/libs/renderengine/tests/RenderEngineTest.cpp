@@ -37,8 +37,8 @@
 #include <condition_variable>
 #include <fstream>
 
-#include "../gl/GLESRenderEngine.h"
 #include "../skia/SkiaGLRenderEngine.h"
+#include "../skia/SkiaVkRenderEngine.h"
 #include "../threaded/RenderEngineThreaded.h"
 
 constexpr int DEFAULT_DISPLAY_WIDTH = 128;
@@ -106,58 +106,9 @@ public:
     virtual ~RenderEngineFactory() = default;
 
     virtual std::string name() = 0;
-    virtual renderengine::RenderEngine::RenderEngineType type() = 0;
-    virtual std::unique_ptr<renderengine::RenderEngine> createRenderEngine() = 0;
-    virtual std::unique_ptr<renderengine::gl::GLESRenderEngine> createGLESRenderEngine() {
-        return nullptr;
-    }
-    virtual bool useColorManagement() const = 0;
-};
-
-class GLESRenderEngineFactory : public RenderEngineFactory {
-public:
-    std::string name() override { return "GLESRenderEngineFactory"; }
-
-    renderengine::RenderEngine::RenderEngineType type() {
-        return renderengine::RenderEngine::RenderEngineType::GLES;
-    }
-
-    std::unique_ptr<renderengine::RenderEngine> createRenderEngine() override {
-        return createGLESRenderEngine();
-    }
-
-    std::unique_ptr<renderengine::gl::GLESRenderEngine> createGLESRenderEngine() {
-        renderengine::RenderEngineCreationArgs reCreationArgs =
-                renderengine::RenderEngineCreationArgs::Builder()
-                        .setPixelFormat(static_cast<int>(ui::PixelFormat::RGBA_8888))
-                        .setImageCacheSize(1)
-                        .setUseColorManagerment(false)
-                        .setEnableProtectedContext(false)
-                        .setPrecacheToneMapperShaderOnly(false)
-                        .setSupportsBackgroundBlur(true)
-                        .setContextPriority(renderengine::RenderEngine::ContextPriority::MEDIUM)
-                        .setRenderEngineType(type())
-                        .setUseColorManagerment(useColorManagement())
-                        .build();
-        return renderengine::gl::GLESRenderEngine::create(reCreationArgs);
-    }
-
-    bool useColorManagement() const override { return false; }
-};
-
-class GLESCMRenderEngineFactory : public RenderEngineFactory {
-public:
-    std::string name() override { return "GLESCMRenderEngineFactory"; }
-
-    renderengine::RenderEngine::RenderEngineType type() {
-        return renderengine::RenderEngine::RenderEngineType::GLES;
-    }
-
-    std::unique_ptr<renderengine::RenderEngine> createRenderEngine() override {
-        return createGLESRenderEngine();
-    }
-
-    std::unique_ptr<renderengine::gl::GLESRenderEngine> createGLESRenderEngine() override {
+    virtual renderengine::RenderEngine::GraphicsApi graphicsApi() = 0;
+    bool apiSupported() { return renderengine::RenderEngine::canSupport(graphicsApi()); }
+    std::unique_ptr<renderengine::RenderEngine> createRenderEngine() {
         renderengine::RenderEngineCreationArgs reCreationArgs =
                 renderengine::RenderEngineCreationArgs::Builder()
                         .setPixelFormat(static_cast<int>(ui::PixelFormat::RGBA_8888))
@@ -166,65 +117,29 @@ public:
                         .setPrecacheToneMapperShaderOnly(false)
                         .setSupportsBackgroundBlur(true)
                         .setContextPriority(renderengine::RenderEngine::ContextPriority::MEDIUM)
-                        .setRenderEngineType(type())
-                        .setUseColorManagerment(useColorManagement())
+                        .setThreaded(renderengine::RenderEngine::Threaded::NO)
+                        .setGraphicsApi(graphicsApi())
                         .build();
-        return renderengine::gl::GLESRenderEngine::create(reCreationArgs);
+        return renderengine::RenderEngine::create(reCreationArgs);
     }
+};
 
-    bool useColorManagement() const override { return true; }
+class SkiaVkRenderEngineFactory : public RenderEngineFactory {
+public:
+    std::string name() override { return "SkiaVkRenderEngineFactory"; }
+
+    renderengine::RenderEngine::GraphicsApi graphicsApi() override {
+        return renderengine::RenderEngine::GraphicsApi::VK;
+    }
 };
 
 class SkiaGLESRenderEngineFactory : public RenderEngineFactory {
 public:
     std::string name() override { return "SkiaGLRenderEngineFactory"; }
 
-    renderengine::RenderEngine::RenderEngineType type() {
-        return renderengine::RenderEngine::RenderEngineType::SKIA_GL;
+    renderengine::RenderEngine::GraphicsApi graphicsApi() {
+        return renderengine::RenderEngine::GraphicsApi::GL;
     }
-
-    std::unique_ptr<renderengine::RenderEngine> createRenderEngine() override {
-        renderengine::RenderEngineCreationArgs reCreationArgs =
-                renderengine::RenderEngineCreationArgs::Builder()
-                        .setPixelFormat(static_cast<int>(ui::PixelFormat::RGBA_8888))
-                        .setImageCacheSize(1)
-                        .setEnableProtectedContext(false)
-                        .setPrecacheToneMapperShaderOnly(false)
-                        .setSupportsBackgroundBlur(true)
-                        .setContextPriority(renderengine::RenderEngine::ContextPriority::MEDIUM)
-                        .setRenderEngineType(type())
-                        .setUseColorManagerment(useColorManagement())
-                        .build();
-        return renderengine::skia::SkiaGLRenderEngine::create(reCreationArgs);
-    }
-
-    bool useColorManagement() const override { return false; }
-};
-
-class SkiaGLESCMRenderEngineFactory : public RenderEngineFactory {
-public:
-    std::string name() override { return "SkiaGLCMRenderEngineFactory"; }
-
-    renderengine::RenderEngine::RenderEngineType type() {
-        return renderengine::RenderEngine::RenderEngineType::SKIA_GL;
-    }
-
-    std::unique_ptr<renderengine::RenderEngine> createRenderEngine() override {
-        renderengine::RenderEngineCreationArgs reCreationArgs =
-                renderengine::RenderEngineCreationArgs::Builder()
-                        .setPixelFormat(static_cast<int>(ui::PixelFormat::RGBA_8888))
-                        .setImageCacheSize(1)
-                        .setEnableProtectedContext(false)
-                        .setPrecacheToneMapperShaderOnly(false)
-                        .setSupportsBackgroundBlur(true)
-                        .setContextPriority(renderengine::RenderEngine::ContextPriority::MEDIUM)
-                        .setRenderEngineType(type())
-                        .setUseColorManagerment(useColorManagement())
-                        .build();
-        return renderengine::skia::SkiaGLRenderEngine::create(reCreationArgs);
-    }
-
-    bool useColorManagement() const override { return true; }
 };
 
 class RenderEngineTest : public ::testing::TestWithParam<std::shared_ptr<RenderEngineFactory>> {
@@ -232,14 +147,14 @@ public:
     std::shared_ptr<renderengine::ExternalTexture> allocateDefaultBuffer() {
         return std::make_shared<
                 renderengine::impl::
-                        ExternalTexture>(new GraphicBuffer(DEFAULT_DISPLAY_WIDTH,
-                                                           DEFAULT_DISPLAY_HEIGHT,
-                                                           HAL_PIXEL_FORMAT_RGBA_8888, 1,
-                                                           GRALLOC_USAGE_SW_READ_OFTEN |
-                                                                   GRALLOC_USAGE_SW_WRITE_OFTEN |
-                                                                   GRALLOC_USAGE_HW_RENDER |
-                                                                   GRALLOC_USAGE_HW_TEXTURE,
-                                                           "output"),
+                        ExternalTexture>(sp<GraphicBuffer>::
+                                                 make(DEFAULT_DISPLAY_WIDTH, DEFAULT_DISPLAY_HEIGHT,
+                                                      HAL_PIXEL_FORMAT_RGBA_8888, 1,
+                                                      GRALLOC_USAGE_SW_READ_OFTEN |
+                                                              GRALLOC_USAGE_SW_WRITE_OFTEN |
+                                                              GRALLOC_USAGE_HW_RENDER |
+                                                              GRALLOC_USAGE_HW_TEXTURE,
+                                                      "output"),
                                          *mRE,
                                          renderengine::impl::ExternalTexture::Usage::READABLE |
                                                  renderengine::impl::ExternalTexture::Usage::
@@ -251,12 +166,12 @@ public:
                                                                         uint32_t height) {
         return std::make_shared<
                 renderengine::impl::
-                        ExternalTexture>(new GraphicBuffer(width, height,
-                                                           HAL_PIXEL_FORMAT_RGBA_8888, 1,
-                                                           GRALLOC_USAGE_SW_READ_OFTEN |
-                                                                   GRALLOC_USAGE_SW_WRITE_OFTEN |
-                                                                   GRALLOC_USAGE_HW_TEXTURE,
-                                                           "input"),
+                        ExternalTexture>(sp<GraphicBuffer>::
+                                                 make(width, height, HAL_PIXEL_FORMAT_RGBA_8888, 1,
+                                                      GRALLOC_USAGE_SW_READ_OFTEN |
+                                                              GRALLOC_USAGE_SW_WRITE_OFTEN |
+                                                              GRALLOC_USAGE_HW_TEXTURE,
+                                                      "input"),
                                          *mRE,
                                          renderengine::impl::ExternalTexture::Usage::READABLE |
                                                  renderengine::impl::ExternalTexture::Usage::
@@ -285,10 +200,12 @@ public:
     }
 
     std::shared_ptr<renderengine::ExternalTexture> allocateR8Buffer(int width, int height) {
-        auto buffer = new GraphicBuffer(width, height, android::PIXEL_FORMAT_R_8, 1,
-                                        GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN |
-                                                GRALLOC_USAGE_HW_TEXTURE,
-                                        "r8");
+        const auto kUsageFlags =
+                static_cast<uint64_t>(GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN |
+                                      GRALLOC_USAGE_HW_TEXTURE);
+        auto buffer =
+                sp<GraphicBuffer>::make(static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                                        android::PIXEL_FORMAT_R_8, 1u, kUsageFlags, "r8");
         if (buffer->initCheck() != 0) {
             // Devices are not required to support R8.
             return nullptr;
@@ -308,12 +225,6 @@ public:
     ~RenderEngineTest() {
         if (WRITE_BUFFER_TO_FILE_ON_FAILURE && ::testing::Test::HasFailure()) {
             writeBufferToFile("/data/texture_out_");
-        }
-        for (uint32_t texName : mTexNames) {
-            mRE->deleteTextures(1, &texName);
-            if (mGLESRE != nullptr) {
-                EXPECT_FALSE(mGLESRE->isTextureNameKnownForTesting(texName));
-            }
         }
         const ::testing::TestInfo* const test_info =
                 ::testing::UnitTest::GetInstance()->current_test_info();
@@ -440,7 +351,7 @@ public:
     }
 
     void expectShadowColor(const renderengine::LayerSettings& castingLayer,
-                           const renderengine::ShadowSettings& shadow, const ubyte4& casterColor,
+                           const ShadowSettings& shadow, const ubyte4& casterColor,
                            const ubyte4& backgroundColor) {
         const Rect casterRect(castingLayer.geometry.boundaries);
         Region casterRegion = Region(casterRect);
@@ -480,8 +391,7 @@ public:
                           backgroundColor.a);
     }
 
-    void expectShadowColorWithoutCaster(const FloatRect& casterBounds,
-                                        const renderengine::ShadowSettings& shadow,
+    void expectShadowColorWithoutCaster(const FloatRect& casterBounds, const ShadowSettings& shadow,
                                         const ubyte4& backgroundColor) {
         const float shadowInset = shadow.length * -1.0f;
         const Rect casterRect(casterBounds);
@@ -500,9 +410,9 @@ public:
                           backgroundColor.a);
     }
 
-    static renderengine::ShadowSettings getShadowSettings(const vec2& casterPos, float shadowLength,
-                                                          bool casterIsTranslucent) {
-        renderengine::ShadowSettings shadow;
+    static ShadowSettings getShadowSettings(const vec2& casterPos, float shadowLength,
+                                            bool casterIsTranslucent) {
+        ShadowSettings shadow;
         shadow.ambientColor = {0.0f, 0.0f, 0.0f, 0.039f};
         shadow.spotColor = {0.0f, 0.0f, 0.0f, 0.19f};
         shadow.lightPos = vec3(casterPos.x, casterPos.y, 0);
@@ -526,20 +436,15 @@ public:
 
     void invokeDraw(const renderengine::DisplaySettings& settings,
                     const std::vector<renderengine::LayerSettings>& layers) {
-        std::future<renderengine::RenderEngineResult> result =
-                mRE->drawLayers(settings, layers, mBuffer, true, base::unique_fd());
+        ftl::Future<FenceResult> future =
+                mRE->drawLayers(settings, layers, mBuffer, base::unique_fd());
+        ASSERT_TRUE(future.valid());
 
-        ASSERT_TRUE(result.valid());
-        auto [status, fence] = result.get();
+        auto result = future.get();
+        ASSERT_TRUE(result.ok());
 
-        ASSERT_EQ(NO_ERROR, status);
-        if (fence.ok()) {
-            sync_wait(fence.get(), -1);
-        }
-
-        if (layers.size() > 0 && mGLESRE != nullptr) {
-            ASSERT_TRUE(mGLESRE->isFramebufferImageCachedForTesting(mBuffer->getBuffer()->getId()));
-        }
+        auto fence = result.value();
+        fence->waitForever(LOG_TAG);
     }
 
     void drawEmptyLayers() {
@@ -644,12 +549,10 @@ public:
     void fillGreenColorBufferThenClearRegion();
 
     template <typename SourceVariant>
-    void drawShadow(const renderengine::LayerSettings& castingLayer,
-                    const renderengine::ShadowSettings& shadow, const ubyte4& casterColor,
-                    const ubyte4& backgroundColor);
+    void drawShadow(const renderengine::LayerSettings& castingLayer, const ShadowSettings& shadow,
+                    const ubyte4& casterColor, const ubyte4& backgroundColor);
 
-    void drawShadowWithoutCaster(const FloatRect& castingBounds,
-                                 const renderengine::ShadowSettings& shadow,
+    void drawShadowWithoutCaster(const FloatRect& castingBounds, const ShadowSettings& shadow,
                                  const ubyte4& backgroundColor);
 
     // Tonemaps grey values from sourceDataspace -> Display P3 and checks that GPU and CPU
@@ -662,26 +565,11 @@ public:
 
     std::unique_ptr<renderengine::RenderEngine> mRE;
     std::shared_ptr<renderengine::ExternalTexture> mBuffer;
-    // GLESRenderEngine for testing GLES-specific behavior.
-    // Owened by mRE, but this is downcasted.
-    renderengine::gl::GLESRenderEngine* mGLESRE = nullptr;
-
-    std::vector<uint32_t> mTexNames;
 };
 
 void RenderEngineTest::initializeRenderEngine() {
     const auto& renderEngineFactory = GetParam();
-    if (renderEngineFactory->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
-        // Only GLESRenderEngine exposes test-only methods. Provide a pointer to the
-        // GLESRenderEngine if we're using it so that we don't need to dynamic_cast
-        // every time.
-        std::unique_ptr<renderengine::gl::GLESRenderEngine> renderEngine =
-                renderEngineFactory->createGLESRenderEngine();
-        mGLESRE = renderEngine.get();
-        mRE = std::move(renderEngine);
-    } else {
-        mRE = renderEngineFactory->createRenderEngine();
-    }
+    mRE = renderEngineFactory->createRenderEngine();
     mBuffer = allocateDefaultBuffer();
 }
 
@@ -720,9 +608,6 @@ struct BufferSourceVariant {
     static void fillColor(renderengine::LayerSettings& layer, half r, half g, half b,
                           RenderEngineTest* fixture) {
         const auto buf = fixture->allocateSourceBuffer(1, 1);
-        uint32_t texName;
-        fixture->mRE->genTextures(1, &texName);
-        fixture->mTexNames.push_back(texName);
 
         uint8_t* pixels;
         buf->getBuffer()->lock(GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN,
@@ -742,7 +627,6 @@ struct BufferSourceVariant {
         buf->getBuffer()->unlock();
 
         layer.source.buffer.buffer = buf;
-        layer.source.buffer.textureName = texName;
         layer.sourceDataspace = ui::Dataspace::V0_SRGB_LINEAR;
         OpaquenessVariant::setOpaqueBit(layer);
     }
@@ -1002,9 +886,9 @@ void RenderEngineTest::fillBufferWithColorTransformAndSourceDataspace(
     std::vector<renderengine::LayerSettings> layers;
 
     renderengine::LayerSettings layer;
-    layer.sourceDataspace = sourceDataspace;
     layer.geometry.boundaries = Rect(1, 1).toFloatRect();
     SourceVariant::fillColor(layer, 0.5f, 0.25f, 0.125f, this);
+    layer.sourceDataspace = sourceDataspace;
     layer.alpha = 1.0f;
 
     // construct a fake color matrix
@@ -1030,13 +914,13 @@ void RenderEngineTest::fillBufferColorTransform() {
 template <typename SourceVariant>
 void RenderEngineTest::fillBufferColorTransformAndSourceDataspace() {
     unordered_map<ui::Dataspace, ubyte4> dataspaceToColorMap;
-    dataspaceToColorMap[ui::Dataspace::V0_BT709] = {172, 0, 0, 255};
-    dataspaceToColorMap[ui::Dataspace::BT2020] = {172, 0, 0, 255};
-    dataspaceToColorMap[ui::Dataspace::ADOBE_RGB] = {172, 0, 0, 255};
+    dataspaceToColorMap[ui::Dataspace::V0_BT709] = {77, 0, 0, 255};
+    dataspaceToColorMap[ui::Dataspace::BT2020] = {101, 0, 0, 255};
+    dataspaceToColorMap[ui::Dataspace::ADOBE_RGB] = {75, 0, 0, 255};
     ui::Dataspace customizedDataspace = static_cast<ui::Dataspace>(
             ui::Dataspace::STANDARD_BT709 | ui::Dataspace::TRANSFER_GAMMA2_2 |
             ui::Dataspace::RANGE_FULL);
-    dataspaceToColorMap[customizedDataspace] = {172, 0, 0, 255};
+    dataspaceToColorMap[customizedDataspace] = {61, 0, 0, 255};
     for (const auto& [sourceDataspace, color] : dataspaceToColorMap) {
         fillBufferWithColorTransformAndSourceDataspace<SourceVariant>(sourceDataspace);
         expectBufferColor(fullscreenRect(), color.r, color.g, color.b, color.a, 1);
@@ -1076,13 +960,13 @@ void RenderEngineTest::fillBufferWithColorTransformAndOutputDataspace(
 template <typename SourceVariant>
 void RenderEngineTest::fillBufferColorTransformAndOutputDataspace() {
     unordered_map<ui::Dataspace, ubyte4> dataspaceToColorMap;
-    dataspaceToColorMap[ui::Dataspace::V0_BT709] = {202, 0, 0, 255};
-    dataspaceToColorMap[ui::Dataspace::BT2020] = {192, 0, 0, 255};
-    dataspaceToColorMap[ui::Dataspace::ADOBE_RGB] = {202, 0, 0, 255};
+    dataspaceToColorMap[ui::Dataspace::V0_BT709] = {198, 0, 0, 255};
+    dataspaceToColorMap[ui::Dataspace::BT2020] = {187, 0, 0, 255};
+    dataspaceToColorMap[ui::Dataspace::ADOBE_RGB] = {192, 0, 0, 255};
     ui::Dataspace customizedDataspace = static_cast<ui::Dataspace>(
             ui::Dataspace::STANDARD_BT709 | ui::Dataspace::TRANSFER_GAMMA2_6 |
             ui::Dataspace::RANGE_FULL);
-    dataspaceToColorMap[customizedDataspace] = {202, 0, 0, 255};
+    dataspaceToColorMap[customizedDataspace] = {205, 0, 0, 255};
     for (const auto& [outputDataspace, color] : dataspaceToColorMap) {
         fillBufferWithColorTransformAndOutputDataspace<SourceVariant>(outputDataspace);
         expectBufferColor(fullscreenRect(), color.r, color.g, color.b, color.a, 1);
@@ -1291,9 +1175,6 @@ void RenderEngineTest::fillRedBufferTextureTransform() {
     // Here will allocate a checker board texture, but transform texture
     // coordinates so that only the upper left is applied.
     const auto buf = allocateSourceBuffer(2, 2);
-    uint32_t texName;
-    RenderEngineTest::mRE->genTextures(1, &texName);
-    this->mTexNames.push_back(texName);
 
     uint8_t* pixels;
     buf->getBuffer()->lock(GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN,
@@ -1314,7 +1195,6 @@ void RenderEngineTest::fillRedBufferTextureTransform() {
     buf->getBuffer()->unlock();
 
     layer.source.buffer.buffer = buf;
-    layer.source.buffer.textureName = texName;
     // Transform coordinates to only be inside the red quadrant.
     layer.source.buffer.textureTransform = mat4::scale(vec4(0.2f, 0.2f, 1.f, 1.f));
     layer.alpha = 1.0f;
@@ -1340,9 +1220,6 @@ void RenderEngineTest::fillRedBufferWithPremultiplyAlpha() {
 
     renderengine::LayerSettings layer;
     const auto buf = allocateSourceBuffer(1, 1);
-    uint32_t texName;
-    RenderEngineTest::mRE->genTextures(1, &texName);
-    this->mTexNames.push_back(texName);
 
     uint8_t* pixels;
     buf->getBuffer()->lock(GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN,
@@ -1354,7 +1231,6 @@ void RenderEngineTest::fillRedBufferWithPremultiplyAlpha() {
     buf->getBuffer()->unlock();
 
     layer.source.buffer.buffer = buf;
-    layer.source.buffer.textureName = texName;
     layer.source.buffer.usePremultipliedAlpha = true;
     layer.alpha = 0.5f;
     layer.geometry.boundaries = Rect(1, 1).toFloatRect();
@@ -1379,9 +1255,6 @@ void RenderEngineTest::fillRedBufferWithoutPremultiplyAlpha() {
 
     renderengine::LayerSettings layer;
     const auto buf = allocateSourceBuffer(1, 1);
-    uint32_t texName;
-    RenderEngineTest::mRE->genTextures(1, &texName);
-    this->mTexNames.push_back(texName);
 
     uint8_t* pixels;
     buf->getBuffer()->lock(GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN,
@@ -1393,7 +1266,6 @@ void RenderEngineTest::fillRedBufferWithoutPremultiplyAlpha() {
     buf->getBuffer()->unlock();
 
     layer.source.buffer.buffer = buf;
-    layer.source.buffer.textureName = texName;
     layer.source.buffer.usePremultipliedAlpha = false;
     layer.alpha = 0.5f;
     layer.geometry.boundaries = Rect(1, 1).toFloatRect();
@@ -1410,8 +1282,8 @@ void RenderEngineTest::fillBufferWithoutPremultiplyAlpha() {
 
 template <typename SourceVariant>
 void RenderEngineTest::drawShadow(const renderengine::LayerSettings& castingLayer,
-                                  const renderengine::ShadowSettings& shadow,
-                                  const ubyte4& casterColor, const ubyte4& backgroundColor) {
+                                  const ShadowSettings& shadow, const ubyte4& casterColor,
+                                  const ubyte4& backgroundColor) {
     renderengine::DisplaySettings settings;
     settings.outputDataspace = ui::Dataspace::V0_SRGB_LINEAR;
     settings.physicalDisplay = fullscreenRect();
@@ -1447,7 +1319,7 @@ void RenderEngineTest::drawShadow(const renderengine::LayerSettings& castingLaye
 }
 
 void RenderEngineTest::drawShadowWithoutCaster(const FloatRect& castingBounds,
-                                               const renderengine::ShadowSettings& shadow,
+                                               const ShadowSettings& shadow,
                                                const ubyte4& backgroundColor) {
     renderengine::DisplaySettings settings;
     settings.outputDataspace = ui::Dataspace::V0_SRGB_LINEAR;
@@ -1496,13 +1368,13 @@ void RenderEngineTest::tonemap(ui::Dataspace sourceDataspace, std::function<vec3
 
     auto buf = std::make_shared<
             renderengine::impl::
-                    ExternalTexture>(new GraphicBuffer(kGreyLevels, 1, HAL_PIXEL_FORMAT_RGBA_8888,
-                                                       1,
-                                                       GRALLOC_USAGE_SW_READ_OFTEN |
-                                                               GRALLOC_USAGE_SW_WRITE_OFTEN |
-                                                               GRALLOC_USAGE_HW_RENDER |
-                                                               GRALLOC_USAGE_HW_TEXTURE,
-                                                       "input"),
+                    ExternalTexture>(sp<GraphicBuffer>::make(kGreyLevels, 1,
+                                                             HAL_PIXEL_FORMAT_RGBA_8888, 1,
+                                                             GRALLOC_USAGE_SW_READ_OFTEN |
+                                                                     GRALLOC_USAGE_SW_WRITE_OFTEN |
+                                                                     GRALLOC_USAGE_HW_RENDER |
+                                                                     GRALLOC_USAGE_HW_TEXTURE,
+                                                             "input"),
                                      *mRE,
                                      renderengine::impl::ExternalTexture::Usage::READABLE |
                                              renderengine::impl::ExternalTexture::Usage::WRITEABLE);
@@ -1529,13 +1401,13 @@ void RenderEngineTest::tonemap(ui::Dataspace sourceDataspace, std::function<vec3
 
     mBuffer = std::make_shared<
             renderengine::impl::
-                    ExternalTexture>(new GraphicBuffer(kGreyLevels, 1, HAL_PIXEL_FORMAT_RGBA_8888,
-                                                       1,
-                                                       GRALLOC_USAGE_SW_READ_OFTEN |
-                                                               GRALLOC_USAGE_SW_WRITE_OFTEN |
-                                                               GRALLOC_USAGE_HW_RENDER |
-                                                               GRALLOC_USAGE_HW_TEXTURE,
-                                                       "output"),
+                    ExternalTexture>(sp<GraphicBuffer>::make(kGreyLevels, 1,
+                                                             HAL_PIXEL_FORMAT_RGBA_8888, 1,
+                                                             GRALLOC_USAGE_SW_READ_OFTEN |
+                                                                     GRALLOC_USAGE_SW_WRITE_OFTEN |
+                                                                     GRALLOC_USAGE_HW_RENDER |
+                                                                     GRALLOC_USAGE_HW_TEXTURE,
+                                                             "output"),
                                      *mRE,
                                      renderengine::impl::ExternalTexture::Usage::READABLE |
                                              renderengine::impl::ExternalTexture::Usage::WRITEABLE);
@@ -1598,17 +1470,48 @@ void RenderEngineTest::tonemap(ui::Dataspace sourceDataspace, std::function<vec3
 }
 
 INSTANTIATE_TEST_SUITE_P(PerRenderEngineType, RenderEngineTest,
-                         testing::Values(std::make_shared<GLESRenderEngineFactory>(),
-                                         std::make_shared<GLESCMRenderEngineFactory>(),
-                                         std::make_shared<SkiaGLESRenderEngineFactory>(),
-                                         std::make_shared<SkiaGLESCMRenderEngineFactory>()));
+                         testing::Values(std::make_shared<SkiaGLESRenderEngineFactory>(),
+                                         std::make_shared<SkiaVkRenderEngineFactory>()));
 
 TEST_P(RenderEngineTest, drawLayers_noLayersToDraw) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     drawEmptyLayers();
 }
 
+TEST_P(RenderEngineTest, drawLayers_fillRedBufferAndEmptyBuffer) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
+    initializeRenderEngine();
+    renderengine::DisplaySettings settings;
+    settings.physicalDisplay = fullscreenRect();
+    settings.clip = fullscreenRect();
+    settings.outputDataspace = ui::Dataspace::V0_SRGB_LINEAR;
+
+    // add a red layer
+    renderengine::LayerSettings layerOne{
+            .geometry.boundaries = fullscreenRect().toFloatRect(),
+            .source.solidColor = half3(1.0f, 0.0f, 0.0f),
+            .alpha = 1.f,
+    };
+
+    std::vector<renderengine::LayerSettings> layersFirst{layerOne};
+    invokeDraw(settings, layersFirst);
+    expectBufferColor(fullscreenRect(), 255, 0, 0, 255);
+
+    // re-draw with an empty layer above it, and we get a transparent black one
+    std::vector<renderengine::LayerSettings> layersSecond;
+    invokeDraw(settings, layersSecond);
+    expectBufferColor(fullscreenRect(), 0, 0, 0, 0);
+}
+
 TEST_P(RenderEngineTest, drawLayers_withoutBuffers_withColorTransform) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     renderengine::DisplaySettings settings;
@@ -1640,6 +1543,9 @@ TEST_P(RenderEngineTest, drawLayers_withoutBuffers_withColorTransform) {
 }
 
 TEST_P(RenderEngineTest, drawLayers_nullOutputBuffer) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     renderengine::DisplaySettings settings;
@@ -1649,102 +1555,98 @@ TEST_P(RenderEngineTest, drawLayers_nullOutputBuffer) {
     layer.geometry.boundaries = fullscreenRect().toFloatRect();
     BufferSourceVariant<ForceOpaqueBufferVariant>::fillColor(layer, 1.0f, 0.0f, 0.0f, this);
     layers.push_back(layer);
-    std::future<renderengine::RenderEngineResult> result =
-            mRE->drawLayers(settings, layers, nullptr, true, base::unique_fd());
+    ftl::Future<FenceResult> future = mRE->drawLayers(settings, layers, nullptr, base::unique_fd());
 
-    ASSERT_TRUE(result.valid());
-    auto [status, fence] = result.get();
-    ASSERT_EQ(BAD_VALUE, status);
-    ASSERT_FALSE(fence.ok());
-}
-
-TEST_P(RenderEngineTest, drawLayers_doesNotCacheFramebuffer) {
-    const auto& renderEngineFactory = GetParam();
-
-    if (renderEngineFactory->type() != renderengine::RenderEngine::RenderEngineType::GLES) {
-        // GLES-specific test
-        return;
-    }
-
-    initializeRenderEngine();
-
-    renderengine::DisplaySettings settings;
-    settings.outputDataspace = ui::Dataspace::V0_SRGB_LINEAR;
-    settings.physicalDisplay = fullscreenRect();
-    settings.clip = fullscreenRect();
-
-    std::vector<renderengine::LayerSettings> layers;
-    renderengine::LayerSettings layer;
-    layer.geometry.boundaries = fullscreenRect().toFloatRect();
-    BufferSourceVariant<ForceOpaqueBufferVariant>::fillColor(layer, 1.0f, 0.0f, 0.0f, this);
-    layer.alpha = 1.0;
-    layers.push_back(layer);
-
-    std::future<renderengine::RenderEngineResult> result =
-            mRE->drawLayers(settings, layers, mBuffer, false, base::unique_fd());
-    ASSERT_TRUE(result.valid());
-    auto [status, fence] = result.get();
-
-    ASSERT_EQ(NO_ERROR, status);
-    if (fence.ok()) {
-        sync_wait(fence.get(), -1);
-    }
-
-    ASSERT_FALSE(mGLESRE->isFramebufferImageCachedForTesting(mBuffer->getBuffer()->getId()));
-    expectBufferColor(fullscreenRect(), 255, 0, 0, 255);
+    ASSERT_TRUE(future.valid());
+    auto result = future.get();
+    ASSERT_FALSE(result.ok());
+    ASSERT_EQ(BAD_VALUE, result.error());
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillRedBuffer_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillRedBuffer<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillGreenBuffer_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillGreenBuffer<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBlueBuffer_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBlueBuffer<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillRedTransparentBuffer_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillRedTransparentBuffer<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferPhysicalOffset_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferPhysicalOffset<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate0_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate0<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate90_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate90<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate180_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate180<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate270_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate270<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferLayerTransform_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferLayerTransform<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferColorTransform<ColorSourceVariant>();
 }
@@ -1752,12 +1654,8 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_colorSource) {
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_sourceDataspace) {
     const auto& renderEngineFactory = GetParam();
     // skip for non color management
-    if (!renderEngineFactory->useColorManagement()) {
-        return;
-    }
-    // skip for GLESRenderEngine
-    if (renderEngineFactory->type() != renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!renderEngineFactory->apiSupported()) {
+        GTEST_SKIP();
     }
 
     initializeRenderEngine();
@@ -1767,12 +1665,8 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_sourceDataspace) {
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_outputDataspace) {
     const auto& renderEngineFactory = GetParam();
     // skip for non color management
-    if (!renderEngineFactory->useColorManagement()) {
-        return;
-    }
-    // skip for GLESRenderEngine
-    if (renderEngineFactory->type() != renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!renderEngineFactory->apiSupported()) {
+        GTEST_SKIP();
     }
 
     initializeRenderEngine();
@@ -1780,81 +1674,129 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_outputDataspace) {
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferRoundedCorners_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferWithRoundedCorners<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformZeroLayerAlpha_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferColorTransformZeroLayerAlpha<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferAndBlurBackground_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferAndBlurBackground<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillSmallLayerAndBlurBackground_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillSmallLayerAndBlurBackground<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_overlayCorners_colorSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     overlayCorners<ColorSourceVariant>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillRedBuffer_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillRedBuffer<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillGreenBuffer_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillGreenBuffer<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBlueBuffer_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBlueBuffer<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillRedTransparentBuffer_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillRedTransparentBuffer<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferPhysicalOffset_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferPhysicalOffset<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate0_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate0<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate90_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate90<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate180_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate180<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate270_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate270<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferLayerTransform_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferLayerTransform<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferColorTransform<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
@@ -1862,12 +1804,8 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_opaqueBufferSource)
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformAndSourceDataspace_opaqueBufferSource) {
     const auto& renderEngineFactory = GetParam();
     // skip for non color management
-    if (!renderEngineFactory->useColorManagement()) {
-        return;
-    }
-    // skip for GLESRenderEngine
-    if (renderEngineFactory->type() != renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!renderEngineFactory->apiSupported()) {
+        GTEST_SKIP();
     }
 
     initializeRenderEngine();
@@ -1877,12 +1815,8 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformAndSourceDataspace_o
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformAndOutputDataspace_opaqueBufferSource) {
     const auto& renderEngineFactory = GetParam();
     // skip for non color management
-    if (!renderEngineFactory->useColorManagement()) {
-        return;
-    }
-    // skip for GLESRenderEngine
-    if (renderEngineFactory->type() != renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!renderEngineFactory->apiSupported()) {
+        GTEST_SKIP();
     }
 
     initializeRenderEngine();
@@ -1890,81 +1824,129 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformAndOutputDataspace_o
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferRoundedCorners_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferWithRoundedCorners<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformZeroLayerAlpha_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferColorTransformZeroLayerAlpha<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferAndBlurBackground_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferAndBlurBackground<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillSmallLayerAndBlurBackground_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillSmallLayerAndBlurBackground<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_overlayCorners_opaqueBufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     overlayCorners<BufferSourceVariant<ForceOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillRedBuffer_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillRedBuffer<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillGreenBuffer_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillGreenBuffer<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBlueBuffer_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBlueBuffer<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillRedTransparentBuffer_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillRedTransparentBuffer<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferPhysicalOffset_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferPhysicalOffset<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate0_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate0<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate90_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate90<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate180_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate180<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferCheckersRotate270_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferCheckersRotate270<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferLayerTransform_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferLayerTransform<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferColorTransform<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
@@ -1972,12 +1954,8 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransform_bufferSource) {
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformAndSourceDataspace_bufferSource) {
     const auto& renderEngineFactory = GetParam();
     // skip for non color management
-    if (!renderEngineFactory->useColorManagement()) {
-        return;
-    }
-    // skip for GLESRenderEngine
-    if (renderEngineFactory->type() != renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!renderEngineFactory->apiSupported()) {
+        GTEST_SKIP();
     }
 
     initializeRenderEngine();
@@ -1987,12 +1965,8 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformAndSourceDataspace_b
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformAndOutputDataspace_bufferSource) {
     const auto& renderEngineFactory = GetParam();
     // skip for non color management
-    if (!renderEngineFactory->useColorManagement()) {
-        return;
-    }
-    // skip for GLESRenderEngine
-    if (renderEngineFactory->type() != renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!renderEngineFactory->apiSupported()) {
+        GTEST_SKIP();
     }
 
     initializeRenderEngine();
@@ -2000,46 +1974,73 @@ TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformAndOutputDataspace_b
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferRoundedCorners_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferWithRoundedCorners<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferColorTransformZeroLayerAlpha_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferColorTransformZeroLayerAlpha<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferAndBlurBackground_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferAndBlurBackground<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillSmallLayerAndBlurBackground_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillSmallLayerAndBlurBackground<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_overlayCorners_bufferSource) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     overlayCorners<BufferSourceVariant<RelaxOpaqueBufferVariant>>();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBufferTextureTransform) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferTextureTransform();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBuffer_premultipliesAlpha) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferWithPremultiplyAlpha();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillBuffer_withoutPremultiplyingAlpha) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
     fillBufferWithoutPremultiplyAlpha();
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillShadow_castsWithoutCasterLayer) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const ubyte4 backgroundColor(static_cast<uint8_t>(255), static_cast<uint8_t>(255),
@@ -2047,15 +2048,17 @@ TEST_P(RenderEngineTest, drawLayers_fillShadow_castsWithoutCasterLayer) {
     const float shadowLength = 5.0f;
     Rect casterBounds(DEFAULT_DISPLAY_WIDTH / 3.0f, DEFAULT_DISPLAY_HEIGHT / 3.0f);
     casterBounds.offsetBy(shadowLength + 1, shadowLength + 1);
-    renderengine::ShadowSettings settings =
-            getShadowSettings(vec2(casterBounds.left, casterBounds.top), shadowLength,
-                              false /* casterIsTranslucent */);
+    ShadowSettings settings = getShadowSettings(vec2(casterBounds.left, casterBounds.top),
+                                                shadowLength, false /* casterIsTranslucent */);
 
     drawShadowWithoutCaster(casterBounds.toFloatRect(), settings, backgroundColor);
     expectShadowColorWithoutCaster(casterBounds.toFloatRect(), settings, backgroundColor);
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillShadow_casterLayerMinSize) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const ubyte4 casterColor(static_cast<uint8_t>(255), static_cast<uint8_t>(0),
@@ -2068,15 +2071,17 @@ TEST_P(RenderEngineTest, drawLayers_fillShadow_casterLayerMinSize) {
     renderengine::LayerSettings castingLayer;
     castingLayer.geometry.boundaries = casterBounds.toFloatRect();
     castingLayer.alpha = 1.0f;
-    renderengine::ShadowSettings settings =
-            getShadowSettings(vec2(casterBounds.left, casterBounds.top), shadowLength,
-                              false /* casterIsTranslucent */);
+    ShadowSettings settings = getShadowSettings(vec2(casterBounds.left, casterBounds.top),
+                                                shadowLength, false /* casterIsTranslucent */);
 
     drawShadow<ColorSourceVariant>(castingLayer, settings, casterColor, backgroundColor);
     expectShadowColor(castingLayer, settings, casterColor, backgroundColor);
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillShadow_casterColorLayer) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const ubyte4 casterColor(static_cast<uint8_t>(255), static_cast<uint8_t>(0),
@@ -2090,15 +2095,17 @@ TEST_P(RenderEngineTest, drawLayers_fillShadow_casterColorLayer) {
     castingLayer.sourceDataspace = ui::Dataspace::V0_SRGB_LINEAR;
     castingLayer.geometry.boundaries = casterBounds.toFloatRect();
     castingLayer.alpha = 1.0f;
-    renderengine::ShadowSettings settings =
-            getShadowSettings(vec2(casterBounds.left, casterBounds.top), shadowLength,
-                              false /* casterIsTranslucent */);
+    ShadowSettings settings = getShadowSettings(vec2(casterBounds.left, casterBounds.top),
+                                                shadowLength, false /* casterIsTranslucent */);
 
     drawShadow<ColorSourceVariant>(castingLayer, settings, casterColor, backgroundColor);
     expectShadowColor(castingLayer, settings, casterColor, backgroundColor);
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillShadow_casterOpaqueBufferLayer) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const ubyte4 casterColor(static_cast<uint8_t>(255), static_cast<uint8_t>(0),
@@ -2112,9 +2119,8 @@ TEST_P(RenderEngineTest, drawLayers_fillShadow_casterOpaqueBufferLayer) {
     castingLayer.sourceDataspace = ui::Dataspace::V0_SRGB_LINEAR;
     castingLayer.geometry.boundaries = casterBounds.toFloatRect();
     castingLayer.alpha = 1.0f;
-    renderengine::ShadowSettings settings =
-            getShadowSettings(vec2(casterBounds.left, casterBounds.top), shadowLength,
-                              false /* casterIsTranslucent */);
+    ShadowSettings settings = getShadowSettings(vec2(casterBounds.left, casterBounds.top),
+                                                shadowLength, false /* casterIsTranslucent */);
 
     drawShadow<BufferSourceVariant<ForceOpaqueBufferVariant>>(castingLayer, settings, casterColor,
                                                               backgroundColor);
@@ -2122,6 +2128,9 @@ TEST_P(RenderEngineTest, drawLayers_fillShadow_casterOpaqueBufferLayer) {
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillShadow_casterWithRoundedCorner) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const ubyte4 casterColor(static_cast<uint8_t>(255), static_cast<uint8_t>(0),
@@ -2136,9 +2145,8 @@ TEST_P(RenderEngineTest, drawLayers_fillShadow_casterWithRoundedCorner) {
     castingLayer.geometry.roundedCornersRadius = {3.0f, 3.0f};
     castingLayer.geometry.roundedCornersCrop = casterBounds.toFloatRect();
     castingLayer.alpha = 1.0f;
-    renderengine::ShadowSettings settings =
-            getShadowSettings(vec2(casterBounds.left, casterBounds.top), shadowLength,
-                              false /* casterIsTranslucent */);
+    ShadowSettings settings = getShadowSettings(vec2(casterBounds.left, casterBounds.top),
+                                                shadowLength, false /* casterIsTranslucent */);
 
     drawShadow<BufferSourceVariant<ForceOpaqueBufferVariant>>(castingLayer, settings, casterColor,
                                                               backgroundColor);
@@ -2146,6 +2154,9 @@ TEST_P(RenderEngineTest, drawLayers_fillShadow_casterWithRoundedCorner) {
 }
 
 TEST_P(RenderEngineTest, drawLayers_fillShadow_translucentCasterWithAlpha) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const ubyte4 casterColor(255, 0, 0, 255);
@@ -2156,9 +2167,8 @@ TEST_P(RenderEngineTest, drawLayers_fillShadow_translucentCasterWithAlpha) {
     renderengine::LayerSettings castingLayer;
     castingLayer.geometry.boundaries = casterBounds.toFloatRect();
     castingLayer.alpha = 0.5f;
-    renderengine::ShadowSettings settings =
-            getShadowSettings(vec2(casterBounds.left, casterBounds.top), shadowLength,
-                              true /* casterIsTranslucent */);
+    ShadowSettings settings = getShadowSettings(vec2(casterBounds.left, casterBounds.top),
+                                                shadowLength, true /* casterIsTranslucent */);
 
     drawShadow<BufferSourceVariant<RelaxOpaqueBufferVariant>>(castingLayer, settings, casterColor,
                                                               backgroundColor);
@@ -2173,6 +2183,9 @@ TEST_P(RenderEngineTest, drawLayers_fillShadow_translucentCasterWithAlpha) {
 }
 
 TEST_P(RenderEngineTest, cleanupPostRender_cleansUpOnce) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     renderengine::DisplaySettings settings;
@@ -2187,28 +2200,36 @@ TEST_P(RenderEngineTest, cleanupPostRender_cleansUpOnce) {
     layer.alpha = 1.0;
     layers.push_back(layer);
 
-    std::future<renderengine::RenderEngineResult> resultOne =
-            mRE->drawLayers(settings, layers, mBuffer, true, base::unique_fd());
-    ASSERT_TRUE(resultOne.valid());
-    auto [statusOne, fenceOne] = resultOne.get();
-    ASSERT_EQ(NO_ERROR, statusOne);
+    ftl::Future<FenceResult> futureOne =
+            mRE->drawLayers(settings, layers, mBuffer, base::unique_fd());
+    ASSERT_TRUE(futureOne.valid());
+    auto resultOne = futureOne.get();
+    ASSERT_TRUE(resultOne.ok());
+    auto fenceOne = resultOne.value();
 
-    std::future<renderengine::RenderEngineResult> resultTwo =
-            mRE->drawLayers(settings, layers, mBuffer, true, std::move(fenceOne));
-    ASSERT_TRUE(resultTwo.valid());
-    auto [statusTwo, fenceTwo] = resultTwo.get();
-    ASSERT_EQ(NO_ERROR, statusTwo);
-    if (fenceTwo.ok()) {
-        sync_wait(fenceTwo.get(), -1);
-    }
+    ftl::Future<FenceResult> futureTwo =
+            mRE->drawLayers(settings, layers, mBuffer, base::unique_fd(fenceOne->dup()));
+    ASSERT_TRUE(futureTwo.valid());
+    auto resultTwo = futureTwo.get();
+    ASSERT_TRUE(resultTwo.ok());
+    auto fenceTwo = resultTwo.value();
+    fenceTwo->waitForever(LOG_TAG);
 
     // Only cleanup the first time.
-    EXPECT_FALSE(mRE->canSkipPostRenderCleanup());
-    mRE->cleanupPostRender();
-    EXPECT_TRUE(mRE->canSkipPostRenderCleanup());
+    if (mRE->canSkipPostRenderCleanup()) {
+        // Skia's Vk backend may keep the texture alive beyond drawLayersInternal, so
+        // it never gets added to the cleanup list. In those cases, we can skip.
+        EXPECT_TRUE(GetParam()->graphicsApi() == renderengine::RenderEngine::GraphicsApi::VK);
+    } else {
+        mRE->cleanupPostRender();
+        EXPECT_TRUE(mRE->canSkipPostRenderCleanup());
+    }
 }
 
 TEST_P(RenderEngineTest, testRoundedCornersCrop) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     renderengine::DisplaySettings settings;
@@ -2259,6 +2280,9 @@ TEST_P(RenderEngineTest, testRoundedCornersCrop) {
 }
 
 TEST_P(RenderEngineTest, testRoundedCornersParentCrop) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     renderengine::DisplaySettings settings;
@@ -2304,6 +2328,9 @@ TEST_P(RenderEngineTest, testRoundedCornersParentCrop) {
 }
 
 TEST_P(RenderEngineTest, testRoundedCornersParentCropSmallBounds) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     renderengine::DisplaySettings settings;
@@ -2338,7 +2365,7 @@ TEST_P(RenderEngineTest, testRoundedCornersParentCropSmallBounds) {
 }
 
 TEST_P(RenderEngineTest, testRoundedCornersXY) {
-    if (GetParam()->type() != renderengine::RenderEngine::RenderEngineType::SKIA_GL) {
+    if (!GetParam()->apiSupported()) {
         GTEST_SKIP();
     }
 
@@ -2381,6 +2408,9 @@ TEST_P(RenderEngineTest, testRoundedCornersXY) {
 }
 
 TEST_P(RenderEngineTest, testClear) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const auto rect = fullscreenRect();
@@ -2410,6 +2440,9 @@ TEST_P(RenderEngineTest, testClear) {
 }
 
 TEST_P(RenderEngineTest, testDisableBlendingBuffer) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const auto rect = Rect(0, 0, 1, 1);
@@ -2457,11 +2490,55 @@ TEST_P(RenderEngineTest, testDisableBlendingBuffer) {
     expectBufferColor(rect, 0, 128, 0, 128);
 }
 
-TEST_P(RenderEngineTest, testDimming) {
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
+TEST_P(RenderEngineTest, testBorder) {
+    if (!GetParam()->apiSupported()) {
         GTEST_SKIP();
     }
 
+    initializeRenderEngine();
+
+    const ui::Dataspace dataspace = ui::Dataspace::V0_SRGB;
+
+    const auto displayRect = Rect(1080, 2280);
+    renderengine::DisplaySettings display{
+            .physicalDisplay = displayRect,
+            .clip = displayRect,
+            .outputDataspace = dataspace,
+    };
+    display.borderInfoList.clear();
+    renderengine::BorderRenderInfo info;
+    info.combinedRegion = Region(Rect(99, 99, 199, 199));
+    info.width = 20.0f;
+    info.color = half4{1.0f, 128.0f / 255.0f, 0.0f, 1.0f};
+    display.borderInfoList.emplace_back(info);
+
+    const auto greenBuffer = allocateAndFillSourceBuffer(1, 1, ubyte4(0, 255, 0, 255));
+    const renderengine::LayerSettings greenLayer{
+            .geometry.boundaries = FloatRect(0.f, 0.f, 1.f, 1.f),
+            .source =
+                    renderengine::PixelSource{
+                            .buffer =
+                                    renderengine::Buffer{
+                                            .buffer = greenBuffer,
+                                            .usePremultipliedAlpha = true,
+                                    },
+                    },
+            .alpha = 1.0f,
+            .sourceDataspace = dataspace,
+            .whitePointNits = 200.f,
+    };
+
+    std::vector<renderengine::LayerSettings> layers;
+    layers.emplace_back(greenLayer);
+    invokeDraw(display, layers);
+
+    expectBufferColor(Rect(99, 99, 101, 101), 255, 128, 0, 255, 1);
+}
+
+TEST_P(RenderEngineTest, testDimming) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const ui::Dataspace dataspace = ui::Dataspace::V0_SRGB_LINEAR;
@@ -2534,7 +2611,7 @@ TEST_P(RenderEngineTest, testDimming) {
 }
 
 TEST_P(RenderEngineTest, testDimming_inGammaSpace) {
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
+    if (!GetParam()->apiSupported()) {
         GTEST_SKIP();
     }
     initializeRenderEngine();
@@ -2612,7 +2689,7 @@ TEST_P(RenderEngineTest, testDimming_inGammaSpace) {
 }
 
 TEST_P(RenderEngineTest, testDimming_inGammaSpace_withDisplayColorTransform) {
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
+    if (!GetParam()->apiSupported()) {
         GTEST_SKIP();
     }
     initializeRenderEngine();
@@ -2675,7 +2752,7 @@ TEST_P(RenderEngineTest, testDimming_inGammaSpace_withDisplayColorTransform) {
 }
 
 TEST_P(RenderEngineTest, testDimming_inGammaSpace_withDisplayColorTransform_deviceHandles) {
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
+    if (!GetParam()->apiSupported()) {
         GTEST_SKIP();
     }
     initializeRenderEngine();
@@ -2739,10 +2816,10 @@ TEST_P(RenderEngineTest, testDimming_inGammaSpace_withDisplayColorTransform_devi
 }
 
 TEST_P(RenderEngineTest, testDimming_withoutTargetLuminance) {
-    initializeRenderEngine();
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
     }
+    initializeRenderEngine();
 
     const auto displayRect = Rect(2, 1);
     const renderengine::DisplaySettings display{
@@ -2793,6 +2870,9 @@ TEST_P(RenderEngineTest, testDimming_withoutTargetLuminance) {
 }
 
 TEST_P(RenderEngineTest, test_isOpaque) {
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
+    }
     initializeRenderEngine();
 
     const auto rect = Rect(0, 0, 1, 1);
@@ -2836,19 +2916,11 @@ TEST_P(RenderEngineTest, test_isOpaque) {
     std::vector<renderengine::LayerSettings> layers{greenLayer};
     invokeDraw(display, layers);
 
-    if (GetParam()->useColorManagement()) {
-        expectBufferColor(rect, 117, 251, 76, 255);
-    } else {
-        expectBufferColor(rect, 0, 255, 0, 255);
-    }
+    expectBufferColor(rect, 117, 251, 76, 255);
 }
 
 TEST_P(RenderEngineTest, test_tonemapPQMatches) {
-    if (!GetParam()->useColorManagement()) {
-        GTEST_SKIP();
-    }
-
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
+    if (!GetParam()->apiSupported()) {
         GTEST_SKIP();
     }
 
@@ -2865,11 +2937,7 @@ TEST_P(RenderEngineTest, test_tonemapPQMatches) {
 }
 
 TEST_P(RenderEngineTest, test_tonemapHLGMatches) {
-    if (!GetParam()->useColorManagement()) {
-        GTEST_SKIP();
-    }
-
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
+    if (!GetParam()->apiSupported()) {
         GTEST_SKIP();
     }
 
@@ -2886,10 +2954,9 @@ TEST_P(RenderEngineTest, test_tonemapHLGMatches) {
 }
 
 TEST_P(RenderEngineTest, r8_behaves_as_mask) {
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
     }
-
     initializeRenderEngine();
 
     const auto r8Buffer = allocateR8Buffer(2, 1);
@@ -2947,10 +3014,9 @@ TEST_P(RenderEngineTest, r8_behaves_as_mask) {
 }
 
 TEST_P(RenderEngineTest, r8_respects_color_transform) {
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
     }
-
     initializeRenderEngine();
 
     const auto r8Buffer = allocateR8Buffer(2, 1);
@@ -3013,10 +3079,9 @@ TEST_P(RenderEngineTest, r8_respects_color_transform) {
 }
 
 TEST_P(RenderEngineTest, r8_respects_color_transform_when_device_handles) {
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
-        return;
+    if (!GetParam()->apiSupported()) {
+        GTEST_SKIP();
     }
-
     initializeRenderEngine();
 
     const auto r8Buffer = allocateR8Buffer(2, 1);
@@ -3082,20 +3147,19 @@ TEST_P(RenderEngineTest, r8_respects_color_transform_when_device_handles) {
 }
 
 TEST_P(RenderEngineTest, primeShaderCache) {
-    if (GetParam()->type() == renderengine::RenderEngine::RenderEngineType::GLES) {
+    if (!GetParam()->apiSupported()) {
         GTEST_SKIP();
     }
-
     initializeRenderEngine();
 
-    auto fut = mRE->primeCache();
+    auto fut = mRE->primeCache(false);
     if (fut.valid()) {
         fut.wait();
     }
 
-    const int minimumExpectedShadersCompiled = GetParam()->useColorManagement() ? 60 : 30;
+    static constexpr int kMinimumExpectedShadersCompiled = 60;
     ASSERT_GT(static_cast<skia::SkiaGLRenderEngine*>(mRE.get())->reportShadersCompiled(),
-              minimumExpectedShadersCompiled);
+              kMinimumExpectedShadersCompiled);
 }
 } // namespace renderengine
 } // namespace android

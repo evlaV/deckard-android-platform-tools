@@ -45,6 +45,30 @@ static std::optional<size_t> GetBufferSizeProperty(const std::string& key) {
     return size;
 }
 
+static std::optional<size_t> GetBufferSizePropertyOverride(log_id_t log_id) {
+    std::string buffer_name = android_log_id_to_name(log_id);
+    std::array<std::string, 4> properties = {
+            "persist.logd.size." + buffer_name,
+            "ro.logd.size." + buffer_name,
+            "persist.logd.size",
+            "ro.logd.size",
+    };
+
+    for (const auto& property : properties) {
+        if (auto size = GetBufferSizeProperty(property)) {
+            return size;
+        }
+    }
+    return {};
+}
+
+/* This method should only be used for debuggable devices. */
+static bool isAllowedToOverrideBufferSize() {
+    const auto hwType = android::base::GetProperty("ro.hardware.type", "");
+    /* We allow automotive devices to optionally override the default. */
+    return (hwType == "automotive");
+}
+
 size_t GetBufferSizeFromProperties(log_id_t log_id) {
     /*
      * http://b/196856709
@@ -59,26 +83,23 @@ size_t GetBufferSizeFromProperties(log_id_t log_id) {
      * custom log sizes like this should help us confirm (or deny) whether the
      * problem really is this simple.
      */
-    const auto hwType = android::base::GetProperty("ro.hardware.type", "");
-    const auto isDebuggable = android::base::GetBoolProperty("ro.debuggable", false);
-    if (hwType == "automotive" && isDebuggable) {
-        std::string buffer_name = android_log_id_to_name(log_id);
-        std::array<std::string, 4> properties = {
-                "persist.logd.size." + buffer_name,
-                "ro.logd.size." + buffer_name,
-                "persist.logd.size",
-                "ro.logd.size",
-        };
-
-        for (const auto& property : properties) {
-            if (auto size = GetBufferSizeProperty(property)) {
+    static const bool isDebuggable = android::base::GetBoolProperty("ro.debuggable", false);
+    if (isDebuggable) {
+        static const bool mayOverride = isAllowedToOverrideBufferSize();
+        if (mayOverride) {
+            if (auto size = GetBufferSizePropertyOverride(log_id)) {
                 return *size;
             }
         }
-    }
-
-    if (android::base::GetBoolProperty("ro.config.low_ram", false)) {
-        return kLogBufferMinSize;
+    } else {
+        static const bool isLowRam = android::base::GetBoolProperty("ro.config.low_ram", false);
+        /*
+         * For non-debuggable low_ram devices, we want to save memory here and
+         * use the minimum size.
+         */
+        if (isLowRam) {
+            return kLogBufferMinSize;
+        }
     }
 
     return kDefaultLogBufferSize;

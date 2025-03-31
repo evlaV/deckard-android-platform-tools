@@ -22,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <unwindstack/DwarfSection.h>
@@ -41,6 +42,13 @@ struct LoadInfo {
   size_t table_size;
 };
 
+struct SectionInfo {
+  uint64_t offset;
+  uint64_t size;
+  uint64_t flags;
+  int64_t bias;
+};
+
 enum : uint8_t {
   SONAME_UNKNOWN = 0,
   SONAME_VALID,
@@ -49,6 +57,7 @@ enum : uint8_t {
 
 struct ElfTypes32 {
   using AddressType = uint32_t;
+  using Chdr = Elf32_Chdr;
   using Dyn = Elf32_Dyn;
   using Ehdr = Elf32_Ehdr;
   using Nhdr = Elf32_Nhdr;
@@ -59,6 +68,7 @@ struct ElfTypes32 {
 
 struct ElfTypes64 {
   using AddressType = uint64_t;
+  using Chdr = Elf64_Chdr;
   using Dyn = Elf64_Dyn;
   using Ehdr = Elf64_Ehdr;
   using Nhdr = Elf64_Nhdr;
@@ -69,7 +79,7 @@ struct ElfTypes64 {
 
 class ElfInterface {
  public:
-  ElfInterface(Memory* memory) : memory_(memory) {}
+  ElfInterface(std::shared_ptr<Memory>& memory) : memory_(memory) {}
   virtual ~ElfInterface();
 
   virtual bool Init(int64_t* load_bias) = 0;
@@ -91,9 +101,9 @@ class ElfInterface {
 
   bool GetTextRange(uint64_t* addr, uint64_t* size);
 
-  std::unique_ptr<Memory> CreateGnuDebugdataMemory();
+  std::shared_ptr<Memory> CreateGnuDebugdataMemory();
 
-  Memory* memory() { return memory_; }
+  std::shared_ptr<Memory> memory() { return memory_; }
 
   const std::unordered_map<uint64_t, LoadInfo>& pt_loads() { return pt_loads_; }
 
@@ -102,20 +112,18 @@ class ElfInterface {
   uint64_t dynamic_offset() { return dynamic_offset_; }
   uint64_t dynamic_vaddr_start() { return dynamic_vaddr_start_; }
   uint64_t dynamic_vaddr_end() { return dynamic_vaddr_end_; }
+
   uint64_t data_offset() { return data_offset_; }
   uint64_t data_vaddr_start() { return data_vaddr_start_; }
   uint64_t data_vaddr_end() { return data_vaddr_end_; }
-  uint64_t eh_frame_hdr_offset() { return eh_frame_hdr_offset_; }
-  int64_t eh_frame_hdr_section_bias() { return eh_frame_hdr_section_bias_; }
-  uint64_t eh_frame_hdr_size() { return eh_frame_hdr_size_; }
-  uint64_t eh_frame_offset() { return eh_frame_offset_; }
-  int64_t eh_frame_section_bias() { return eh_frame_section_bias_; }
-  uint64_t eh_frame_size() { return eh_frame_size_; }
-  uint64_t debug_frame_offset() { return debug_frame_offset_; }
-  int64_t debug_frame_section_bias() { return debug_frame_section_bias_; }
-  uint64_t debug_frame_size() { return debug_frame_size_; }
+
+  const SectionInfo& eh_frame_hdr_info() { return eh_frame_hdr_info_; }
+  const SectionInfo& eh_frame_info() { return eh_frame_info_; }
+  const SectionInfo& debug_frame_info() { return debug_frame_info_; }
+
   uint64_t gnu_debugdata_offset() { return gnu_debugdata_offset_; }
   uint64_t gnu_debugdata_size() { return gnu_debugdata_size_; }
+
   uint64_t gnu_build_id_offset() { return gnu_build_id_offset_; }
   uint64_t gnu_build_id_size() { return gnu_build_id_size_; }
 
@@ -135,7 +143,7 @@ class ElfInterface {
  protected:
   virtual void HandleUnknownType(uint32_t, uint64_t, uint64_t) {}
 
-  Memory* memory_;
+  std::shared_ptr<Memory> memory_;
   std::unordered_map<uint64_t, LoadInfo> pt_loads_;
 
   // Stored elf data.
@@ -147,17 +155,9 @@ class ElfInterface {
   uint64_t data_vaddr_start_ = 0;
   uint64_t data_vaddr_end_ = 0;
 
-  uint64_t eh_frame_hdr_offset_ = 0;
-  int64_t eh_frame_hdr_section_bias_ = 0;
-  uint64_t eh_frame_hdr_size_ = 0;
-
-  uint64_t eh_frame_offset_ = 0;
-  int64_t eh_frame_section_bias_ = 0;
-  uint64_t eh_frame_size_ = 0;
-
-  uint64_t debug_frame_offset_ = 0;
-  int64_t debug_frame_section_bias_ = 0;
-  uint64_t debug_frame_size_ = 0;
+  SectionInfo eh_frame_hdr_info_ = {};
+  SectionInfo eh_frame_info_ = {};
+  SectionInfo debug_frame_info_ = {};
 
   uint64_t gnu_debugdata_offset_ = 0;
   uint64_t gnu_debugdata_size_ = 0;
@@ -186,6 +186,7 @@ template <typename ElfTypes>
 class ElfInterfaceImpl : public ElfInterface {
  public:
   using AddressType = typename ElfTypes::AddressType;
+  using ChdrType = typename ElfTypes::Chdr;
   using DynType = typename ElfTypes::Dyn;
   using EhdrType = typename ElfTypes::Ehdr;
   using NhdrType = typename ElfTypes::Nhdr;
@@ -193,7 +194,7 @@ class ElfInterfaceImpl : public ElfInterface {
   using ShdrType = typename ElfTypes::Shdr;
   using SymType = typename ElfTypes::Sym;
 
-  ElfInterfaceImpl(Memory* memory) : ElfInterface(memory) {}
+  ElfInterfaceImpl(std::shared_ptr<Memory>& memory) : ElfInterface(memory) {}
   virtual ~ElfInterfaceImpl() = default;
 
   bool Init(int64_t* load_bias) override { return ReadAllHeaders(load_bias); }
