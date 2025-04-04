@@ -118,13 +118,13 @@ Architecture: amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv
 Multi-Arch: foreign
 Depends: ${misc:Depends}, ${shlibs:Depends},
          android-libcutils (= ${binary:Version}),
-Recommends: android-sdk-platform-tools-common (>= 28.0.2~)
+         android-udev-rules,
 Provides: android-tools-adb
 Description: Android Debug Bridge
  A versatile command line tool that lets you communicate with an emulator
  instance or connected Android-powered device.
  .
- This package recommends "android-sdk-platform-tools-common" which contains
+ This package depends on "android-udev-rules" which contains
  the udev rules for Android devices. Without this package, adb and fastboot need
  to be running with root permission.
 
@@ -381,14 +381,14 @@ Depends: ${misc:Depends}, ${shlibs:Depends},
          android-libcutils (= ${binary:Version}),
          android-libsparse (= ${binary:Version}),
          android-libziparchive (= ${binary:Version}),
-Recommends: android-sdk-platform-tools-common (>= 28.0.2~)
+         android-udev-rules,
 Suggests: android-sdk-platform-tools [amd64 i386 armel armhf arm64 mipsel mips64el ppc64el]
 Provides: android-tools-fastboot
 Description: Android fastboot tool
  A command line tool for flashing an Android device, boot an Android device to
  fastboot mode, etc..
  .
- This package recommends "android-sdk-platform-tools-common" which contains
+ This package depends on "android-udev-rules" which contains
  the udev rules for Android devices. Without this package, adb and fastboot need
  to be running with root permission.
 
