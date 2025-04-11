@@ -1,3 +1,9 @@
+android-platform-tools (34.0.5-12~bpo12+1) bookworm-backports; urgency=medium
+
+  * Rebuild for bookworm-backports.
+
+ -- Roger Shimizu <rosh@debian.org>  Thu, 10 Apr 2025 21:02:14 -0700
+
 android-platform-tools (34.0.5-12) unstable; urgency=medium
 
   * debian/control:
