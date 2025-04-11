@@ -1,3 +1,20 @@
+android-platform-tools (34.0.5-12) unstable; urgency=medium
+
+  * debian/control:
+    - Replace "android-sdk-platform-tools-common" with "android-udev-rules"
+      and bump from "Recommends" to "Depends" as well.
+
+ -- Roger Shimizu <rosh@debian.org>  Thu, 03 Apr 2025 23:03:19 -0700
+
+android-platform-tools (34.0.5-11) unstable; urgency=medium
+
+  * adb manpage: Make NAME one line to resolve lintian warning.
+  * Update adbd.service:
+    - Start adbd service after network is connected.
+    - Add doc entry to service to resolve lintian warning.
+
+ -- Roger Shimizu <rosh@debian.org>  Sun, 30 Mar 2025 18:14:16 -0700
+
 android-platform-tools (34.0.5-10~bpo12+1) bookworm-backports; urgency=medium
 
   * Rebuild for bookworm-backports.
