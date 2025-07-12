@@ -63,7 +63,7 @@ endif
 s/lib%.a: debian/system/lib%.mk
 	dh_auto_build --buildsystem=makefile -- --file=$<
 
-s/lib%.so: debian/system/lib%.mk
+s/lib%.so: debian/system/lib%.mk s/libbase.so
 	dh_auto_build --buildsystem=makefile -- --file=$<
 
 debian/manpages/system/%.1: debian/manpages/system/%.1.md
@@ -79,7 +79,7 @@ s/libbacktrace.so: debian/system/libbacktrace.mk s/libcutils.so e/libcpu_feature
 s/libbase.so: debian/system/libbase.mk s/liblog.so
 	dh_auto_build --buildsystem=makefile -- --file=$<
 
-s/libcutils.so: debian/system/libcutils.mk s/libbase.so
+s/liblog.so: debian/system/liblog.mk
 	dh_auto_build --buildsystem=makefile -- --file=$<
 
 s/adb: debian/system/adb.mk s/libziparchive.so s/libadb.a s/libcrypto_utils.a s/libcutils.so debian/manpages/system/adb.1
@@ -168,7 +168,7 @@ s/extras/libext4_utils.a: debian/system/extras/libext4_utils.mk
 
 ## libnativehelper
 
-libnativehelper/libnativehelper.so: debian/libnativehelper/libnativehelper.mk
+libnativehelper/libnativehelper.so: debian/libnativehelper/libnativehelper.mk s/liblog.so
 	dh_auto_build --buildsystem=makefile -- --file=$<
 
 COMPONENTS += libnativehelper/libnativehelper.so
