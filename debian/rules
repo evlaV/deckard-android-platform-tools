@@ -239,5 +239,17 @@ override_dh_gencontrol:
 	dh_gencontrol -pfastboot -- -v1:$(DEB_VERSION)
 	dh_gencontrol -pmkbootimg -- -v1:$(DEB_VERSION)
 
+override_dh_makeshlibs:
+	dh_makeshlibs -pandroid-libbacktrace -V "android-libbacktrace (= 1:$(DEB_VERSION))"
+	dh_makeshlibs -pandroid-libbase -V "android-libbase (= 1:$(DEB_VERSION))"
+	dh_makeshlibs -pandroid-libcutils -V "android-libcutils (= 1:$(DEB_VERSION))"
+	dh_makeshlibs -pandroid-liblog -V "android-liblog (= 1:$(DEB_VERSION))"
+	dh_makeshlibs -pandroid-libsparse -V "android-libsparse (= 1:$(DEB_VERSION))"
+	dh_makeshlibs -pandroid-libutils -V "android-libutils (= 1:$(DEB_VERSION))"
+	dh_makeshlibs -pandroid-libziparchive -V "android-libziparchive (= 1:$(DEB_VERSION))"
+	dh_makeshlibs -pandroid-platform-frameworks-native-headers -V "android-platform-frameworks-native-headers (= 1:$(DEB_VERSION))"
+	dh_makeshlibs -pandroid-platform-system-core-headers -V "android-platform-system-core-headers (= 1:$(DEB_VERSION))"
+	dh_makeshlibs -pandroid-sdk-libsparse-utils -V "android-sdk-libsparse-utils (= 1:$(DEB_VERSION))"
+
 override_dh_installsystemd:
 	dh_installsystemd --no-stop-on-upgrade --no-restart-after-upgrade

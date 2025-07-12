@@ -37,9 +37,7 @@ Package: android-sdk-libsparse-utils
 Architecture: any
 Multi-Arch: foreign
 Section: utils
-Depends: ${shlibs:Depends}, ${misc:Depends},
-         android-libbase (= ${binary:Version}),
-         android-libsparse (= ${binary:Version}),
+Depends: ${misc:Depends}, ${shlibs:Depends},
          python3,
 Breaks: android-tools-fsutils,
         append2simg (<< 1:10.0.0+r36-1~),
@@ -57,7 +55,7 @@ Package: android-liblog
 Section: libs
 Architecture: any
 Multi-Arch: same
-Depends: ${misc:Depends}, ${shlibs:Depends}
+Depends: ${misc:Depends}, ${shlibs:Depends},
 Breaks: android-liblog-dev (<< 1:33)
 Description: Android NDK logger interfaces
  liblog represents an interface to the volatile Android Logging system for NDK
@@ -85,8 +83,7 @@ Package: android-libcutils
 Section: libs
 Architecture: any
 Multi-Arch: same
-Depends: ${shlibs:Depends}, ${misc:Depends},
-         android-libbase (= ${binary:Version}),
+Depends: ${misc:Depends}, ${shlibs:Depends},
          libbsd0,
 Breaks: android-libcutils-dev (<< 1:33)
 Description: Android utils library for C
@@ -117,7 +114,6 @@ Section: utils
 Architecture: amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64
 Multi-Arch: foreign
 Depends: ${misc:Depends}, ${shlibs:Depends},
-         android-libcutils (= ${binary:Version}),
          android-udev-rules,
 Provides: android-tools-adb
 Description: Android Debug Bridge
@@ -133,7 +129,6 @@ Section: utils
 Architecture: amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64
 Multi-Arch: foreign
 Depends: ${misc:Depends}, ${shlibs:Depends},
-         android-libcutils (= 1:${binary:Version}),
 Breaks: android-tools-adbd (<< 6.0~)
 Replaces: android-tools-adbd (<< 6.0~)
 Provides: android-tools-adbd
@@ -160,7 +155,6 @@ Section: libs
 Architecture: any
 Multi-Arch: same
 Depends: ${misc:Depends}, ${shlibs:Depends},
-         android-libbase (= ${binary:Version}),
 Breaks: android-libsparse-dev (<< 1:33)
 Description: Library for sparse files
  This library provides APIs for creating, manipulating and destroying sparse
@@ -188,9 +182,7 @@ Package: android-libutils
 Section: libs
 Architecture: amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64
 Multi-Arch: same
-Depends: ${shlibs:Depends}, ${misc:Depends},
-         android-libbacktrace (= ${binary:Version}),
-         android-libcutils (= ${binary:Version}),
+Depends: ${misc:Depends}, ${shlibs:Depends},
 Breaks: android-libutils-dev (<< 1:33)
 Description: Android Utility Function Library
  This library provides miscellaneous utility functions.
@@ -219,8 +211,7 @@ Package: android-libziparchive
 Section: libs
 Architecture: any
 Multi-Arch: same
-Depends: ${shlibs:Depends}, ${misc:Depends},
-         android-libbase (= ${binary:Version}),
+Depends: ${misc:Depends}, ${shlibs:Depends},
 Breaks: android-libziparchive-dev (<< 1:33)
 Description: Library for ZIP archives
  This library provides APIs for creating and manipulating ZIP archives.
@@ -269,9 +260,8 @@ Package: android-libbacktrace
 Section: libs
 Architecture: amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64
 Multi-Arch: same
-Depends: ${shlibs:Depends}, ${misc:Depends},
+Depends: ${misc:Depends}, ${shlibs:Depends},
          7zip,
-         android-libbase (= ${binary:Version}),
 Breaks: android-libbacktrace-dev (<< 1:33)
 Description: Android backtrace library
  Android backtrace library produce symbolic backtraces for making
@@ -295,8 +285,7 @@ Package: android-libbase
 Section: libs
 Architecture: any
 Multi-Arch: same
-Depends: ${shlibs:Depends}, ${misc:Depends},
-         android-liblog (= ${binary:Version}),
+Depends: ${misc:Depends}, ${shlibs:Depends},
 Breaks: android-libbase-dev (<< 1:33)
 Description: Android base library
  This library provides APIs for basic tasks like handling files, Unicode
@@ -325,8 +314,7 @@ Package: android-libnativehelper
 Section: libs
 Architecture: any
 Multi-Arch: same
-Depends: ${shlibs:Depends}, ${misc:Depends},
-         android-liblog (= 1:${binary:Version}),
+Depends: ${misc:Depends}, ${shlibs:Depends},
 Breaks: android-libnativehelper-dev (<< 33)
 Replaces: android-libnativehelper-dev (<< 33)
 Description: Support functions for Android's class libraries
@@ -378,9 +366,6 @@ Section: utils
 Architecture: amd64 i386 armel armhf arm64 loong64 mipsel mips64el ppc64el riscv64
 Multi-Arch: foreign
 Depends: ${misc:Depends}, ${shlibs:Depends},
-         android-libcutils (= ${binary:Version}),
-         android-libsparse (= ${binary:Version}),
-         android-libziparchive (= ${binary:Version}),
          android-udev-rules,
 Suggests: android-sdk-platform-tools [amd64 i386 armel armhf arm64 mipsel mips64el ppc64el]
 Provides: android-tools-fastboot
