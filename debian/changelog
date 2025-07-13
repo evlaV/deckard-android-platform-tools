@@ -1,3 +1,11 @@
+android-platform-tools (35.0.2-1~exp4) experimental; urgency=medium
+
+  * d/rules: Use dh_makeshlibs to specify the lib version (Closes: #1024902)
+  * d/rules: Update the lib dependencies to fix FTBFS with make --shuffle=reverse
+    (Closes: #1105254).
+
+ -- Roger Shimizu <rosh@debian.org>  Sun, 13 Jul 2025 22:04:00 +0200
+
 android-platform-tools (35.0.2-1~exp3) experimental; urgency=medium
 
   * debian/android-libutils-dev.install: Add libutils include folder.
