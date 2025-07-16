@@ -70,10 +70,11 @@ LDFLAGS += \
   -Wl,-rpath=/usr/lib/$(DEB_HOST_MULTIARCH)/android \
   -Wl,-rpath=/usr/lib/7zip \
   -Wl,-soname,$(NAME).so.0 \
+  -l:7z.so \
   -lbase \
   -llog \
-  -l:7z.so \
   -lpthread \
+  -lzstd \
   -shared
 
 # -latomic should be the last library specified

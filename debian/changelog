@@ -1,3 +1,9 @@
+android-platform-tools (35.0.2-1~exp5) experimental; urgency=medium
+
+  * d/system/libbacktrace.mk: Add -lzstd to fix autopkgtest regression.
+
+ -- Roger Shimizu <rosh@debian.org>  Wed, 16 Jul 2025 21:17:07 +0200
+
 android-platform-tools (35.0.2-1~exp4) experimental; urgency=medium
 
   * d/rules: Use dh_makeshlibs to specify the lib version (Closes: #1024902)
