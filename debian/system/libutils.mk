@@ -17,6 +17,14 @@ SOURCES = \
   misc.cpp \
   \
   Looper.cpp \
+  \
+  binder/RefBase.cpp \
+  binder/SharedBuffer.cpp \
+  binder/String8.cpp \
+  binder/String16.cpp \
+  binder/StrongPointer.cpp \
+  binder/Unicode.cpp \
+  binder/VectorImpl.cpp \
 #  Errors.cpp \
 
 SOURCES := $(foreach source, $(SOURCES), system/core/libutils/$(source))
