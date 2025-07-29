@@ -194,8 +194,6 @@ static void setup_adb(const std::vector<std::string>& addrs) {
 }
 
 int adbd_main(int server_port) {
-    umask(0);
-
     signal(SIGPIPE, SIG_IGN);
 
 #if defined(__BIONIC__)
