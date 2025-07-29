@@ -322,12 +322,14 @@ unique_fd daemon_service_to_fd(std::string_view name, atransport* transport) {
 
     if (android::base::ConsumePrefix(&name, "dev:")) {
         return unique_fd{unix_open(name, O_RDWR | O_CLOEXEC)};
+#if defined(__ANDROID__)
     } else if (android::base::ConsumePrefix(&name, "jdwp:")) {
         pid_t pid;
         if (!ParseUint(&pid, name)) {
             return unique_fd{};
         }
         return create_jdwp_connection_fd(pid);
+#endif
     } else if (android::base::ConsumePrefix(&name, "shell")) {
         return ShellService(name, transport);
     } else if (android::base::ConsumePrefix(&name, "exec:")) {

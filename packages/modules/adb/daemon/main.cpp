@@ -297,9 +297,6 @@ int adbd_main(int server_port) {
 
     LOG(INFO) << "adbd started";
 
-    D("adbd_main(): pre init_jdwp()");
-    init_jdwp();
-    D("adbd_main(): post init_jdwp()");
 
     D("Event loop starting");
     fdevent_loop();
