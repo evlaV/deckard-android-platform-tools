@@ -98,43 +98,10 @@ static char* mkdtemp(char* name_template, size_t size_in_chars) {
 }
 #endif
 
-std::string GetSystemTempDir() {
-#if defined(__ANDROID__)
-  const auto* tmpdir = getenv("TMPDIR");
-  if (tmpdir == nullptr) tmpdir = "/data/local/tmp";
-  if (access(tmpdir, R_OK | W_OK | X_OK) == 0) {
-    return tmpdir;
-  }
-  // Tests running in app context can't access /data/local/tmp,
-  // so try current directory if /data/local/tmp is not accessible.
-  return ".";
-#elif defined(_WIN32)
-  wchar_t tmp_dir_w[MAX_PATH];
-  DWORD result = GetTempPathW(std::size(tmp_dir_w), tmp_dir_w);  // checks TMP env
-  CHECK_NE(result, 0ul) << "GetTempPathW failed, error: " << GetLastError();
-  CHECK_LT(result, std::size(tmp_dir_w)) << "path truncated to: " << result;
-
-  // GetTempPath() returns a path with a trailing slash, but init()
-  // does not expect that, so remove it.
-  if (tmp_dir_w[result - 1] == L'\\') {
-    tmp_dir_w[result - 1] = L'\0';
-  }
-
-  std::string tmp_dir;
-  CHECK(android::base::WideToUTF8(tmp_dir_w, &tmp_dir)) << "path can't be converted to utf8";
-
-  return tmp_dir;
-#else
-  const auto* tmpdir = getenv("TMPDIR");
-  if (tmpdir == nullptr) tmpdir = "/tmp";
-  return tmpdir;
-#endif
-}
-
 }  // namespace
 
 TemporaryFile::TemporaryFile() {
-  init(GetSystemTempDir());
+  init(android::base::GetSystemTempDir());
 }
 
 TemporaryFile::TemporaryFile(const std::string& tmp_dir) {
@@ -166,7 +133,7 @@ void TemporaryFile::init(const std::string& tmp_dir) {
 }
 
 TemporaryDir::TemporaryDir() {
-  init(GetSystemTempDir());
+  init(android::base::GetSystemTempDir());
 }
 
 TemporaryDir::~TemporaryDir() {
@@ -497,6 +464,39 @@ std::string GetExecutablePath() {
 
 std::string GetExecutableDirectory() {
   return Dirname(GetExecutablePath());
+}
+
+std::string GetSystemTempDir() {
+#if defined(__ANDROID__)
+  const auto* tmpdir = getenv("TMPDIR");
+  if (tmpdir == nullptr) tmpdir = "/data/local/tmp";
+  if (access(tmpdir, R_OK | W_OK | X_OK) == 0) {
+    return tmpdir;
+  }
+  // Tests running in app context can't access /data/local/tmp,
+  // so try current directory if /data/local/tmp is not accessible.
+  return ".";
+#elif defined(_WIN32)
+  wchar_t tmp_dir_w[MAX_PATH];
+  DWORD result = GetTempPathW(std::size(tmp_dir_w), tmp_dir_w);  // checks TMP env
+  CHECK_NE(result, 0ul) << "GetTempPathW failed, error: " << GetLastError();
+  CHECK_LT(result, std::size(tmp_dir_w)) << "path truncated to: " << result;
+
+  // GetTempPath() returns a path with a trailing slash, but init()
+  // does not expect that, so remove it.
+  if (tmp_dir_w[result - 1] == L'\\') {
+    tmp_dir_w[result - 1] = L'\0';
+  }
+
+  std::string tmp_dir;
+  CHECK(android::base::WideToUTF8(tmp_dir_w, &tmp_dir)) << "path can't be converted to utf8";
+
+  return tmp_dir;
+#else
+  const auto* tmpdir = getenv("TMPDIR");
+  if (tmpdir == nullptr) tmpdir = "/tmp";
+  return tmpdir;
+#endif
 }
 
 #if defined(_WIN32)
