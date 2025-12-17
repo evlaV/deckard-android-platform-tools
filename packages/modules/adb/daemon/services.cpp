@@ -289,10 +289,6 @@ unique_fd daemon_service_to_fd(std::string_view name, atransport* transport) {
         return StartSubprocess(cmd, nullptr, SubprocessType::kRaw, SubprocessProtocol::kNone);
     } else if (android::base::ConsumePrefix(&name, "reboot:")) {
         return reboot_device(std::string(name));
-    } else if (name.starts_with("root:")) {
-        return create_service_thread("root", restart_root_service);
-    } else if (name.starts_with("unroot:")) {
-        return create_service_thread("unroot", restart_unroot_service);
     } else if (android::base::ConsumePrefix(&name, "backup:")) {
         std::string cmd = "/system/bin/bu backup ";
         cmd += name;
@@ -330,6 +326,10 @@ unique_fd daemon_service_to_fd(std::string_view name, atransport* transport) {
         }
         return create_jdwp_connection_fd(pid);
 #endif
+    } else if (android::base::ConsumePrefix(&name, "root")) {
+        return create_service_thread("root", restart_root_service);
+    } else if (android::base::ConsumePrefix(&name, "unroot")) {
+        return create_service_thread("unroot", restart_unroot_service);
     } else if (android::base::ConsumePrefix(&name, "shell")) {
         return ShellService(name, transport);
     } else if (android::base::ConsumePrefix(&name, "exec:")) {

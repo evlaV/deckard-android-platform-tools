@@ -26,20 +26,42 @@
 #include <log/log_properties.h>
 
 #include "adb_io.h"
+#include "adb_utils.h"
 #include "adb_unique_fd.h"
+
+// Include this utility from `daemon/main.cpp`
+extern bool allow_root_service();
+
+static void set_root_and_restart(bool root) {
+#if defined(__ANDROID__)
+    // Android has a special codepath that selects the `shell` user
+    android::base::SetProperty("service.adb.root", root ? "1" : "0");
+#else
+    const char * rooted_path = "/run/adbd/rooted";
+
+    // Create or unlink our rooted path.
+    if (root) {
+        adb_close(adb_creat(rooted_path, S_IRUSR));
+    } else {
+        adb_unlink(rooted_path);
+    }
+    exit(0);
+#endif
+}
 
 void restart_root_service(unique_fd fd) {
     if (getuid() == 0) {
         WriteFdExactly(fd.get(), "adbd is already running as root\n");
         return;
     }
-    if (!__android_log_is_debuggable()) {
+
+    if (!allow_root_service()) {
         WriteFdExactly(fd.get(), "adbd cannot run as root in production builds\n");
         return;
     }
 
     LOG(INFO) << "adbd restarting as root";
-    android::base::SetProperty("service.adb.root", "1");
+    set_root_and_restart(true);
     WriteFdExactly(fd.get(), "restarting adbd as root\n");
 }
 
@@ -50,7 +72,7 @@ void restart_unroot_service(unique_fd fd) {
     }
 
     LOG(INFO) << "adbd restarting as nonroot";
-    android::base::SetProperty("service.adb.root", "0");
+    set_root_and_restart(false);
     WriteFdExactly(fd.get(), "restarting adbd as non root\n");
 }
 

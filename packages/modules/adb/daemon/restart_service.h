@@ -18,9 +18,10 @@
 
 #include "adb_unique_fd.h"
 
-#if defined(__ANDROID__)
 void restart_root_service(unique_fd fd);
 void restart_unroot_service(unique_fd fd);
+
+#if defined(__ANDROID__)
 void restart_tcp_service(unique_fd fd, int port);
 void restart_usb_service(unique_fd fd);
 #endif

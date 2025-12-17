@@ -31,6 +31,10 @@
 #include <sys/capability.h>
 #include <sys/prctl.h>
 
+// For privilege dropping on Linux
+#include <pwd.h>
+#include <grp.h>
+
 #include <memory>
 #include <vector>
 
@@ -61,10 +65,36 @@
 #include "daemon/mdns.h"
 #include "daemon/watchdog.h"
 
-#if defined(__ANDROID__)
 static const char* root_seclabel = nullptr;
 
+// We only allow running adb as root if one of the following is true:
+//  * ADB_ALLOW_ROOT=true
+//  * ADB_ALLOW_ROOT_SENTINEL_FILE is a file that exists.
+bool allow_root_service() {
+#if defined(__ANDROID__)
+    return __android_log_is_debuggable();
+#else
+    const char* adb_allow_root = getenv("ADB_ALLOW_ROOT");
+    if (adb_allow_root == NULL)
+        adb_allow_root = "false";
+    if (strcmp(adb_allow_root, "true") == 0)
+        return true;
+
+    // This is provided so that devicetree devices can surface an advanced
+    // boot option that forces adbd into rooted mode.
+    const char* adb_force_root_path = getenv("ADB_FORCE_ROOT_PATH");
+    if (adb_force_root_path != NULL) {
+        struct stat buf;
+        if (stat(adb_force_root_path, &buf) == 0) {
+            return true;
+        }
+    }
+    return false;
+#endif
+}
+
 static bool should_drop_privileges() {
+#if defined(__ANDROID__)
     // The properties that affect `adb root` and `adb unroot` are ro.secure and
     // ro.debuggable. In this context the names don't make the expected behavior
     // particularly obvious.
@@ -92,11 +122,33 @@ static bool should_drop_privileges() {
     if (adb_unroot) {
         drop = true;
     }
-
     return drop;
+#else
+    // If `allow_root_service()` is true, and our root sentinel file exists, or
+    // the force root sentinel file exists, return false so we don't drop privileges.
+    if (allow_root_service()) {
+        const char* root_sentinel_path = "/run/adbd/rooted";
+        struct stat buf;
+        if (stat(root_sentinel_path, &buf) == 0) {
+            return false;
+        }
+
+        const char* adb_force_root_path = getenv("ADB_FORCE_ROOT_PATH");
+        if (adb_force_root_path != NULL) {
+            struct stat buf;
+            if (stat(adb_force_root_path, &buf) == 0) {
+                return false;
+            }
+        }
+    }
+
+    // Otherwise, return `true` and drop privileges.
+    return true;
+#endif
 }
 
 static void drop_privileges(int server_port) {
+#if defined(__ANDROID__)
     ScopedMinijail jail(minijail_new());
 
     // Add extra groups:
@@ -167,8 +219,50 @@ static void drop_privileges(int server_port) {
             }
         }
     }
-}
+#else
+    const char * adb_user = getenv("ADB_USER");
+    struct passwd *pw = NULL;
+
+    // Try to look up a user provided by `ADB_USER`.
+    if (adb_user != NULL) {
+        pw = getpwnam(adb_user);
+
+        // If that fails, die immediately:
+        if (pw == NULL) {
+            LOG(FATAL) << "Could not find unprivileged user by name (" << adb_user << ")";
+        }
+    } else {
+        // If none is given, force `root` mode, unless allow root is not turned on.
+        if (!allow_root_service()) {
+            LOG(FATAL) << "No unprivileged user defined and root operation not allowed!";
+        }
+    }
+
+    // Ensure that /run/adbd exists with the correct permissions so that we can write to it.
+    // If there's no ADB user to set it to, we set it to root.
+    mkdirs("/run/adbd");
+    chmod("/run/adbd", 0700);
+
+    if (pw != NULL && should_drop_privileges()) {
+        // Make sure we can write out the root sentinel file after we've dropped privileges
+        chown("/run/adbd", pw->pw_uid, pw->pw_gid);
+
+        // If we're supposed to drop privileges, but we can't find this user, just exit.
+        if (pw == NULL) {
+            LOG(FATAL) << "Could not find user by name (" << adb_user << ")";
+        }
+
+        LOG(INFO) << "Dropping privileges to " << pw->pw_name << " (" << pw->pw_uid << ":" << pw->pw_gid << ")";
+        initgroups(pw->pw_name, pw->pw_gid);
+        setgid(pw->pw_gid);
+        setuid(pw->pw_uid);
+
+        if (!chdir(pw->pw_dir)) {
+            LOG(ERROR) << "Unable to chdir to user's home (" << pw->pw_dir << ")";
+        }
+    }
 #endif
+}
 
 static void setup_adb(const std::vector<std::string>& addrs) {
 #if defined(__ANDROID__)
@@ -235,9 +329,7 @@ int adbd_main(int server_port) {
           " unchanged.\n");
     }
 
-#if defined(__ANDROID__)
     drop_privileges(server_port);
-#endif
 
 #if defined(__ANDROID__)
     // A thread gets spawned as a side-effect of initializing the watchdog, so it needs to happen
