@@ -260,6 +260,14 @@ static void drop_privileges(int server_port) {
         if (!chdir(pw->pw_dir)) {
             LOG(ERROR) << "Unable to chdir to user's home (" << pw->pw_dir << ")";
         }
+
+        // TODO: We should do an actual PAM authentication flow to properly set these up via `pam_systemd`.
+        LOG(INFO) << "Setting psuedo-PAM variables to hook up dbus";
+        char env[64];
+        snprintf(env, sizeof(env), "/run/user/%d", pw->pw_uid);
+        setenv("XDG_RUNTIME_DIR", env, 1);
+        snprintf(env, sizeof(env), "unix:path=/run/user/%d/bus", pw->pw_uid);
+        setenv("DBUS_SESSION_BUS_ADDRESS", env, 1);
     }
 #endif
 }
