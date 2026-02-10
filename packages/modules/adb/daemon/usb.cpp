@@ -443,6 +443,29 @@ struct UsbFfsConnection : public Connection {
 
             std::this_thread::sleep_for(100ms);
 
+            // glibc 2.35+ (unlike bionic) does not respond with `ESRCH` when calling `pthread_kill()`
+            // on a thread that has already exited but is as of yet unjoined.  To address this, on glibc
+            // we use `pthread_timedjoin_np()` to check for liveness, but it would be better to completely
+            // change this `StopWorker()` method to just use atomics or something more reliable.
+            // Be sure to read the `This is a bit of a mess.` comment above to see why sending multiple
+            // signals is actually important.
+#if defined(__GLIBC__)
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 100 * 1000 * 1000;  // 100ms in the future
+            if (ts.tv_nsec >= 1000000000L) {
+                ts.tv_sec += 1;
+                ts.tv_nsec -= 1000000000L;
+            }
+            rc = pthread_timedjoin_np(worker_thread_handle, nullptr, &ts);
+            if (rc == 0) {
+                break;
+            } else if (rc == ETIMEDOUT) {
+                continue;
+            } else if (rc == ESRCH) {
+                LOG(ERROR) << "failed to tryjoin worker: " << strerror(rc);
+            }
+#else
             rc = pthread_kill(worker_thread_handle, 0);
             if (rc == 0) {
                 continue;
@@ -451,6 +474,7 @@ struct UsbFfsConnection : public Connection {
             } else {
                 LOG(ERROR) << "failed to send interruption signal to worker: " << strerror(rc);
             }
+#endif
         }
 
         worker_thread_.join();
