@@ -166,7 +166,9 @@ struct UsbFfsConnection : public Connection {
     ~UsbFfsConnection() {
         LOG(INFO) << "UsbFfsConnection being destroyed";
         Stop();
-        monitor_thread_.join();
+
+        if (monitor_thread_.joinable())
+            monitor_thread_.join();
 
         // We need to explicitly close our file descriptors before we notify our destruction,
         // because the thread listening on the future will immediately try to reopen the endpoint.
@@ -477,7 +479,8 @@ struct UsbFfsConnection : public Connection {
 #endif
         }
 
-        worker_thread_.join();
+        if (worker_thread_.joinable())
+            worker_thread_.join();
     }
 
     void PrepareReadBlock(IoReadBlock* block, uint64_t id) {
