@@ -29,6 +29,29 @@
 
 #include "adb.h"
 
+char* usb_ffs_paths[3] = {NULL};
+const char* USB_FFS_ADB_EP(int id) {
+    if (id < 0 || id > 2)
+        return NULL;
+
+    // When calculating usb-ffs paths, allow `ADB_USB_FFS_DIR` to override the default of `/dev/usb-ffs/adb`
+    if (usb_ffs_paths[id] == NULL) {
+        const char* usb_ffs_adbd_path = getenv("ADB_USB_FFS_DIR");
+        if (usb_ffs_adbd_path == NULL) {
+            usb_ffs_adbd_path = "/dev/usb-ffs/adb";
+        } else {
+            usb_ffs_adbd_path = (const char *)realpath(usb_ffs_adbd_path, NULL);
+        }
+
+        size_t path_len = strlen(usb_ffs_adbd_path)+5;
+        for (int idx=0; idx<=2; idx++) {
+            usb_ffs_paths[idx] = (char *)malloc(path_len);
+            snprintf(usb_ffs_paths[idx], path_len, "%s/ep%d", usb_ffs_adbd_path, idx);
+        }
+    }
+    return (const char *)usb_ffs_paths[id];
+}
+
 #define MAX_PACKET_SIZE_FS 64
 #define MAX_PACKET_SIZE_HS 512
 #define MAX_PACKET_SIZE_SS 1024

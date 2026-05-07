@@ -215,12 +215,10 @@ extern const char* adb_device_banner;
 #define ABB_ARG_DELIMETER ('\0')
 
 #if !ADB_HOST
-#define USB_FFS_ADB_PATH "/dev/usb-ffs/adb/"
-#define USB_FFS_ADB_EP(x) USB_FFS_ADB_PATH #x
-
-#define USB_FFS_ADB_EP0 USB_FFS_ADB_EP(ep0)
-#define USB_FFS_ADB_OUT USB_FFS_ADB_EP(ep1)
-#define USB_FFS_ADB_IN USB_FFS_ADB_EP(ep2)
+extern const char * USB_FFS_ADB_EP(int id);
+#define USB_FFS_ADB_EP0 USB_FFS_ADB_EP(0)
+#define USB_FFS_ADB_OUT USB_FFS_ADB_EP(1)
+#define USB_FFS_ADB_IN USB_FFS_ADB_EP(2)
 #endif
 
 enum class HostRequestResult {
