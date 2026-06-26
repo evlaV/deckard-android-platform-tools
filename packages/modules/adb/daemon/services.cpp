@@ -271,8 +271,201 @@ asocket* daemon_service_to_socket(std::string_view name, atransport* transport) 
     return nullptr;
 }
 
+// SteamOS host is Linux, not Android. Answer Android-only adb requests with help msg.
+
+
+// install / install-create / install-write / install-commit, but not uninstall.
+static bool IsInstallVerb( std::string_view svBody )
+{
+    size_t nPos = 0;
+    while ( ( nPos = svBody.find( "install", nPos ) ) != std::string_view::npos )
+    {
+        bool bPrevUn = nPos >= 2 && svBody[nPos - 1] == 'n' && svBody[nPos - 2] == 'u';
+        if ( !bPrevUn )
+        {
+            return true;
+        }
+        nPos += 7;
+    }
+    return false;
+}
+
+// Splits "svc:body" or "svc,opts:body" into svc and body. False if there's no ':'.
+static bool SplitService( std::string_view svName, std::string_view* psvSvc, std::string_view* psvBody )
+{
+    size_t nColon = svName.find( ':' );
+    if ( nColon == std::string_view::npos )
+    {
+        return false;
+    }
+    *psvSvc = svName.substr( 0, nColon );
+    *psvBody = svName.substr( nColon + 1 );
+    return true;
+}
+
+static bool IsShellService( std::string_view svSvc )
+{
+    return svSvc == "shell" || svSvc.starts_with( "shell," );
+}
+
+// APK install over a raw transport (exec: / abb_exec:), or a manual shell command
+// (adb shell pm install ..., adb shell cmd package install ...). Skip install-incremental.
+// Bails client-side for normal APKs and then falls back to the streamed path.
+static bool IsApkInstall( std::string_view svName )
+{
+    std::string_view svBody;
+    if ( !android::base::ConsumePrefix( &svName, "abb_exec:" ) &&
+         !android::base::ConsumePrefix( &svName, "exec:" ) )
+    {
+        std::string_view svSvc;
+        if ( !SplitService( svName, &svSvc, &svBody ) || !IsShellService( svSvc ) )
+        {
+            return false;
+        }
+    }
+    else
+    {
+        svBody = svName;
+    }
+    if ( svBody.find( "incremental" ) != std::string_view::npos )
+    {
+        return false;
+    }
+    if ( !IsInstallVerb( svBody ) )
+    {
+        return false;
+    }
+    return svBody.find( "pm" ) != std::string_view::npos ||
+           svBody.find( "package" ) != std::string_view::npos;
+}
+
+// Displayed when the user tries to adb install an apk.
+static const std::string k_sGuidanceMultiline =
+    "\n===========================================================\n"
+    "SteamOS is running on this connection.\n"
+    "APKs CAN NOT be installed over adb here.\n"
+    "\n"
+    "To install APKs launch Lepton Development on the device.\n"
+    "Visit https://s.team/lepton for more information.\n"
+    "===========================================================\n";
+
+// Displayed on Unity's "no compatible device" dialog and the device selection dropdown in build settings.
+// Changed slashes to a unicode equivalent so it will render properly in Unity.
+static const std::string k_sGuidanceSingleline =
+    "DOES NOT ACCEPT ADB INSTALL! To install APKs launch Lepton Development. "
+    "https: ∕ ∕ s.team ∕ lepton for more information.";
+
+// A friendly getprop dump Unity can parse.
+// ro.build.version.sdk - a valid int below any real min-SDK. Allows Unity's device check to fail cleanly
+// ro.product.model - the value displayed for the device name in some apps (our help msg)
+static std::string GetpropDump()
+{
+    return "[ro.product.model]: [" + k_sGuidanceSingleline + "]\n"
+           "[ro.build.version.sdk]: [1]\n"
+           "[ro.build.version.release]: [0]\n"
+           "[ro.product.brand]: [SteamOS]\n"
+           "[ro.product.manufacturer]: [Valve]\n"
+           "[ro.product.device]: [steamframe]\n"
+           "[ro.product.name]: [steamframe]\n"
+           "[ro.product.cpu.abi]: [arm64-v8a]\n"
+           "[ro.product.cpu.abilist]: [arm64-v8a]\n"
+           "[ro.product.cpu.abilist64]: [arm64-v8a]\n"
+           "[ro.product.cpu.abilist32]: []\n"
+           "[ro.build.characteristics]: [default]\n"
+           "[ro.build.fingerprint]: [steamos/steamframe/steamframe:0/0/0:user/release-keys]\n";
+}
+
+// ---- adb interceptor ---------------------------------------------
+static unique_fd ReplyAndClose( std::string sReply )
+{
+    return create_service_thread( "steamos_reply", [sReply = std::move( sReply )]( unique_fd fd )
+    {
+        WriteFdExactly( fd.get(), sReply.data(), sReply.size() );
+    } );
+}
+
+// adb queries this before installing. Answering "false" skips incremental mode,
+// which keeps a couple of confusing error lines off the user's console.
+static bool IsIncrementalProbe( std::string_view svName )
+{
+    return ( svName.starts_with( "abb_exec:" ) || svName.starts_with( "exec:" ) ) &&
+           svName.find( "enable_adb_incremental_install_default" ) != std::string_view::npos;
+}
+
+// Does the shell command start with `svWord` as its own word?
+static bool CommandIs( std::string_view svCmd, std::string_view svWord )
+{
+    if ( !svCmd.starts_with( svWord ) )
+    {
+        return false;
+    }
+    if ( svCmd.size() == svWord.size() )
+    {
+        return true;
+    }
+    char ch = svCmd[svWord.size()];
+    return ch == ' ' || ch == '\t' || ch == ';' || ch == '\n';
+}
+
+// Unity runs a few Android-only commands (getprop, dumpsys) while enumerating the device and treats any non-zero exit as fatal.
+// Rewrite the ones we know about to print something useful and exit 0.
+// Real commands (ls, cat, etc) fall through untouched.
+static bool RewriteAndroidProbe( std::string_view svName, std::string* psOut )
+{
+    std::string_view svSvc, svCmd;
+    if ( !SplitService( svName, &svSvc, &svCmd ) )
+    {
+        return false;
+    }
+    if ( !( svSvc == "exec" || IsShellService( svSvc ) ) )
+    {
+        return false;
+    }
+
+    size_t nLead = svCmd.find_first_not_of( " \t" );
+    if ( nLead == std::string_view::npos )
+    {
+        return false;
+    }
+    std::string_view svRest = svCmd.substr( nLead );
+
+    std::string sPayload;
+    if ( CommandIs( svRest, "getprop" ) )
+    {
+        sPayload = GetpropDump();  // Unity parses this back into properties
+    }
+    else if ( CommandIs( svRest, "dumpsys" ) )
+    {
+        sPayload = k_sGuidanceMultiline;  // just shown, not parsed
+    }
+    else
+    {
+        return false;
+    }
+
+    *psOut = std::string( svSvc ) + ":printf '%s' " + escape_arg( sPayload ) + "; exit 0";
+    return true;
+}
+
 unique_fd daemon_service_to_fd(std::string_view name, atransport* transport) {
     ADB_LOG(Service) << "transport " << transport->serial_name() << " opening service " << name;
+
+#if !defined(__ANDROID__) && !defined(__ANDROID_RECOVERY__)
+    // Handle the Android-only requests before adb's normal dispatch below.
+    if ( IsApkInstall( name ) )
+    {
+        return ReplyAndClose( k_sGuidanceMultiline );
+    }
+    if ( IsIncrementalProbe( name ) )
+    {
+        return ReplyAndClose( "false\n" );
+    }
+    std::string sProbe;
+    if ( RewriteAndroidProbe( name, &sProbe ) )
+    {
+        name = sProbe;
+    }
+#endif
 
 #if defined(__ANDROID__) && !defined(__ANDROID_RECOVERY__)
     if (name.starts_with("abb:") || name.starts_with("abb_exec:")) {
